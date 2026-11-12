@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# STELLA command line — run with: bash stella <command>
+#   bash stella profiles
+#   bash stella projects <profile>
+#   bash stella export <profile> <project> <dir>
+#   bash stella import <export-dir>
+set -euo pipefail
+
+DIR="$(cd "$(dirname "$0")" && pwd)"
+# Resolve symlinks (the `stella` command is a symlink into this folder).
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+cd "$DIR"
+
+if [ -x "$DIR/.venv/bin/python" ]; then
+  PY="$DIR/.venv/bin/python"
+else
+  PY="python3"
+fi
+
+exec "$PY" -m stella.cli "$@"
