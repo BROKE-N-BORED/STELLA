@@ -15,9 +15,12 @@
                                           rows from the local Ollama model
     stella sleep-status <profile> <project>
                                           per-cycle sleep stats
-    stella chat [--model <ollama-tag>]    talk to Stella: the chat sets
+    stella chat [--provider groq|gemini|custom|ollama] [--model <name>]
+                                          talk to Stella: the chat sets
                                           up and runs training for you
-                                          (/quit to exit)
+                                          (/quit to exit). Cloud
+                                          providers need a key saved in
+                                          Settings under AI providers.
 
 Reads STELLA_HOME for the home dir (default ~/.stella).
 """
@@ -364,8 +367,31 @@ def cmd_chat(args) -> int:
     small read-a-line loop. /quit (or Ctrl+C / Ctrl+D) exits."""
     from .chat_agent import ChatAgent
     from .ollama import list_models
+    from .providers import (
+        PROVIDERS,
+        get_custom_config,
+        has_key,
+        missing_key_message,
+    )
 
-    model = args.model or ""
+    store = _store()
+    provider = (args.provider or "ollama").strip() or "ollama"
+    model = (args.model or "").strip()
+    if provider != "ollama":
+        if not model:
+            if provider == "custom":
+                model = get_custom_config(store.home).get("model", "")
+            elif PROVIDERS[provider]["models"]:
+                model = PROVIDERS[provider]["models"][0]
+        if not model:
+            print(
+                "Custom provider needs a model name. Pass --model "
+                "<name>, or set one in Settings under AI providers."
+            )
+            return 1
+        if not has_key(store.home, provider):
+            print(missing_key_message(provider))
+            return 1
     if not model:
         models = list_models()
         if not models:
@@ -387,7 +413,7 @@ def cmd_chat(args) -> int:
             print(f"No model called {picked!r}.")
             return 1
         model = picked
-    agent = ChatAgent(_store(), model)
+    agent = ChatAgent(store, model, provider=provider)
     print(
         "Hi. Tell me what you want to train, and I will set it up "
         "and run it for you. Type /quit to exit."
@@ -514,8 +540,14 @@ def build_parser() -> argparse.ArgumentParser:
         "for you (/quit to exit)",
     )
     p.add_argument("--model", default="",
-                   help="Ollama tag to chat with (if left out, Stella "
-                   "asks which installed model to use)")
+                   help="model to chat with (if left out, Stella asks "
+                   "which installed model to use; for Groq and Gemini "
+                   "the first suggested model is used)")
+    p.add_argument("--provider", default="ollama",
+                   choices=["ollama", "groq", "gemini", "custom"],
+                   help="where the chat model runs: on this PC "
+                   "(ollama), or a cloud provider with your key "
+                   "(groq, gemini, custom)")
     p.set_defaults(func=cmd_chat)
     return parser
 

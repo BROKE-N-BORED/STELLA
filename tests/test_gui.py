@@ -743,6 +743,9 @@ class FakeChatAgent:
     def set_model(self, model):
         pass
 
+    def set_provider(self, provider, model):
+        pass
+
     def set_callbacks(self, on_narration=None, on_progress=None):
         pass
 
@@ -898,16 +901,132 @@ def test_settings_window_chat_model_picker(window, monkeypatch):
         gui_mod, "list_models", lambda: ["lfm3:1.7b", "qwen3.5:2b"]
     )
     settings_win = window.open_settings_window()
-    # Nothing selected by default.
+    # Nothing selected by default. The list is grouped: an Ollama
+    # header + 2 models, a Groq header + 3, a Gemini header + 3.
+    # No key saved, so the cloud models are greyed out.
     assert settings_win.chat_combo.currentIndex() == -1
-    assert settings_win.chat_combo.count() == 2
-    settings_win.chat_combo.setCurrentText("qwen3.5:2b")
+    assert settings_win.chat_combo.count() == 11
+    combo = settings_win.chat_combo
+    assert combo.itemText(0) == "On this PC (Ollama)"
+    assert not combo.model().item(0).isEnabled()
+    assert combo.itemData(1) == "ollama|lfm3:1.7b"
+    assert combo.model().item(1).isEnabled()
+    assert combo.itemText(3) == "Groq"
+    assert combo.itemData(4) == "groq|llama-3.3-70b-versatile"
+    assert not combo.model().item(4).isEnabled()
+    assert combo.itemText(7) == "Gemini"
+    combo.setCurrentText("qwen3.5:2b")
     assert window.chat_model == "qwen3.5:2b"
+    assert window.chat_provider == "ollama"
     settings_win.close()
     # Reopening restores the saved pick.
     again = window.open_settings_window()
     assert again.chat_combo.currentText() == "qwen3.5:2b"
     again.close()
+
+
+def test_settings_providers_save_and_remove(window, monkeypatch):
+    import stella.gui as gui_mod
+    from stella.providers import get_key, has_key
+
+    monkeypatch.setattr(gui_mod, "list_models", lambda: [])
+    settings_win = window.open_settings_window()
+    assert settings_win._key_status["groq"].text() == "No key saved."
+    settings_win._key_fields["groq"].setText("test-key-123")
+    settings_win._provider_buttons["groq"]["save"].click()
+    assert get_key(window.store.home, "groq") == "test-key-123"
+    assert settings_win._key_status["groq"].text() == "Saved."
+    # The key field is cleared after saving: it never shows the key.
+    assert settings_win._key_fields["groq"].text() == ""
+    # Saving a key ungreys that provider's models in the picker.
+    combo = settings_win.chat_combo
+    groq_index = combo.findData("groq|llama-3.3-70b-versatile")
+    assert groq_index >= 0
+    assert combo.model().item(groq_index).isEnabled()
+    settings_win._provider_buttons["groq"]["remove"].click()
+    assert not has_key(window.store.home, "groq")
+    assert settings_win._key_status["groq"].text() == "No key saved."
+    settings_win.close()
+
+
+def test_settings_providers_save_empty_key_asks(window, monkeypatch):
+    import stella.gui as gui_mod
+
+    monkeypatch.setattr(gui_mod, "list_models", lambda: [])
+    settings_win = window.open_settings_window()
+    settings_win._provider_buttons["gemini"]["save"].click()
+    assert settings_win._key_status["gemini"].text() == "Paste a key first."
+    settings_win.close()
+
+
+def test_settings_providers_test_shows_result(window, monkeypatch, qapp):
+    import time
+
+    import stella.gui as gui_mod
+    from stella.providers import save_key
+
+    monkeypatch.setattr(gui_mod, "list_models", lambda: [])
+    monkeypatch.setattr(
+        gui_mod, "test_connection",
+        lambda pid, home=None: (True, "Groq answered. Your key works."),
+    )
+    save_key(window.store.home, "groq", "test-key-123")
+    settings_win = window.open_settings_window()
+    settings_win._provider_buttons["groq"]["test"].click()
+    deadline = 5000
+    while (
+        settings_win._key_status["groq"].text() == "Testing..."
+        and deadline > 0
+    ):
+        qapp.processEvents()
+        deadline -= 50
+        time.sleep(0.05)
+    assert settings_win._key_status["groq"].text() == (
+        "Groq answered. Your key works."
+    )
+    settings_win.close()
+
+
+def test_settings_providers_custom_row(window, monkeypatch):
+    import stella.gui as gui_mod
+    from stella.providers import get_custom_config, get_key
+
+    monkeypatch.setattr(gui_mod, "list_models", lambda: [])
+    settings_win = window.open_settings_window()
+    settings_win._custom_base.setText("https://example.com/v1")
+    settings_win._custom_model.setText("my-model")
+    settings_win._key_fields["custom"].setText("test-key-123")
+    settings_win._provider_buttons["custom"]["save"].click()
+    assert get_key(window.store.home, "custom") == "test-key-123"
+    assert get_custom_config(window.store.home) == {
+        "base_url": "https://example.com/v1",
+        "model": "my-model",
+    }
+    # The custom model now appears in the picker, enabled.
+    combo = settings_win.chat_combo
+    index = combo.findData("custom|my-model")
+    assert index >= 0
+    assert combo.model().item(index).isEnabled()
+    settings_win.close()
+
+
+def test_chat_window_matches_cloud_model_name(window, monkeypatch, qapp):
+    import stella.gui as gui_mod
+    from stella.gui import ChatWindow
+    from stella.providers import save_key
+
+    monkeypatch.setattr(gui_mod, "list_models", lambda: ["lfm3:1.7b"])
+    save_key(window.store.home, "groq", "test-key-123")
+    assert window.chat_model == ""
+    chat = ChatWindow(window)
+    chat.show()
+    qapp.processEvents()
+    chat.input.setText("llama-3.3-70b-versatile")
+    chat.send_btn.click()
+    qapp.processEvents()
+    assert window.chat_model == "llama-3.3-70b-versatile"
+    assert window.chat_provider == "groq"
+    chat.close()
 
 
 def test_chat_window_has_no_em_dash(window, qapp):

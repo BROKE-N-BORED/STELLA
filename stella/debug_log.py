@@ -21,7 +21,9 @@ this module implements.
 Stella copy: verbatim from the BNB T21 drop-in except two strings,
 changed for Stella rule U33 (no em-dashes in user-visible text):
 the report header reads "DEBUG REPORT:" and a present secret reads
-"[REDACTED], present".
+"[REDACTED], present". Plus a v0.7 addition: scrub patterns for
+Groq (gsk_...) and Google (AIza...) API keys, since the chat takes
+those keys.
 
 Usage (library):
 
@@ -84,6 +86,11 @@ _SCRUB_PATTERNS = [
     (re.compile(r"(?i)([?&]token=)[^&\s]+"), r"\1" + REDACTED),
     # sk-... style API keys
     (re.compile(r"sk-[A-Za-z0-9_\-]{16,}"), REDACTED),
+    # Groq API keys (gsk_...) and Google API keys (AIza...).
+    # Stella v0.7 addition: the chat takes Groq and Gemini keys,
+    # so a bare pasted key must be caught even outside a header.
+    (re.compile(r"gsk_[A-Za-z0-9]{16,}"), REDACTED),
+    (re.compile(r"AIza[A-Za-z0-9_\-]{20,}"), REDACTED),
     # GitHub personal access tokens
     (re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"), REDACTED),
     # user:password@ in a URL

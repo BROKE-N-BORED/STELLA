@@ -1,8 +1,10 @@
 """STELLA provider chat: an AI chat that sets up and runs training.
 
 The user talks, the chat does the work. The agent loop talks to a
-LOCAL Ollama model (the /api/chat endpoint, see ollama.py) and the
-model drives Stella's engine through tools. Small local models do
+model: on this PC through Ollama, or a cloud provider (Groq,
+Gemini, or a custom OpenAI-compatible service) with the user's own
+key, see providers.py. The model drives Stella's engine through
+tools. Small local models do
 not reliably support native tool calling, so the protocol is plain
 text the model can actually emit: a fenced ```tool block holding
 one JSON object {"tool": name, "args": {...}}. The agent parses it,
@@ -30,8 +32,9 @@ import re
 from .gguf import export_gguf
 from .howto import topic_text, topic_titles
 from .model import StellaError, Store, slug_from_model
-from .ollama import OllamaError, chat as ollama_chat, list_models
+from .ollama import OllamaError, list_models
 from .probe import probe_gate, probe_project
+from .providers import ProviderError, make_chat_fn
 from .provision import (
     format_size,
     hub_available,
@@ -275,10 +278,12 @@ def build_system_prompt(
 class ChatAgent:
     """The agent loop: model reply, tool call, tool result, repeat.
 
-    `chat_fn(model, messages) -> str` is the Ollama call; tests pass
-    a scripted fake. `on_narration(text)` is called with plain-words
-    updates while work runs (the GUI shows them in the chat).
-    `on_progress(text)` is called with training/sleep progress lines.
+    `chat_fn(model, messages) -> str` is the model call: Ollama by
+    default, or the provider named by `provider` (Groq, Gemini,
+    custom). Tests pass a scripted fake. `on_narration(text)` is
+    called with plain-words updates while work runs (the GUI shows
+    them in the chat). `on_progress(text)` is called with
+    training/sleep progress lines.
     """
 
     def __init__(
@@ -286,6 +291,7 @@ class ChatAgent:
         store: Store,
         model: str,
         *,
+        provider: str = "ollama",
         profile: str | None = None,
         project: str | None = None,
         chat_fn=None,
@@ -294,9 +300,15 @@ class ChatAgent:
     ):
         self.store = store
         self.model = model
+        self.provider = provider or "ollama"
         self.current_profile = profile
         self.current_project = project
-        self._chat_fn = chat_fn or ollama_chat
+        # A supplied chat_fn (tests, fakes) is kept as-is; otherwise
+        # the function comes from the provider, and follows later
+        # provider switches. A missing key surfaces as a plain-words
+        # ProviderError when the chat runs, never here.
+        self._default_chat_fn = chat_fn is None
+        self._chat_fn = chat_fn or make_chat_fn(self.provider, store.home)
         self._on_narration = on_narration
         self._on_progress = on_progress
         self._history: list[dict] = []
@@ -307,6 +319,13 @@ class ChatAgent:
     def set_model(self, model: str) -> None:
         """The user picked a different chat model."""
         self.model = model
+
+    def set_provider(self, provider: str, model: str) -> None:
+        """The user picked a different chat provider + model."""
+        self.provider = provider or "ollama"
+        self.model = model
+        if self._default_chat_fn:
+            self._chat_fn = make_chat_fn(self.provider, self.store.home)
 
     def set_callbacks(self, on_narration=None, on_progress=None) -> None:
         """Wire narration/progress callbacks (the GUI worker does
@@ -355,7 +374,7 @@ class ChatAgent:
                 return "Stopped. Tell me what you want to do next."
             try:
                 text = self._chat_fn(self.model, self._messages())
-            except OllamaError as exc:
+            except (OllamaError, ProviderError) as exc:
                 reply = str(exc)
                 self._history.append({"role": "assistant", "content": reply})
                 return reply

@@ -37,6 +37,11 @@ job, export it as a usable package.
   the 8-step training template one step at a time. Say just do it
   and it runs the whole thing. Pick the chat model in Settings.
   `stella-cli chat` is the same agent as a terminal chat.
+- v0.7.0 provider connections (2026-11-13): the chat can also talk
+  to Groq, Gemini, or any OpenAI-compatible service with your own
+  key. Add keys in Settings under AI providers; they stay on this
+  PC in a private file. `stella-cli chat --provider groq --model
+  <name>` is the terminal form.
 
 ## Install
 

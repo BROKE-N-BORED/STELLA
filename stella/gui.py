@@ -14,9 +14,10 @@ profile + project). The session is remembered across restarts via
 QSettings — that is the user's own pick coming back, not a default:
 on first run nothing is selected at all.
 
-No web UI, no network beyond localhost Ollama and the Hugging Face
-download. No "&" in any visible label — Qt eats a bare & as a
-mnemonic marker. No em-dashes in any visible text.
+No web UI. Network: localhost Ollama, the Hugging Face download,
+and any cloud chat provider the user adds a key for (Groq, Gemini,
+or a custom service). No "&" in any visible label — Qt eats a bare
+& as a mnemonic marker. No em-dashes in any visible text.
 
 Training, sleep, and model downloads run off the GUI thread (worker
 threads / a subprocess) so the window stays responsive; they only
@@ -83,6 +84,16 @@ from .model import (
     slug_from_model,
 )
 from .ollama import list_models, ollama_url
+from .providers import (
+    PROVIDERS,
+    get_custom_config,
+    has_key,
+    load_providers,
+    provider_presence,
+    remove_key,
+    save_key,
+    test_connection,
+)
 from .train import TrainController
 
 
@@ -923,7 +934,19 @@ class SettingsWindow(QDialog):
         self._main = main
         self.setWindowTitle("Settings")
         self.setMinimumWidth(480)
-        layout = QVBoxLayout(self)
+        # The settings no longer fit a 768 px tall screen, so the
+        # content scrolls and Close stays pinned underneath. Without
+        # the scroll area the form rows overlap when the dialog is
+        # squeezed to the screen height.
+        self.resize(560, 680)
+        outer = QVBoxLayout(self)
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        inner = QWidget()
+        layout = QVBoxLayout(inner)
+        scroll.setWidget(inner)
+        outer.addWidget(scroll, 1)
 
         layout.addWidget(QLabel("Where Stella keeps things"))
         self.home_label = QLabel(str(main.store.home))
@@ -973,16 +996,33 @@ class SettingsWindow(QDialog):
         layout.addWidget(QLabel("Chat model"))
         self.chat_combo = QComboBox()
         self.chat_combo.setPlaceholderText("Pick a model for chat")
-        self.chat_combo.currentTextChanged.connect(self._on_chat_model_changed)
+        self.chat_combo.currentIndexChanged.connect(self._on_chat_model_changed)
         layout.addWidget(self.chat_combo)
         layout.addWidget(
             _help_label(
-                "The model the Chat window talks to. It runs on your PC "
-                "through Ollama. A bigger model answers better but "
-                "slower. Nothing is picked until you pick one."
+                "The model the Chat window talks to. Models on this PC "
+                "run through Ollama. Groq and Gemini models need a key, "
+                "added below under AI providers: greyed out models need "
+                "a key first. Nothing is picked until you pick one."
             )
         )
         self._load_chat_models()
+
+        layout.addWidget(QLabel("AI providers"))
+        self._key_fields: dict[str, QLineEdit] = {}
+        self._key_status: dict[str, QLabel] = {}
+        self._provider_buttons: dict[str, dict[str, QPushButton]] = {}
+        self._test_workers: dict[str, JobWorker] = {}
+        self._custom_base = QLineEdit()
+        self._custom_model = QLineEdit()
+        self._build_provider_rows(layout)
+        layout.addWidget(
+            _help_label(
+                "Your keys stay on this PC in a private file. They only "
+                "leave the PC to talk to that provider, and never appear "
+                "in a debug report."
+            )
+        )
 
         layout.addWidget(QLabel("Debug report"))
         self.debug_btn = QPushButton("Write debug report")
@@ -997,39 +1037,190 @@ class SettingsWindow(QDialog):
 
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.close)
-        layout.addWidget(close_btn)
+        outer.addWidget(close_btn)
         layout.addStretch(1)
 
         self.refresh_ollama_status()
+
+    def _build_provider_rows(self, layout):
+        """One row per keyed provider: a password-style key field,
+        Save, Test, Remove, and a status line. Custom adds a base
+        URL and a model name, since any OpenAI-compatible service
+        can live there. The key field is always blank: it only ever
+        takes a NEW key, never shows the saved one."""
+        home = self._main.store.home
+        for pid in ("groq", "gemini"):
+            display = PROVIDERS[pid]["display"]
+            layout.addWidget(QLabel(display))
+            field = QLineEdit()
+            field.setEchoMode(QLineEdit.Password)
+            field.setPlaceholderText(f"Paste your {display} key here")
+            layout.addWidget(field)
+            self._key_fields[pid] = field
+            self._add_provider_buttons(layout, pid)
+        custom = get_custom_config(home)
+        layout.addWidget(QLabel("Custom (any OpenAI-compatible service)"))
+        self._custom_base.setPlaceholderText(
+            "Address, for example https://example.com/v1"
+        )
+        self._custom_base.setText(custom.get("base_url", ""))
+        layout.addWidget(self._custom_base)
+        layout.addWidget(
+            _help_label("The service address, without /chat/completions.")
+        )
+        self._custom_model.setPlaceholderText("Model name")
+        self._custom_model.setText(custom.get("model", ""))
+        layout.addWidget(self._custom_model)
+        layout.addWidget(
+            _help_label("The model name that service knows.")
+        )
+        field = QLineEdit()
+        field.setEchoMode(QLineEdit.Password)
+        field.setPlaceholderText("Paste your key for this service here")
+        layout.addWidget(field)
+        self._key_fields["custom"] = field
+        self._add_provider_buttons(layout, "custom")
+
+    def _add_provider_buttons(self, layout, pid):
+        row = QHBoxLayout()
+        save_btn = QPushButton("Save")
+        save_btn.clicked.connect(lambda: self._on_provider_save(pid))
+        row.addWidget(save_btn)
+        test_btn = QPushButton("Test")
+        test_btn.clicked.connect(lambda: self._on_provider_test(pid))
+        row.addWidget(test_btn)
+        remove_btn = QPushButton("Remove")
+        remove_btn.clicked.connect(lambda: self._on_provider_remove(pid))
+        row.addWidget(remove_btn)
+        layout.addLayout(row)
+        self._provider_buttons[pid] = {
+            "save": save_btn,
+            "test": test_btn,
+            "remove": remove_btn,
+        }
+        status = QLabel(
+            "Key saved." if has_key(self._main.store.home, pid)
+            else "No key saved."
+        )
+        status.setWordWrap(True)
+        layout.addWidget(status)
+        self._key_status[pid] = status
+
+    def _on_provider_save(self, pid):
+        key = self._key_fields[pid].text().strip()
+        status = self._key_status[pid]
+        if not key:
+            status.setText("Paste a key first.")
+            return
+        try:
+            if pid == "custom":
+                save_key(
+                    self._main.store.home,
+                    pid,
+                    key,
+                    base_url=self._custom_base.text(),
+                    model=self._custom_model.text(),
+                )
+            else:
+                save_key(self._main.store.home, pid, key)
+        except StellaError as exc:
+            status.setText(f"That did not save: {exc}")
+            return
+        self._key_fields[pid].clear()
+        status.setText("Saved.")
+        self._load_chat_models()
+
+    def _on_provider_test(self, pid):
+        status = self._key_status[pid]
+        status.setText("Testing...")
+        home = self._main.store.home
+
+        def _run(log):
+            _ok, message = test_connection(pid, home=home)
+            return message
+
+        worker = JobWorker(_run, parent=self)
+        worker.finished.connect(lambda _ok, msg: status.setText(msg))
+        self._test_workers[pid] = worker
+        worker.start()
+
+    def _on_provider_remove(self, pid):
+        remove_key(self._main.store.home, pid)
+        self._key_fields[pid].clear()
+        self._key_status[pid].setText("No key saved.")
+        self._load_chat_models()
 
     def refresh_ollama_status(self):
         self.ollama_status.setText(f"Status: {check_ollama(ollama_url())}")
         self._load_chat_models()
 
     def _load_chat_models(self):
-        """Fill the chat-model list from Ollama. Nothing is selected
-        by default: the saved pick is restored, or the box stays
-        blank until the user picks one."""
-        saved = self._main.chat_model
+        """Fill the chat-model list, grouped by provider: models on
+        this PC (Ollama) first, then Groq, Gemini, and Custom. A
+        provider with no key saved shows its models greyed out.
+        Nothing is selected by default: the saved pick is restored,
+        or the box stays blank until the user picks one."""
+        saved_provider = self._main.chat_provider or "ollama"
+        saved_model = self._main.chat_model
+        home = self._main.store.home
         self.chat_combo.blockSignals(True)
         try:
             self.chat_combo.clear()
-            models = list_models()
-            if models:
-                self.chat_combo.addItems(models)
-            if saved and saved in models:
-                self.chat_combo.setCurrentText(saved)
+            model = self.chat_combo.model()
+
+            def add_header(text):
+                self.chat_combo.addItem(text)
+                item = model.item(self.chat_combo.count() - 1)
+                item.setEnabled(False)
+
+            def add_model(provider, name, enabled=True):
+                # One string as the item data: Qt mangles tuples
+                # stored as user data, so provider and model ride
+                # together separated by "|".
+                self.chat_combo.addItem(name, f"{provider}|{name}")
+                item = model.item(self.chat_combo.count() - 1)
+                item.setEnabled(enabled)
+
+            add_header("On this PC (Ollama)")
+            for name in list_models():
+                add_model("ollama", name)
+            for pid in ("groq", "gemini"):
+                add_header(PROVIDERS[pid]["display"])
+                enabled = has_key(home, pid)
+                for name in PROVIDERS[pid]["models"]:
+                    add_model(pid, name, enabled)
+            custom = load_providers(home).get("custom", {})
+            if isinstance(custom, dict) and custom.get("model"):
+                add_header("Custom")
+                add_model(
+                    "custom",
+                    custom["model"],
+                    bool(custom.get("api_key")),
+                )
+            index = self.chat_combo.findData(
+                f"{saved_provider}|{saved_model}"
+            )
+            if index >= 0:
+                self.chat_combo.setCurrentIndex(index)
             else:
                 self.chat_combo.setCurrentIndex(-1)
         finally:
             self.chat_combo.blockSignals(False)
 
-    def _on_chat_model_changed(self, text):
-        if text:
-            self._main.set_chat_model(text)
+    def _on_chat_model_changed(self, index):
+        if index < 0:
+            return
+        data = self.chat_combo.itemData(index)
+        if isinstance(data, str) and "|" in data:
+            provider, _sep, model = data.partition("|")
+            self._main.set_chat_provider(provider)
+            self._main.set_chat_model(model)
 
     def _on_debug_report(self):
         try:
+            self._main.debug_log.set_setting(
+                "chat_providers", provider_presence(self._main.store.home)
+            )
             path = self._main.debug_log.generate_report()
         except Exception as exc:  # noqa: BLE001 - show it, don't crash
             QMessageBox.warning(
@@ -1039,6 +1230,14 @@ class SettingsWindow(QDialog):
         QMessageBox.information(
             self, "Stella", f"Debug report written to:\n{path}"
         )
+
+    def closeEvent(self, event):
+        # A key test still running when the window closes must finish
+        # first: a QThread destroyed while running aborts the app.
+        for worker in list(self._test_workers.values()):
+            if worker.isRunning():
+                worker.wait(30000)
+        super().closeEvent(event)
 
 
 class HowToUseWindow(QDialog):
@@ -1070,9 +1269,9 @@ class HowToUseWindow(QDialog):
 
 class ChatWorker(QThread):
     """Runs one ChatAgent.reply off the GUI thread. The agent talks
-    to Ollama (up to 120 s per call) and may start training, so it
-    must never run on the UI thread. Only talks to the window
-    through signals."""
+    to the chat provider (up to 120 s per call) and may start
+    training, so it must never run on the UI thread. Only talks to
+    the window through signals."""
 
     narration = Signal(str)
     progress = Signal(str)
@@ -1106,9 +1305,10 @@ class ChatWindow(QDialog):
     needs and does the rest. The agent runs in a worker thread; the
     window only shows messages and sends input.
 
-    The chat model comes from Settings (chat/model). If none is
-    picked yet, the window asks the user which installed model to
-    use instead of failing: the first message just names the model.
+    The chat model comes from Settings (chat/provider + chat/model).
+    If none is picked yet, the window asks the user which installed
+    model to use instead of failing: the first message just names
+    the model.
     """
 
     def __init__(self, main, parent=None, agent_factory=None):
@@ -1151,9 +1351,10 @@ class ChatWindow(QDialog):
         layout.addLayout(input_row)
         layout.addWidget(
             _help_label(
-                "The chat talks to a model on your PC through Ollama. "
-                "It can set up and run training for you. Say just do "
-                "it and it runs the whole thing."
+                "The chat talks to the model you pick in Settings: a "
+                "model on this PC through Ollama, or Groq or Gemini "
+                "with your key. It can set up and run training for "
+                "you. Say just do it and it runs the whole thing."
             )
         )
         self._append(
@@ -1188,26 +1389,42 @@ class ChatWindow(QDialog):
                 "Stella",
                 "Ollama is not answering, so I cannot see which models "
                 "are installed. Start Ollama, then pick a chat model in "
-                "Settings.",
+                "Settings. You can also add a Groq or Gemini key in "
+                "Settings under AI providers and chat with one of those.",
             )
             return
         self._awaiting_model = True
         self._append(
             "Stella",
             "Which model should I chat with? Type one of these:\n"
-            + "\n".join(f"- {name}" for name in models),
+            + "\n".join(f"- {name}" for name in models)
+            + "\n\nYou can also pick a Groq or Gemini model in "
+            "Settings, under AI providers.",
         )
 
-    def _match_model(self, text: str) -> str | None:
-        """The user's reply, matched against the installed models."""
-        models = list_models()
+    def _match_model(self, text: str) -> tuple[str, str] | None:
+        """The user's reply, matched against the models the chat can
+        use: installed Ollama models first, then cloud models with a
+        saved key. Returns (provider, model), or None."""
         cleaned = text.strip().lower()
+        models = list_models()
         for name in models:
             if cleaned == name.lower():
-                return name
+                return ("ollama", name)
         hits = [name for name in models if cleaned in name.lower()]
         if len(hits) == 1:
-            return hits[0]
+            return ("ollama", hits[0])
+        home = self._main.store.home
+        for pid in ("groq", "gemini"):
+            if not has_key(home, pid):
+                continue
+            for name in PROVIDERS[pid]["models"]:
+                if cleaned == name.lower():
+                    return (pid, name)
+        custom = get_custom_config(home)
+        if custom.get("model") and has_key(home, "custom"):
+            if cleaned == custom["model"].lower():
+                return ("custom", custom["model"])
         return None
 
     # -- sending ----------------------------------------------------
@@ -1217,6 +1434,7 @@ class ChatWindow(QDialog):
         return ChatAgent(
             self._main.store,
             self._main.chat_model,
+            provider=self._main.chat_provider or "ollama",
             profile=self._main._current_profile,
             project=self._main._current_project,
         )
@@ -1248,15 +1466,19 @@ class ChatWindow(QDialog):
                 )
                 return
             self._awaiting_model = False
-            self._main.set_chat_model(match)
+            provider, model = match
+            self._main.set_chat_provider(provider)
+            self._main.set_chat_model(model)
             self._append(
                 "Stella",
-                f"Got it, I will chat with {match}. What do you want "
+                f"Got it, I will chat with {model}. What do you want "
                 "to train?",
             )
             return
         agent = self._ensure_agent()
-        agent.set_model(self._main.chat_model)
+        agent.set_provider(
+            self._main.chat_provider or "ollama", self._main.chat_model
+        )
         # Follow the main window's session when it has one: clicking
         # a project in the tree steers the chat too.
         if self._main._current_profile:
@@ -2029,6 +2251,15 @@ class MainWindow(QMainWindow):
 
     def set_chat_model(self, tag: str):
         self.settings.setValue("chat/model", tag)
+
+    @property
+    def chat_provider(self) -> str:
+        """The chat provider the user picked in Settings, or "".
+        Blank means Ollama, the local provider."""
+        return self.settings.value("chat/provider", "") or ""
+
+    def set_chat_provider(self, provider: str):
+        self.settings.setValue("chat/provider", provider or "")
 
     def open_chat_window(self):
         if self._chat_window is None:

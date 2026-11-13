@@ -58,10 +58,17 @@ the model:
 Say just do it and the chat runs the whole list with the defaults
 and the sample dataset, telling you which step it is on.
 
-The chat runs on a model on your PC through Ollama, so how smart
-it is depends on which model you pick. Pick the chat model in
-Settings, or the chat asks you when you open it. A bigger model
-answers better but slower.
+The chat talks to a model you pick in Settings. It can be a model
+on this PC through Ollama, or a cloud model: Groq or Gemini with
+your own key. Add keys in Settings, under AI providers. Your keys
+stay on this PC in a private file. They only leave the PC to talk
+to that provider, and never appear in a debug report. Custom lets
+you point the chat at any other service that works like OpenAI:
+paste its address, key, and model name there.
+
+How smart the chat is depends on which model you pick. A bigger
+model answers better but slower. Pick the chat model in Settings,
+or the chat asks you when you open it.
 
 Honest limits: the chat can only do what Stella's engine does.
 It cannot train a model that does not fit in 8 GB, it cannot make

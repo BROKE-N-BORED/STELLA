@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.7.0 — 2026-11-13
+
+Provider connections: the chat can talk to Groq, Gemini, or any
+OpenAI-compatible service with your own key, as well as to a model
+on this PC through Ollama.
+
+- New `stella/providers.py`: provider registry, key storage, and
+  chat clients. Keys live only in `~/.stella/providers.json`,
+  file mode 0600, and never appear in code, exports, or debug
+  reports. Groq and Gemini speak the OpenAI chat shape (Gemini
+  through Google's OpenAI-compatible endpoint, key as the Bearer
+  token). Custom takes any base URL, key, and model name.
+- Settings gains an AI providers section: one row per keyed
+  provider with a password-style key field, Save, Test (one tiny
+  call, run off the UI thread), and Remove. A short line says the
+  keys stay on this PC.
+- The chat-model picker now groups models by provider: On this PC
+  (Ollama), then Groq, Gemini, and Custom. A provider with no key
+  saved shows its models greyed out.
+- ChatAgent takes a provider + model; a missing key is a plain-words
+  message naming Settings, never a crash. `stella-cli chat` takes
+  `--provider groq|gemini|custom|ollama` and `--model`.
+- Debug-log scrubber now also redacts bare Groq (gsk_...) and
+  Google (AIza...) keys.
+
 ## v0.6.0 — 2026-11-13
 
 Provider chat: an AI chat inside Stella that sets up and runs
