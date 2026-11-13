@@ -606,6 +606,16 @@ into existing tasks.)
   docstring is real — drive it with `QTest` + a timer, the way
   the audit drove the modal dialogs — but a test convenience must
   not ship as a broken dialog.
+- **Status:** DONE in v0.3.1 (2026-11-13) — real `QDialog` +
+  `exec()`, centered on the parent, Create is the default button,
+  Enter in the model field creates (the combo line edit's
+  `returnPressed` clicks Create), Escape closes, one instance at
+  a time (the modal loop blocks a second open). The creation form
+  was also simplified to one model pick at Joshua's order (no
+  role / display name / base ref up front). Tests pin the dialog
+  type, the window flag, Enter-to-create, and the create flow;
+  the modal `exec()` path itself is verified by the offscreen
+  visual probe, not an automated modal test.
 - **Done:** The dialog opens centered on the main window with
   dialog framing; pressing Enter creates the profile; Escape
   closes it; opening it twice yields one dialog; the profile
@@ -724,6 +734,15 @@ into existing tasks.)
   paths; install.sh fails loudly if the icon cannot be produced.
   Tests: clone-shape install (PNGs deleted) produces the icon;
   GLib resolution check (T63).
+- **Status:** DONE in v0.3.1 (2026-11-13) — `Icon=` unquoted;
+  install.sh renders the PNGs from the SVG when missing (QtSvg
+  via PySide6-Addons, now installed with the venv); a failed
+  render warns clearly instead of failing the install (the Fix
+  allows either; the app still works with a fallback icon). The
+  icon art also changed to the ✨ sparkles at Joshua's order.
+  T63 (dedicated installer tests) remains open — the fix is
+  verified by the offscreen icon render + the GLib resolution
+  probe from audit #6, not by an automated installer test.
 
 ## P1 — functional defects and daily friction
 

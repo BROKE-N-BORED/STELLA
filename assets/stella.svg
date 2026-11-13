@@ -1,21 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
-  <!-- STELLA icon: a four-point spark star over a deep night sky.
-       Hand-drawn for Stella v0.1. Gold star, violet halo, navy field. -->
-  <rect x="8" y="8" width="496" height="496" rx="96" fill="#14102a"/>
-  <rect x="8" y="8" width="496" height="496" rx="96" fill="none" stroke="#b48fdd" stroke-width="6" opacity="0.55"/>
-  <!-- halo -->
-  <circle cx="256" cy="256" r="170" fill="#b48fdd" opacity="0.14"/>
-  <circle cx="256" cy="256" r="120" fill="#ffd479" opacity="0.12"/>
-  <!-- main spark star -->
-  <path d="M256 72 L282 212 L422 238 L282 264 L256 404 L230 264 L90 238 L230 212 Z"
-        fill="#ffd479" stroke="#fff3c4" stroke-width="4" stroke-linejoin="round"/>
-  <!-- small sparks -->
-  <path d="M392 110 L401 143 L434 152 L401 161 L392 194 L383 161 L350 152 L383 143 Z"
-        fill="#ffffff" opacity="0.95"/>
-  <path d="M110 330 L118 357 L145 365 L118 373 L110 400 L102 373 L75 365 L102 357 Z"
-        fill="#b48fdd" opacity="0.95"/>
-  <circle cx="150" cy="130" r="7" fill="#ffffff" opacity="0.8"/>
-  <circle cx="360" cy="370" r="6" fill="#ffffff" opacity="0.8"/>
-  <circle cx="420" cy="300" r="5" fill="#ffd479" opacity="0.9"/>
-  <circle cx="96" cy="210" r="5" fill="#ffd479" opacity="0.9"/>
+  <!-- STELLA icon: the ✨ sparkles — one big, one small, gold on
+       transparent. Hand-drawn for Stella v0.3.1. -->
+  <path d="M205 20 Q238 172 390 205 Q238 238 205 390 Q172 238 20 205 Q172 172 205 20 Z"
+        fill="#ffc93c" stroke="#e8a90c" stroke-width="8" stroke-linejoin="round"/>
+  <path d="M375 280 Q392 358 470 375 Q392 392 375 470 Q358 392 280 375 Q358 358 375 280 Z"
+        fill="#ffd95e" stroke="#e8a90c" stroke-width="6" stroke-linejoin="round"/>
 </svg>

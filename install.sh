@@ -34,7 +34,7 @@ if [ ! -x "$DIR/.venv/bin/python" ]; then
 fi
 
 "$DIR/.venv/bin/python" -m pip install --quiet --upgrade pip
-"$DIR/.venv/bin/python" -m pip install --quiet PySide6-Essentials
+"$DIR/.venv/bin/python" -m pip install --quiet PySide6-Essentials PySide6-Addons
 
 # Fatal check: the GUI toolkit must import, or the install has failed.
 if ! "$DIR/.venv/bin/python" -c "import PySide6; from PySide6 import QtWidgets" 2>/dev/null; then
@@ -43,7 +43,20 @@ if ! "$DIR/.venv/bin/python" -c "import PySide6; from PySide6 import QtWidgets" 
   exit 1
 fi
 
+# Icon PNGs: the release zip ships them, but a fresh clone has only
+# the SVG — render them now so the launcher never points at a
+# missing file. (Needs QtSvg, which is why PySide6-Addons is above.)
+# A failed render only warns: the app still works, the icon just
+# falls back to the system default.
+if [ ! -f "$DIR/assets/stella.png" ]; then
+  if ! "$DIR/.venv/bin/python" "$DIR/render_icon.py" >/dev/null 2>&1; then
+    echo "WARNING: could not render the app icon from assets/stella.svg." >&2
+  fi
+fi
+
 # App-menu launcher (absolute paths — no quoting tricks needed).
+# NOTE: Icon= must NOT be quoted. GLib strips quotes from Exec= but
+# NOT from Icon=, so a quoted Icon= shows the generic gear icon.
 mkdir -p "$HOME/.local/share/applications"
 cat > "$HOME/.local/share/applications/stella.desktop" <<EOF
 [Desktop Entry]
@@ -51,15 +64,21 @@ Type=Application
 Name=Stella
 Comment=Fine-tune models on your own PC
 Exec="$DIR/run.sh"
-Icon="$DIR/assets/stella.png"
+Icon=$DIR/assets/stella.png
 Terminal=false
 Categories=Utility;
 StartupWMClass=Stella
+StartupNotify=false
 EOF
 
 # Desktop copy for double-click launch from the desktop too.
+# Cinnamon/Nemo refuse to launch an untrusted .desktop file, so the
+# copy is made executable AND marked trusted.
 cp "$HOME/.local/share/applications/stella.desktop" "$HOME/Desktop/Stella.desktop" 2>/dev/null || true
 chmod +x "$HOME/Desktop/Stella.desktop" 2>/dev/null || true
+if command -v gio >/dev/null 2>&1; then
+  gio set "$HOME/Desktop/Stella.desktop" metadata::trusted true 2>/dev/null || true
+fi
 
 # Command line: `stella` on PATH after install.
 mkdir -p "$HOME/.local/bin"

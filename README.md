@@ -20,6 +20,11 @@ job, export it as a usable package.
   synthetic rows from the local Ollama model, and check every cycle
   against old rows before accepting it. Same closer as Item 3 — the
   real LFM3 sleep run happens on your PC.
+- v0.3.1 usability patch (2026-11-13, from the first real-PC run):
+  New Profile is a real window that asks for one thing (pick a
+  model); every profile and project field explains itself in plain
+  words; new ✨ icon; installer fixes (unquoted Icon=, trusted
+  desktop launcher, no launch timeout).
 
 ## Install
 
@@ -29,7 +34,7 @@ folder (or run one short command in a terminal inside the folder):
 `bash install.sh`
 
 That sets up Stella's own Python environment, puts **Stella** in the
-app menu with its star icon, and puts a **Stella** icon on the desktop.
+app menu with its ✨ sparkles icon, and puts a **Stella** icon on the desktop.
 After that, just click it — no terminal needed to run Stella.
 
 To launch from a terminal instead:

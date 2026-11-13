@@ -193,3 +193,115 @@ def test_start_sleep_gated_on_save_failure(window, monkeypatch):
     assert window._sleep_worker is None
     assert warnings
     assert "Learning rate" in warnings[0]
+
+
+def test_new_profile_dialog_is_a_real_window(window, qapp):
+    """Regression: the New Profile form must be a real QDialog window,
+    not a QWidget child smearing over the main window (T11)."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QDialog
+
+    from stella.gui import NewProfileDialog
+
+    dialog = NewProfileDialog(window)
+    assert isinstance(dialog, QDialog)
+    dialog.show()
+    qapp.processEvents()
+    assert dialog.windowFlags() & Qt.Window
+    assert dialog.isWindow()
+    dialog.close()
+
+
+def test_new_profile_dialog_asks_only_for_a_model(window):
+    """No role, no display name, no name field at creation."""
+    from stella.gui import NewProfileDialog
+
+    dialog = NewProfileDialog(window)
+    assert not hasattr(dialog, "role_combo")
+    assert not hasattr(dialog, "display_edit")
+    assert not hasattr(dialog, "name_edit")
+    assert hasattr(dialog, "model_combo")
+    dialog.close()
+
+
+def test_create_profile_from_hf_repo(window, seeded):
+    from PySide6.QtWidgets import QDialog
+
+    from stella.gui import NewProfileDialog
+
+    dialog = NewProfileDialog(window)
+    dialog.model_combo.setCurrentText("LiquidAI/LFM3-1.7B")
+    assert dialog.name_note.text() == "Profile name: lfm3-1-7b"
+    window._create_profile_from(dialog)
+    assert dialog.result() == QDialog.Accepted
+    data = seeded.get_profile("lfm3-1-7b")
+    assert data["base_ref"] == "LiquidAI/LFM3-1.7B"
+    assert data["ollama_tag"] == ""
+    assert data["display_name"] == "lfm3-1-7b"
+    assert data["role"] == ""
+
+
+def test_create_profile_from_ollama_tag(window, seeded):
+    from stella.gui import NewProfileDialog
+
+    dialog = NewProfileDialog(window)
+    dialog.model_combo.setCurrentText("qwen3.5:4b")
+    window._create_profile_from(dialog)
+    data = seeded.get_profile("qwen3-5-4b")
+    assert data["ollama_tag"] == "qwen3.5:4b"
+
+
+def test_create_profile_name_collision_gets_suffix(window, seeded):
+    from stella.gui import NewProfileDialog
+
+    for _ in range(2):
+        dialog = NewProfileDialog(window)
+        dialog.model_combo.setCurrentText("LiquidAI/LFM3-1.7B")
+        window._create_profile_from(dialog)
+    assert seeded.get_profile("lfm3-1-7b")
+    assert seeded.get_profile("lfm3-1-7b-2")
+
+
+def test_create_profile_empty_model_warns(window, monkeypatch):
+    from stella.gui import NewProfileDialog
+
+    warnings = []
+    monkeypatch.setattr(window, "_warn", warnings.append)
+    dialog = NewProfileDialog(window)
+    dialog.model_combo.setCurrentText("")
+    window._create_profile_from(dialog)
+    assert warnings == ["Pick a model first."]
+    assert [p["name"] for p in window.store.list_profiles()] == ["lfm3-tool"]
+
+
+def test_project_form_greyed_out_without_project(window):
+    window._current_project = None
+    window._show_project_detail()
+    assert not window.proj_rank.isEnabled()
+    assert not window.save_project_btn.isEnabled()
+    # Greyed-out, the panel shows the defaults a new project gets.
+    assert window.proj_rank.value() == 8
+    assert window.proj_lr.text() == "0.0002"
+    assert window.proj_epochs.value() == 3
+    assert window.proj_seq.value() == 1024
+
+
+def test_full_method_cannot_be_picked(window):
+    assert window.proj_method.itemText(1) == "full"
+    assert not window.proj_method.model().item(1).isEnabled()
+
+
+def test_profile_panel_has_no_processor_field(window):
+    assert not hasattr(window, "prof_processor")
+
+
+def test_new_profile_enter_creates(window, seeded):
+    """Enter in the model field creates the profile (T11: Enter works)."""
+    from stella.gui import NewProfileDialog
+
+    dialog = NewProfileDialog(window)
+    assert dialog.create_btn.isDefault()
+    dialog.create_btn.clicked.connect(lambda: window._create_profile_from(dialog))
+    dialog.model_combo.setCurrentText("qwen3.5:4b")
+    dialog.model_combo.lineEdit().returnPressed.emit()
+    assert seeded.get_profile("qwen3-5-4b")

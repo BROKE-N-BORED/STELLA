@@ -159,3 +159,14 @@ def test_path_escape_blocked(store):
             store.profile_dir(evil)
     # Nothing escaped: home holds only profiles/.
     assert sorted(p.name for p in store.home.iterdir()) == ["profiles"]
+
+
+def test_slug_from_model():
+    from stella.model import slug_from_model
+
+    assert slug_from_model("LiquidAI/LFM3-1.7B") == "lfm3-1-7b"
+    assert slug_from_model("maternion/minicpm5-heretic:2b") == "minicpm5-heretic-2b"
+    assert slug_from_model("qwen3.5:4b") == "qwen3-5-4b"
+    assert slug_from_model("lfm3") == "lfm3"
+    assert slug_from_model("  Qwen/Qwen3-0.6B  ") == "qwen3-0-6b"
+    assert slug_from_model("!!!") == "profile"

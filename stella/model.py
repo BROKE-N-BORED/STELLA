@@ -26,7 +26,7 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
-STELLA_VERSION = "0.3"
+STELLA_VERSION = "0.3.1"
 
 # Slug: lowercase letters, digits, dash, underscore. Must start alnum.
 # No dots, no slashes — a slug can never climb out of its directory.
@@ -90,6 +90,25 @@ def validate_slug(name: str, kind: str = "name") -> str:
             "or number"
         )
     return slug
+
+
+def slug_from_model(model: str) -> str:
+    """Derive a profile slug from a model id (Ollama tag or HF repo).
+
+    Takes the last path segment (drops the namespace), lowercases it,
+    and turns every run of non-slug characters into one dash:
+    ``LiquidAI/LFM3-1.7B`` -> ``lfm3-1-7b``,
+    ``maternion/minicpm5-heretic:2b`` -> ``minicpm5-heretic-2b``,
+    ``qwen3.5:4b`` -> ``qwen3-5-4b``. Always returns a valid slug.
+    """
+    value = model.strip().lower()
+    if "/" in value:
+        value = value.rsplit("/", 1)[1]
+    value = re.sub(r"[^a-z0-9]+", "-", value).strip("-")
+    if not value:
+        value = "profile"
+    value = value[:MAX_SLUG_LEN].rstrip("-")
+    return value or "profile"
 
 
 def _check_inside(home: Path, path: Path) -> Path:

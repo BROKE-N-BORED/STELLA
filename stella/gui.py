@@ -20,10 +20,12 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
@@ -45,62 +47,77 @@ from PySide6.QtWidgets import (
 )
 
 from . import export as export_mod
-from .model import METAMORPH_MODES, STELLA_VERSION, StellaError, Store
+from .model import (
+    METAMORPH_MODES,
+    STELLA_VERSION,
+    StellaError,
+    Store,
+    slug_from_model,
+)
 from .ollama import list_models
 from .train import TrainController
 
-ROLE_SUGGESTIONS = [
-    "driver",
-    "reviewer",
-    "vision",
-    "fast",
-    "all-rounder",
-    "generalist",
-    "utility",
-    "tester",
-]
 
+class NewProfileDialog(QDialog):
+    """The New Profile form, as a real window: pick a model, done.
 
-class NewProfileDialog(QWidget):
-    """Small inline form used by the New Profile flow (kept a QWidget so
-    tests can drive it without a modal loop)."""
+    It used to be a plain QWidget shown as a child of the main window,
+    which rendered as a frameless smear over the main window on a real
+    PC (the New Profile fields overlapped the profile list). A QDialog
+    gets its own window frame and title bar, and exec() makes it modal,
+    so the form is always readable and the main window waits for it.
+
+    And it used to demand a role, a display name, and a base ref up
+    front. It doesn't anymore: the profile's name comes from the model,
+    and role/display/base can be changed later in the profile panel.
+    One pick, one button.
+    """
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("New profile")
-        layout = QFormLayout(self)
-        self.name_edit = QLineEdit()
-        self.name_edit.setPlaceholderText("lfm3-tool (lowercase, dashes ok)")
-        self.display_edit = QLineEdit()
-        self.role_combo = QComboBox()
-        self.role_combo.setEditable(True)
-        self.role_combo.addItems([""] + ROLE_SUGGESTIONS)
-        self.tag_combo = QComboBox()
-        self.tag_combo.setEditable(True)
-        models = list_models()
-        if models:
-            self.tag_combo.addItems(models)
-        else:
-            self.tag_combo.addItem("")
-        self.tag_note = QLabel(
-            "Ollama is not answering — type the tag by hand."
-            if not models
-            else "Installed on this PC — pick one, or type a tag."
+        self.installed_models = list_models()
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Pick a model — that's all it takes."))
+        self.model_combo = QComboBox()
+        self.model_combo.setEditable(True)
+        if self.installed_models:
+            self.model_combo.addItems(self.installed_models)
+        self.model_combo.setPlaceholderText(
+            "Pick an installed model, or type a Hugging Face repo "
+            "like LiquidAI/LFM3-1.7B"
         )
-        self.base_edit = QLineEdit()
-        self.base_edit.setPlaceholderText("Same as the tag, unless the base lives elsewhere")
-        layout.addRow("Name", self.name_edit)
-        layout.addRow("Display name", self.display_edit)
-        layout.addRow("Role", self.role_combo)
-        layout.addRow("Ollama tag", self.tag_combo)
-        layout.addRow("", self.tag_note)
-        layout.addRow("Base ref", self.base_edit)
+        self.model_combo.setMinimumWidth(420)
+        layout.addWidget(self.model_combo)
+        if not self.installed_models:
+            layout.addWidget(
+                QLabel("Ollama is not answering — type the model by hand.")
+            )
+        self.name_note = QLabel("")
+        layout.addWidget(self.name_note)
+        self.model_combo.currentTextChanged.connect(self._update_name_note)
+        self._update_name_note()
         buttons = QHBoxLayout()
         self.create_btn = QPushButton("Create profile")
+        self.create_btn.setDefault(True)
+        # Enter in the model field must create too: the combo's line
+        # edit eats Return, so the default button alone won't fire.
+        self.model_combo.lineEdit().returnPressed.connect(
+            self.create_btn.click
+        )
         self.cancel_btn = QPushButton("Cancel")
         buttons.addWidget(self.create_btn)
         buttons.addWidget(self.cancel_btn)
-        layout.addRow("", buttons)
+        layout.addLayout(buttons)
+
+    def _update_name_note(self):
+        model = self.model_combo.currentText().strip()
+        if model:
+            self.name_note.setText(
+                f"Profile name: {slug_from_model(model)}"
+            )
+        else:
+            self.name_note.setText("")
 
 
 class TrainWorker(QThread):
@@ -302,6 +319,9 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.store = store or Store()
         self.setWindowTitle(f"STELLA {STELLA_VERSION} — fine-tune models on your PC")
+        icon_path = Path(__file__).resolve().parent.parent / "assets" / "stella.png"
+        if icon_path.exists():
+            self.setWindowIcon(QIcon(str(icon_path)))
         self.resize(1100, 680)
         self.setMinimumSize(900, 540)
         self._current_profile: str | None = None
@@ -390,18 +410,50 @@ class MainWindow(QMainWindow):
     def _build_detail(self):
         self.detail_layout.addWidget(QLabel("Profile"))
         prof_form = QFormLayout()
+
+        def _help(text):
+            label = QLabel(text)
+            label.setStyleSheet("color: #9a9a9a; font-size: 11px;")
+            label.setWordWrap(True)
+            return label
+
         self.prof_display = QLineEdit()
         self.prof_role = QLineEdit()
         self.prof_role.setPlaceholderText("driver, reviewer, vision...")
         self.prof_tag = QComboBox()
         self.prof_tag.setEditable(True)
         self.prof_base = QLineEdit()
-        self.prof_processor = QLineEdit()
         prof_form.addRow("Display name", self.prof_display)
+        prof_form.addRow(
+            "", _help("Just a label for the list. It already says the model's name.")
+        )
         prof_form.addRow("Role", self.prof_role)
+        prof_form.addRow(
+            "",
+            _help(
+                "Only matters if Code Forge uses this profile as a seat "
+                "(driver, reviewer…). Leave blank otherwise."
+            ),
+        )
         prof_form.addRow("Ollama tag", self.prof_tag)
+        prof_form.addRow(
+            "",
+            _help(
+                "The model as Ollama knows it on this PC. "
+                "Used for dreaming and the refusal probe."
+            ),
+        )
         prof_form.addRow("Base ref", self.prof_base)
-        prof_form.addRow("Processor", self.prof_processor)
+        prof_form.addRow(
+            "",
+            _help(
+                "Where training loads the base model from — a Hugging Face "
+                "repo like LiquidAI/LFM3-1.7B. Needed before you train."
+            ),
+        )
+        # No Processor row: the stored field exists but nothing in
+        # Stella reads it — showing it only asked a question nobody
+        # could answer. It stays in profile.json for compatibility.
         self.detail_layout.addLayout(prof_form)
         self.save_profile_btn = QPushButton("Save profile")
         self.save_profile_btn.clicked.connect(self.save_profile)
@@ -414,6 +466,10 @@ class MainWindow(QMainWindow):
         self.proj_dataset.setPlaceholderText("path or name of the training data")
         self.proj_method = QComboBox()
         self.proj_method.addItems(["lora", "full"])
+        # "full" is not feasible on this PC (and train.py never reads
+        # the setting anyway — it always trains LoRA). Keep it listed
+        # so old projects still show it, but nobody new can pick it.
+        self.proj_method.model().item(1).setEnabled(False)
         self.proj_rank = QSpinBox()
         self.proj_rank.setRange(1, 64)
         self.proj_lr = QLineEdit()
@@ -426,18 +482,63 @@ class MainWindow(QMainWindow):
         self.proj_metamorph = QComboBox()
         self.proj_metamorph.addItems(list(METAMORPH_MODES))
         self.proj_metamorph.setToolTip(
-            "MetaMorphAi: morph turns the base into variants, "
-            "compress shrinks how the fine-tune is stored, both does both."
+            "MetaMorphAi modes aren't wired up yet — this is stored "
+            "but training ignores it."
         )
         proj_form.addRow("Display name", self.proj_display)
+        proj_form.addRow("", _help("Just a label for the project list."))
         proj_form.addRow("Dataset", self.proj_dataset)
+        proj_form.addRow(
+            "",
+            _help(
+                "The training data — a .jsonl file of examples. "
+                "The Train panel below has a sample to try."
+            ),
+        )
         proj_form.addRow("Method", self.proj_method)
+        proj_form.addRow(
+            "",
+            _help(
+                "lora trains a small adapter on top of the base — the "
+                "only way that fits this PC."
+            ),
+        )
         proj_form.addRow("LoRA rank", self.proj_rank)
+        proj_form.addRow(
+            "",
+            _help(
+                "How big the adapter is. 8 is the usual — bigger learns "
+                "more but uses more RAM."
+            ),
+        )
         proj_form.addRow("Learning rate", self.proj_lr)
+        proj_form.addRow(
+            "",
+            _help(
+                "How big each training step is. 0.0002 is the usual — "
+                "bigger learns faster but can wreck the model."
+            ),
+        )
         proj_form.addRow("Epochs", self.proj_epochs)
+        proj_form.addRow(
+            "", _help("How many full passes over the data. 3 is the usual.")
+        )
         proj_form.addRow("Batch size", self.proj_batch)
+        proj_form.addRow(
+            "", _help("Examples per training step. 1 fits this PC — leave it.")
+        )
         proj_form.addRow("Max seq len", self.proj_seq)
+        proj_form.addRow(
+            "", _help("Longest example, in tokens. 1024 is the usual.")
+        )
         proj_form.addRow("MetaMorphAi", self.proj_metamorph)
+        proj_form.addRow(
+            "",
+            _help(
+                "Does nothing yet — the modes aren't wired to training. "
+                "Leave it alone for now."
+            ),
+        )
         self.detail_layout.addLayout(proj_form)
         self.save_project_btn = QPushButton("Save project")
         self.save_project_btn.clicked.connect(self.save_project)
@@ -446,6 +547,29 @@ class MainWindow(QMainWindow):
         self.proj_notes = QPlainTextEdit()
         self.proj_notes.setMinimumHeight(120)
         self.detail_layout.addWidget(self.proj_notes)
+        # The forms grey out when nothing is selected, so an empty
+        # panel never looks like real settings (the spinboxes used to
+        # show 1 / 1 / 128, which were just their minimums).
+        self._profile_widgets = [
+            self.prof_display,
+            self.prof_role,
+            self.prof_tag,
+            self.prof_base,
+            self.save_profile_btn,
+        ]
+        self._project_widgets = [
+            self.proj_display,
+            self.proj_dataset,
+            self.proj_method,
+            self.proj_rank,
+            self.proj_lr,
+            self.proj_epochs,
+            self.proj_batch,
+            self.proj_seq,
+            self.proj_metamorph,
+            self.proj_notes,
+            self.save_project_btn,
+        ]
 
         # Train panel (Item 3): dataset, Start / Pause / Resume,
         # progress, checkpoints, GGUF export, refusal probe, log.
@@ -607,13 +731,14 @@ class MainWindow(QMainWindow):
         self._show_project_detail()
 
     def _show_profile_detail(self):
+        for w in self._profile_widgets:
+            w.setEnabled(bool(self._current_profile))
         self.prof_tag.clear()
         models = list_models()
         if models:
             self.prof_tag.addItems(models)
         if not self._current_profile:
-            for w in (self.prof_display, self.prof_role, self.prof_base,
-                      self.prof_processor):
+            for w in (self.prof_display, self.prof_role, self.prof_base):
                 w.setText("")
             self.prof_tag.setCurrentText("")
             return
@@ -629,13 +754,23 @@ class MainWindow(QMainWindow):
             self.prof_tag.addItem(tag)
         self.prof_tag.setCurrentText(tag)
         self.prof_base.setText(p.get("base_ref", ""))
-        self.prof_processor.setText(p.get("processor", ""))
 
     def _show_project_detail(self):
-        if not self._current_profile or not self._current_project:
-            for w in (self.proj_display, self.proj_dataset, self.proj_lr):
+        has_project = bool(self._current_profile and self._current_project)
+        for w in self._project_widgets:
+            w.setEnabled(has_project)
+        if not has_project:
+            for w in (self.proj_display, self.proj_dataset):
                 w.setText("")
             self.proj_notes.setPlainText("")
+            # Greyed-out, the panel shows the defaults a new project
+            # gets — not the spinbox minimums (1 / 1 / 128), which
+            # looked like real settings.
+            self.proj_rank.setValue(8)
+            self.proj_lr.setText("0.0002")
+            self.proj_epochs.setValue(3)
+            self.proj_batch.setValue(1)
+            self.proj_seq.setValue(1024)
             if self._current_profile:
                 self._say(f"Profile: {self._current_profile} — no project yet.")
             else:
@@ -677,7 +812,6 @@ class MainWindow(QMainWindow):
                 role=self.prof_role.text().strip(),
                 ollama_tag=self.prof_tag.currentText().strip(),
                 base_ref=self.prof_base.text().strip(),
-                processor=self.prof_processor.text().strip(),
             )
         except StellaError as exc:
             self._warn(str(exc))
@@ -728,29 +862,40 @@ class MainWindow(QMainWindow):
     # -- profile actions --------------------------------------------
     def new_profile(self):
         dialog = NewProfileDialog(self)
-        dialog.setWindowModality(Qt.WindowModal)
         dialog.create_btn.clicked.connect(lambda: self._create_profile_from(dialog))
-        dialog.cancel_btn.clicked.connect(dialog.close)
-        dialog.resize(420, 320)
-        dialog.show()
+        dialog.cancel_btn.clicked.connect(dialog.reject)
+        dialog.resize(460, 200)
+        center = self.geometry().center()
+        dialog.move(center.x() - dialog.width() // 2,
+                    center.y() - dialog.height() // 2)
+        dialog.exec()
         self._profile_dialog = dialog
 
     def _create_profile_from(self, dialog: NewProfileDialog):
-        name = dialog.name_edit.text()
+        model = dialog.model_combo.currentText().strip()
+        if not model:
+            self._warn("Pick a model first.")
+            return
+        # An installed model — or a bare tag — is an Ollama tag; a
+        # namespaced id that isn't installed is a Hugging Face repo.
+        if model in dialog.installed_models or "/" not in model:
+            tag, ref = model, ""
+        else:
+            tag, ref = "", model
+        slug = slug_from_model(model)
+        base = slug
+        i = 2
+        while (self.store.profile_dir(slug) / "profile.json").exists():
+            slug = f"{base}-{i}"
+            i += 1
         try:
-            self.store.create_profile(
-                name,
-                ollama_tag=dialog.tag_combo.currentText().strip(),
-                role=dialog.role_combo.currentText().strip(),
-                display_name=dialog.display_edit.text().strip(),
-                base_ref=dialog.base_edit.text().strip(),
-            )
+            self.store.create_profile(slug, ollama_tag=tag, base_ref=ref)
         except StellaError as exc:
             self._warn(str(exc))
             return
-        dialog.close()
-        self._current_profile = name.strip().lower()
-        self._say(f"Created profile {self._current_profile}.")
+        dialog.accept()
+        self._current_profile = slug
+        self._say(f"Created profile {slug}.")
         self.refresh_profiles()
 
     def rename_profile(self):

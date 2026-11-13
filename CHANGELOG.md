@@ -1,5 +1,36 @@
 # Changelog
 
+## v0.3.1 — 2026-11-13
+
+Real-PC usability patch, from Joshua's first run on his Mint PC.
+The v0.3 window opened, but the New Profile form rendered as a
+garbled smear over the main window, the desktop icon showed the
+generic gear, and the desktop launcher was untrusted.
+
+- New Profile is a real window now (QDialog + exec()), not a
+  frameless QWidget child — the form can no longer smear over the
+  main window (merged-list T11, audit #4 W1).
+- New Profile asks for ONE thing: pick a model. No role, no display
+  name, no base ref up front — the profile's name comes from the
+  model (`LiquidAI/LFM3-1.7B` -> `lfm3-1-7b`), a clash gets `-2`,
+  and role/display/base can be changed later in the profile panel.
+  An installed model becomes the Ollama tag; a namespaced id that
+  isn't installed becomes the Hugging Face base ref.
+- The profile panel explains itself: one plain line under Display
+  name, Role, Ollama tag, and Base ref saying what each one is for.
+  The Processor row is gone — nothing in Stella ever read that
+  field, so showing it only asked a question nobody could answer.
+  The stored value stays in profile.json for compatibility.
+- New icon: the ✨ sparkles (gold, on transparent), in the SVG,
+  all PNG sizes, the window title bar, and the launcher.
+- Installer fixes (merged-list T14): `Icon=` is unquoted (GLib
+  never stripped quotes from Icon=, which is why the menu showed
+  the gear); `StartupNotify=false` so a slow cold start no longer
+  trips a "Timeout was reached" launch error; the desktop launcher
+  is marked trusted with gio so Cinnamon stops asking; and
+  install.sh renders the icon PNGs from the SVG when they're
+  missing (fresh clone), using QtSvg from PySide6-Addons.
+
 ## v0.3 — 2026-11-13
 
 Sleep phase (Item 4): consolidate new rows without forgetting old ones.
