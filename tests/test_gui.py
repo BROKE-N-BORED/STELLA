@@ -129,6 +129,7 @@ def test_menu_has_expected_actions_in_order(window):
         "Import package...",
         "Settings...",
         "How to Use Stella...",
+        "Chat...",
     ]
     separators = [a for a in window.menu.actions() if a.isSeparator()]
     assert len(separators) == 3
@@ -161,7 +162,7 @@ def test_menu_howto_opens_howto_window(window):
     window._menu_action_howto.trigger()
     assert window._howto_window is not None
     assert window._howto_window.isVisible()
-    assert window._howto_window.topic_list.count() == 10
+    assert window._howto_window.topic_list.count() == 11
 
 
 # -- session --------------------------------------------------------
@@ -348,11 +349,11 @@ def test_settings_window_shows_home_and_defaults(window, seeded):
 
 def test_howto_window_lists_topics_and_shows_content(window):
     win = window.open_howto_window()
-    assert win.topic_list.count() == 10
+    assert win.topic_list.count() == 11
     assert win.topic_list.item(0).text() == "Getting started"
     win.topic_list.setCurrentRow(0)
     assert "Stella" in win.content.toPlainText()
-    win.topic_list.setCurrentRow(4)
+    win.topic_list.setCurrentRow(5)
     assert win.topic_list.currentItem().text() == "Training"
     assert "hours" in win.content.toPlainText()
     win.close()
@@ -724,3 +725,194 @@ def test_new_profile_enter_creates(window, seeded):
     dialog.model_combo.setCurrentText("qwen3.5:4b")
     dialog.model_combo.lineEdit().returnPressed.emit()
     assert seeded.get_profile("qwen3-5-4b")
+
+
+# -- chat window ------------------------------------------------------
+
+
+class FakeChatAgent:
+    """A stand-in for ChatAgent: instant replies, records cancel."""
+
+    def __init__(self, reply_text="Hello from the fake chat."):
+        self.reply_text = reply_text
+        self.received = []
+        self.cancelled = False
+        self.current_profile = None
+        self.current_project = None
+
+    def set_model(self, model):
+        pass
+
+    def set_callbacks(self, on_narration=None, on_progress=None):
+        pass
+
+    def request_cancel(self):
+        self.cancelled = True
+
+    def reply(self, text):
+        self.received.append(text)
+        return self.reply_text
+
+
+class BlockingChatAgent(FakeChatAgent):
+    """Replies only after cancel is requested (for the Cancel test)."""
+
+    def reply(self, text):
+        import time
+
+        self.received.append(text)
+        deadline = time.time() + 5
+        while not self.cancelled and time.time() < deadline:
+            time.sleep(0.05)
+        return "Stopped."
+
+
+def test_menu_chat_opens_chat_window(window):
+    window._menu_action_chat.trigger()
+    assert window._chat_window is not None
+    assert window._chat_window.isVisible()
+    assert "Chat" in window._chat_window.windowTitle()
+    window._chat_window.close()
+
+
+def test_chat_window_is_single_instance(window):
+    first = window.open_chat_window()
+    second = window.open_chat_window()
+    assert first is second
+    first.close()
+
+
+def _wait_for_text(chat, needle, qapp, timeout_ms=5000):
+    """Poll until the chat shows `needle` (worker threads are slow
+    under sandbox load; a fixed short wait flakes)."""
+    from PySide6.QtTest import QTest
+
+    waited = 0
+    while waited < timeout_ms:
+        QTest.qWait(100)
+        waited += 100
+        if needle in chat.messages.toPlainText():
+            return True
+    return False
+
+
+def test_chat_window_send_receive_fake_agent(window, qapp):
+    from PySide6.QtTest import QTest
+
+    from stella.gui import ChatWindow
+
+    window.set_chat_model("lfm3:1.7b")
+    fake = FakeChatAgent("Training is all set up.")
+    chat = ChatWindow(window, agent_factory=lambda: fake)
+    chat.show()
+    qapp.processEvents()
+    chat.input.setText("train LFM3 on tool calls")
+    chat.send_btn.click()
+    assert _wait_for_text(chat, "Stella: Training is all set up.", qapp)
+    text = chat.messages.toPlainText()
+    assert "You: train LFM3 on tool calls" in text
+    assert fake.received == ["train LFM3 on tool calls"]
+    assert chat.send_btn.isEnabled()
+    assert not chat.cancel_btn.isEnabled()
+    chat.close()
+
+
+def test_chat_window_enter_sends(window, qapp):
+    from stella.gui import ChatWindow
+
+    window.set_chat_model("lfm3:1.7b")
+    fake = FakeChatAgent("Got it.")
+    chat = ChatWindow(window, agent_factory=lambda: fake)
+    chat.show()
+    qapp.processEvents()
+    chat.input.setText("hello")
+    chat.input.returnPressed.emit()
+    assert _wait_for_text(chat, "Stella: Got it.", qapp)
+    assert fake.received == ["hello"]
+    chat.close()
+
+
+def test_chat_window_cancel_stops_worker(window, qapp):
+    from PySide6.QtTest import QTest
+
+    from stella.gui import ChatWindow
+
+    window.set_chat_model("lfm3:1.7b")
+    fake = BlockingChatAgent()
+    chat = ChatWindow(window, agent_factory=lambda: fake)
+    chat.show()
+    qapp.processEvents()
+    chat.input.setText("train everything")
+    chat.send_btn.click()
+    QTest.qWait(300)
+    assert chat.cancel_btn.isEnabled()
+    chat.cancel_btn.click()
+    assert _wait_for_text(chat, "Stopped.", qapp)
+    assert fake.cancelled
+    chat.close()
+
+
+def test_chat_window_asks_for_model_when_none_picked(window, monkeypatch, qapp):
+    import stella.gui as gui_mod
+
+    from stella.gui import ChatWindow
+
+    monkeypatch.setattr(
+        gui_mod, "list_models", lambda: ["lfm3:1.7b", "qwen3.5:2b"]
+    )
+    assert window.chat_model == ""
+    chat = ChatWindow(window)
+    chat.show()
+    qapp.processEvents()
+    assert "Which model should I chat with?" in chat.messages.toPlainText()
+    assert "lfm3:1.7b" in chat.messages.toPlainText()
+    chat.input.setText("lfm3:1.7b")
+    chat.send_btn.click()
+    qapp.processEvents()
+    assert window.chat_model == "lfm3:1.7b"
+    assert "I will chat with lfm3:1.7b" in chat.messages.toPlainText()
+    chat.close()
+
+
+def test_chat_window_rejects_unknown_model_name(window, monkeypatch, qapp):
+    import stella.gui as gui_mod
+
+    from stella.gui import ChatWindow
+
+    monkeypatch.setattr(gui_mod, "list_models", lambda: ["lfm3:1.7b"])
+    chat = ChatWindow(window)
+    chat.show()
+    qapp.processEvents()
+    chat.input.setText("not-a-model")
+    chat.send_btn.click()
+    qapp.processEvents()
+    assert window.chat_model == ""
+    assert "did not find that model" in chat.messages.toPlainText()
+    chat.close()
+
+
+def test_settings_window_chat_model_picker(window, monkeypatch):
+    import stella.gui as gui_mod
+
+    monkeypatch.setattr(
+        gui_mod, "list_models", lambda: ["lfm3:1.7b", "qwen3.5:2b"]
+    )
+    settings_win = window.open_settings_window()
+    # Nothing selected by default.
+    assert settings_win.chat_combo.currentIndex() == -1
+    assert settings_win.chat_combo.count() == 2
+    settings_win.chat_combo.setCurrentText("qwen3.5:2b")
+    assert window.chat_model == "qwen3.5:2b"
+    settings_win.close()
+    # Reopening restores the saved pick.
+    again = window.open_settings_window()
+    assert again.chat_combo.currentText() == "qwen3.5:2b"
+    again.close()
+
+
+def test_chat_window_has_no_em_dash(window, qapp):
+    chat = window.open_chat_window()
+    qapp.processEvents()
+    bad = [t for t in _visible_texts(window) if "—" in t]
+    assert bad == []
+    chat.close()

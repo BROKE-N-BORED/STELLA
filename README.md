@@ -32,6 +32,11 @@ job, export it as a usable package.
   after a stop). Built-in How to Use index. Debug report button in
   Settings. Single instance, geometry memory, delete confirms
   default to No.
+- v0.6.0 provider chat (2026-11-13): a Chat window (Menu, then
+  Chat) where an AI chat sets up and runs training for you, walking
+  the 8-step training template one step at a time. Say just do it
+  and it runs the whole thing. Pick the chat model in Settings.
+  `stella-cli chat` is the same agent as a terminal chat.
 
 ## Install
 

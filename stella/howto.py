@@ -1,6 +1,6 @@
 """STELLA How to Use index: the built-in guide.
 
-Ten topics, plain words, no jargon left unexplained. Every claim
+Eleven topics, plain words, no jargon left unexplained. Every claim
 here is checked against what Stella actually does: things that do
 not work yet say so in plain words. No em-dashes in this text
 (Stella rule U33) and no bare ampersands (U11).
@@ -34,6 +34,41 @@ The short path, first time:
 You need the training packages installed once before training
 works. If they are missing, Stella tells you to run this once in
 the Stella folder: bash install-training.sh""",
+    ),
+    (
+        "Chat",
+        """Chat is the easy way to use Stella: talk to it, and it
+does the work. Menu, then Chat. Say what you want in plain words,
+for example: train LFM3 to write short replies. The chat asks
+only for what it needs, sets everything else to the usual
+settings, and runs the job.
+
+The chat walks the same steps every training run needs, whatever
+the model:
+1. Goal. What should the model learn to do?
+2. Base model. Which model to start from.
+3. Data. The examples it learns from, or the sample dataset.
+4. Settings. Rank, learning rate, epochs, batch size, sequence
+   length. The defaults are fine for this PC.
+5. Train. Run it. This takes hours on CPU.
+6. Check. Validation loss and the refusal probe.
+7. Export. A GGUF file and an Ollama model.
+8. Test and back up. Try the tuned model, keep the export safe.
+
+Say just do it and the chat runs the whole list with the defaults
+and the sample dataset, telling you which step it is on.
+
+The chat runs on a model on your PC through Ollama, so how smart
+it is depends on which model you pick. Pick the chat model in
+Settings, or the chat asks you when you open it. A bigger model
+answers better but slower.
+
+Honest limits: the chat can only do what Stella's engine does.
+It cannot train a model that does not fit in 8 GB, it cannot make
+training faster than the CPU allows, and if the chat model
+misunderstands you, say it again in simpler words. It never
+deletes anything: profiles and projects are only deleted from
+their own windows.""",
     ),
     (
         "Picking a model",
@@ -248,7 +283,7 @@ is safe to share.""",
 
 
 def topic_titles() -> list[str]:
-    """The ten topic titles, in order."""
+    """The eleven topic titles, in order."""
     return [title for title, _ in TOPICS]
 
 

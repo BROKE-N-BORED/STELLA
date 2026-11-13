@@ -71,6 +71,7 @@ from PySide6.QtWidgets import (
 
 from . import export as export_mod
 from . import provision
+from .chat_agent import ChatAgent
 from .debug_log import DebugLogger, check_ollama
 from .howto import topic_text, topic_titles
 from .model import (
@@ -969,6 +970,20 @@ class SettingsWindow(QDialog):
             )
         )
 
+        layout.addWidget(QLabel("Chat model"))
+        self.chat_combo = QComboBox()
+        self.chat_combo.setPlaceholderText("Pick a model for chat")
+        self.chat_combo.currentTextChanged.connect(self._on_chat_model_changed)
+        layout.addWidget(self.chat_combo)
+        layout.addWidget(
+            _help_label(
+                "The model the Chat window talks to. It runs on your PC "
+                "through Ollama. A bigger model answers better but "
+                "slower. Nothing is picked until you pick one."
+            )
+        )
+        self._load_chat_models()
+
         layout.addWidget(QLabel("Debug report"))
         self.debug_btn = QPushButton("Write debug report")
         self.debug_btn.clicked.connect(self._on_debug_report)
@@ -989,6 +1004,29 @@ class SettingsWindow(QDialog):
 
     def refresh_ollama_status(self):
         self.ollama_status.setText(f"Status: {check_ollama(ollama_url())}")
+        self._load_chat_models()
+
+    def _load_chat_models(self):
+        """Fill the chat-model list from Ollama. Nothing is selected
+        by default: the saved pick is restored, or the box stays
+        blank until the user picks one."""
+        saved = self._main.chat_model
+        self.chat_combo.blockSignals(True)
+        try:
+            self.chat_combo.clear()
+            models = list_models()
+            if models:
+                self.chat_combo.addItems(models)
+            if saved and saved in models:
+                self.chat_combo.setCurrentText(saved)
+            else:
+                self.chat_combo.setCurrentIndex(-1)
+        finally:
+            self.chat_combo.blockSignals(False)
+
+    def _on_chat_model_changed(self, text):
+        if text:
+            self._main.set_chat_model(text)
 
     def _on_debug_report(self):
         try:
@@ -1030,6 +1068,242 @@ class HowToUseWindow(QDialog):
             self.content.setPlainText(text)
 
 
+class ChatWorker(QThread):
+    """Runs one ChatAgent.reply off the GUI thread. The agent talks
+    to Ollama (up to 120 s per call) and may start training, so it
+    must never run on the UI thread. Only talks to the window
+    through signals."""
+
+    narration = Signal(str)
+    progress = Signal(str)
+    reply = Signal(str)
+
+    def __init__(self, agent, text, parent=None):
+        super().__init__(parent)
+        self._agent = agent
+        self._text = text
+
+    def request_stop(self):
+        self._agent.request_cancel()
+
+    def run(self):
+        self._agent.set_callbacks(
+            on_narration=self.narration.emit,
+            on_progress=self.progress.emit,
+        )
+        try:
+            answer = self._agent.reply(self._text)
+        except Exception as exc:  # keep the window alive on a crash
+            answer = f"The chat hit a problem: {exc}"
+        self.reply.emit(answer)
+
+
+class ChatWindow(QDialog):
+    """Talk to Stella instead of filling in forms.
+
+    One window, one chat: the user types what they want ("train LFM3
+    to write short replies"), the chat agent asks only for what it
+    needs and does the rest. The agent runs in a worker thread; the
+    window only shows messages and sends input.
+
+    The chat model comes from Settings (chat/model). If none is
+    picked yet, the window asks the user which installed model to
+    use instead of failing: the first message just names the model.
+    """
+
+    def __init__(self, main, parent=None, agent_factory=None):
+        super().__init__(parent)
+        self._main = main
+        self._agent_factory = agent_factory
+        self._agent = None
+        self._worker: ChatWorker | None = None
+        self._awaiting_model = False
+        self.setWindowTitle("Chat with Stella")
+        self.resize(700, 520)
+        layout = QVBoxLayout(self)
+
+        activity = QHBoxLayout()
+        self.activity_dot = QLabel("\u25cf")
+        self.activity_dot.setStyleSheet("color: #888888; font-size: 14px;")
+        activity.addWidget(self.activity_dot)
+        self.activity_text = QLabel("Idle")
+        activity.addWidget(self.activity_text, 1)
+        layout.addLayout(activity)
+
+        self.messages = QTextBrowser()
+        self.messages.setReadOnly(True)
+        layout.addWidget(self.messages, 1)
+
+        input_row = QHBoxLayout()
+        self.input = QLineEdit()
+        self.input.setPlaceholderText(
+            "Say what you want, for example: train LFM3 to write short replies"
+        )
+        self.input.returnPressed.connect(self._on_send)
+        input_row.addWidget(self.input, 1)
+        self.send_btn = QPushButton("Send")
+        self.send_btn.clicked.connect(self._on_send)
+        input_row.addWidget(self.send_btn)
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.clicked.connect(self._on_cancel)
+        self.cancel_btn.setEnabled(False)
+        input_row.addWidget(self.cancel_btn)
+        layout.addLayout(input_row)
+        layout.addWidget(
+            _help_label(
+                "The chat talks to a model on your PC through Ollama. "
+                "It can set up and run training for you. Say just do "
+                "it and it runs the whole thing."
+            )
+        )
+        self._append(
+            "Stella",
+            "Hi. Tell me what you want to train, and I will set it up "
+            "and run it for you. Or say just do it and I will run the "
+            "whole thing with the usual settings.",
+        )
+        if not self._main.chat_model:
+            self._ask_for_model()
+
+    # -- messages ---------------------------------------------------
+    def _append(self, who: str, text: str):
+        self.messages.append(f"{who}: {text}")
+        self.messages.append("")
+
+    def _append_plain(self, text: str):
+        self.messages.append(text)
+
+    def _set_activity(self, busy: bool, text: str):
+        color = "#4caf50" if busy else "#888888"
+        self.activity_dot.setStyleSheet(
+            f"color: {color}; font-size: 14px;"
+        )
+        self.activity_text.setText(text)
+
+    # -- chat model -------------------------------------------------
+    def _ask_for_model(self):
+        models = list_models()
+        if not models:
+            self._append(
+                "Stella",
+                "Ollama is not answering, so I cannot see which models "
+                "are installed. Start Ollama, then pick a chat model in "
+                "Settings.",
+            )
+            return
+        self._awaiting_model = True
+        self._append(
+            "Stella",
+            "Which model should I chat with? Type one of these:\n"
+            + "\n".join(f"- {name}" for name in models),
+        )
+
+    def _match_model(self, text: str) -> str | None:
+        """The user's reply, matched against the installed models."""
+        models = list_models()
+        cleaned = text.strip().lower()
+        for name in models:
+            if cleaned == name.lower():
+                return name
+        hits = [name for name in models if cleaned in name.lower()]
+        if len(hits) == 1:
+            return hits[0]
+        return None
+
+    # -- sending ----------------------------------------------------
+    def _make_agent(self):
+        if self._agent_factory is not None:
+            return self._agent_factory()
+        return ChatAgent(
+            self._main.store,
+            self._main.chat_model,
+            profile=self._main._current_profile,
+            project=self._main._current_project,
+        )
+
+    def _ensure_agent(self):
+        if self._agent is None:
+            self._agent = self._make_agent()
+        return self._agent
+
+    def _on_send(self):
+        text = self.input.text().strip()
+        if not text:
+            return
+        if self._worker is not None and self._worker.isRunning():
+            return
+        self.input.clear()
+        self._append("You", text)
+        # No chat model yet: this message names the model.
+        if not self._main.chat_model:
+            if not self._awaiting_model:
+                self._ask_for_model()
+                return
+            match = self._match_model(text)
+            if match is None:
+                self._append(
+                    "Stella",
+                    "I did not find that model. Type one of the names "
+                    "from the list above.",
+                )
+                return
+            self._awaiting_model = False
+            self._main.set_chat_model(match)
+            self._append(
+                "Stella",
+                f"Got it, I will chat with {match}. What do you want "
+                "to train?",
+            )
+            return
+        agent = self._ensure_agent()
+        agent.set_model(self._main.chat_model)
+        # Follow the main window's session when it has one: clicking
+        # a project in the tree steers the chat too.
+        if self._main._current_profile:
+            agent.current_profile = self._main._current_profile
+            agent.current_project = self._main._current_project
+        self._worker = ChatWorker(agent, text, parent=self)
+        self._worker.narration.connect(self._append_plain)
+        self._worker.progress.connect(self._append_plain)
+        self._worker.reply.connect(self._on_reply)
+        self.send_btn.setEnabled(False)
+        self.cancel_btn.setEnabled(True)
+        self._set_activity(True, "Thinking...")
+        self._worker.start()
+
+    def _on_reply(self, text: str):
+        self._append("Stella", text)
+        self.send_btn.setEnabled(True)
+        self.cancel_btn.setEnabled(False)
+        self._set_activity(False, "Idle")
+        self._worker = None
+        # Tools may have made profiles or projects: the tree and the
+        # session follow the chat's session.
+        if self._agent is not None and self._agent.current_profile:
+            self._main.set_session(
+                self._agent.current_profile, self._agent.current_project
+            )
+        else:
+            self._main.refresh_tree()
+            self._main.refresh_session()
+
+    def _on_cancel(self):
+        if self._worker is not None and self._worker.isRunning():
+            self._worker.request_stop()
+            self.cancel_btn.setEnabled(False)
+            self._set_activity(True, "Stopping...")
+
+    def stop_worker(self):
+        """Cancel any running reply and wait for it (close path)."""
+        if self._worker is not None and self._worker.isRunning():
+            self._worker.request_stop()
+            self._worker.wait(15000)
+
+    def closeEvent(self, event):
+        self.stop_worker()
+        super().closeEvent(event)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, store: Store | None = None, settings=None):
         super().__init__()
@@ -1056,6 +1330,7 @@ class MainWindow(QMainWindow):
         self._project_windows: dict[tuple, ProjectWindow] = {}
         self._settings_window: SettingsWindow | None = None
         self._howto_window: HowToUseWindow | None = None
+        self._chat_window: ChatWindow | None = None
         self._tree_profiles: dict[str, QTreeWidgetItem] = {}
         self._tree_projects: dict[tuple, QTreeWidgetItem] = {}
         self._download_profile: str | None = None
@@ -1188,6 +1463,9 @@ class MainWindow(QMainWindow):
         )
         self._menu_action_howto = menu.addAction(
             "How to Use Stella...", self.open_howto_window
+        )
+        self._menu_action_chat = menu.addAction(
+            "Chat...", self.open_chat_window
         )
         return menu
 
@@ -1743,6 +2021,22 @@ class MainWindow(QMainWindow):
         self._howto_window.raise_()
         self._howto_window.activateWindow()
         return self._howto_window
+
+    @property
+    def chat_model(self) -> str:
+        """The chat model the user picked in Settings, or ""."""
+        return self.settings.value("chat/model", "") or ""
+
+    def set_chat_model(self, tag: str):
+        self.settings.setValue("chat/model", tag)
+
+    def open_chat_window(self):
+        if self._chat_window is None:
+            self._chat_window = ChatWindow(self, parent=self)
+        self._chat_window.show()
+        self._chat_window.raise_()
+        self._chat_window.activateWindow()
+        return self._chat_window
 
     # -- profile actions --------------------------------------------
     def new_profile(self):
@@ -2311,6 +2605,8 @@ class MainWindow(QMainWindow):
         if self._sleep_running():
             self._sleep_worker.request_stop()
             self._sleep_worker.wait(15000)
+        if self._chat_window is not None:
+            self._chat_window.stop_worker()
         if self.download_manager.is_running():
             self.download_manager.cancel()
             self.download_manager.wait_for_finished(5000)

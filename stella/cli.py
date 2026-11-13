@@ -15,6 +15,9 @@
                                           rows from the local Ollama model
     stella sleep-status <profile> <project>
                                           per-cycle sleep stats
+    stella chat [--model <ollama-tag>]    talk to Stella: the chat sets
+                                          up and runs training for you
+                                          (/quit to exit)
 
 Reads STELLA_HOME for the home dir (default ~/.stella).
 """
@@ -356,6 +359,55 @@ def cmd_sleep_status(args) -> int:
     return 0
 
 
+def cmd_chat(args) -> int:
+    """Talk to Stella: the same agent core as the Chat window, as a
+    small read-a-line loop. /quit (or Ctrl+C / Ctrl+D) exits."""
+    from .chat_agent import ChatAgent
+    from .ollama import list_models
+
+    model = args.model or ""
+    if not model:
+        models = list_models()
+        if not models:
+            print(
+                "Ollama is not answering, so I cannot see which models "
+                "are installed. Start Ollama and try again, or pass "
+                "--model <tag>."
+            )
+            return 1
+        print("Which model should I chat with?")
+        for name in models:
+            print(f"  {name}")
+        try:
+            picked = input("Model: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+        if picked not in models:
+            print(f"No model called {picked!r}.")
+            return 1
+        model = picked
+    agent = ChatAgent(_store(), model)
+    print(
+        "Hi. Tell me what you want to train, and I will set it up "
+        "and run it for you. Type /quit to exit."
+    )
+    while True:
+        try:
+            line = input("You: ")
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+        text = line.strip()
+        if not text:
+            continue
+        if text == "/quit":
+            return 0
+        print(f"Stella: {agent.reply(text)}")
+        print()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="stella", description="Stella: fine-tune models on your own PC."
@@ -455,6 +507,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("profile")
     p.add_argument("project")
     p.set_defaults(func=cmd_sleep_status)
+
+    p = sub.add_parser(
+        "chat",
+        help="talk to Stella: the chat sets up and runs training "
+        "for you (/quit to exit)",
+    )
+    p.add_argument("--model", default="",
+                   help="Ollama tag to chat with (if left out, Stella "
+                   "asks which installed model to use)")
+    p.set_defaults(func=cmd_chat)
     return parser
 
 

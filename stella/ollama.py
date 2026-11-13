@@ -16,6 +16,11 @@ import urllib.request
 
 DEFAULT_URL = "http://localhost:11434"
 TIMEOUT_SECONDS = 2.0
+CHAT_TIMEOUT_SECONDS = 120.0
+
+
+class OllamaError(Exception):
+    """Ollama did not answer, or answered with something unusable."""
 
 
 def ollama_url() -> str:
@@ -39,3 +44,57 @@ def list_models(url: str | None = None, timeout: float = TIMEOUT_SECONDS) -> lis
         if isinstance(entry, dict) and isinstance(entry.get("name"), str):
             names.append(entry["name"])
     return sorted(names)
+
+
+def chat(
+    model: str,
+    messages: list[dict],
+    *,
+    url: str | None = None,
+    timeout: float = CHAT_TIMEOUT_SECONDS,
+) -> str:
+    """One /api/chat call, no streaming. Returns the reply text.
+
+    Unlike list_models, this raises OllamaError on failure: the
+    caller (the chat agent) turns every failure into a plain-words
+    message for the user instead of silently returning nothing.
+    """
+    base = (url or ollama_url()).rstrip("/")
+    payload = json.dumps(
+        {
+            "model": model,
+            "messages": messages,
+            "stream": False,
+            "options": {"temperature": 0.3, "num_predict": 1024},
+        }
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        base + "/api/chat",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = json.loads(exc.read().decode("utf-8")).get("error", "")
+        except (ValueError, OSError):
+            pass
+        raise OllamaError(
+            f"Ollama said no ({exc.code})"
+            + (f": {detail}" if detail else "")
+        ) from exc
+    except (urllib.error.URLError, OSError, TimeoutError) as exc:
+        raise OllamaError(
+            "Ollama is not answering. Start Ollama and try again."
+        ) from exc
+    except ValueError as exc:
+        raise OllamaError("Ollama answered with something unreadable.") from exc
+    message = body.get("message") if isinstance(body, dict) else None
+    text = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(text, str) or not text.strip():
+        raise OllamaError("Ollama answered with no text.")
+    return text

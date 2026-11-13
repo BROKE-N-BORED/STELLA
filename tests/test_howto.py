@@ -5,6 +5,7 @@ from stella.howto import TOPICS, topic_text, topic_titles
 
 EXPECTED_TITLES = [
     "Getting started",
+    "Chat",
     "Picking a model",
     "Profiles",
     "Projects",
@@ -19,7 +20,7 @@ EXPECTED_TITLES = [
 
 def test_ten_topics_in_order():
     assert topic_titles() == EXPECTED_TITLES
-    assert len(TOPICS) == 10
+    assert len(TOPICS) == 11
 
 
 def test_every_topic_has_real_content():

@@ -1,5 +1,43 @@
 # Changelog
 
+## v0.6.0 — 2026-11-13
+
+Provider chat: an AI chat inside Stella that sets up and runs
+training for the user, instead of forms and panels. Built to the
+"as simple as a toy for a 5-year-old" bar.
+
+- Chat window (Menu, then Chat): talk in plain words ("train LFM3
+  to write short replies") and the chat asks only for what it
+  needs, fills the rest with defaults, and runs the job. Tool calls
+  are narrated in plain words while they run, and a Cancel button
+  stops the current job. One chat window at a time; the agent loop
+  runs in a worker thread, never on the UI thread.
+- The training template (new `stella/chat_agent.py`): the 8 steps
+  every training run needs, whatever the model (Goal, Base model,
+  Data, Settings, Train, Check, Export, Test and back up). The
+  agent walks one step at a time and says which step it is on. On
+  "just do it" it runs the whole template end to end with the
+  defaults and the sample dataset.
+- Tool calling that works with small local models: the model emits
+  a fenced ```tool block holding one JSON object; the agent
+  parses it, runs the tool, and feeds the result back. Malformed
+  tool JSON never crashes the loop: the agent asks the user in
+  plain words. Capped at 12 tool calls per message.
+- Tools wrap the existing engine only (no new training logic):
+  list/create profile and project, settings, dataset, sample
+  dataset, start training, training status, refusal probe, GGUF
+  export, checkpoints, sleep, sleep status, weight downloads,
+  How to Use lookup. Settings are validated (rank 1-64, learning
+  rate 0-1, and so on); "full" fine-tuning is refused in plain
+  words.
+- Chat model picker in Settings: pick which installed Ollama model
+  the chat talks to. Nothing is picked by default; if none is
+  picked, the chat asks which installed model to use instead of
+  failing.
+- `stella-cli chat`: the same agent as an interactive REPL
+  (--model to pick the model, /quit to exit).
+- How to Use gains a Chat topic (11 topics now).
+
 ## v0.4.0 — 2026-11-13
 
 Redesign + one-click model downloads + built-in guide, from Joshua's
