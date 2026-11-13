@@ -26,7 +26,7 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
-STELLA_VERSION = "0.3.1"
+STELLA_VERSION = "0.4.0"
 
 # Slug: lowercase letters, digits, dash, underscore. Must start alnum.
 # No dots, no slashes — a slug can never climb out of its directory.

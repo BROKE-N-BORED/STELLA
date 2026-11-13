@@ -1,5 +1,54 @@
 # Changelog
 
+## v0.4.0 — 2026-11-13
+
+Redesign + one-click model downloads + built-in guide, from Joshua's
+sketch and the "teenagers and old people can use it" bar. The
+three-pane window is gone.
+
+- Window redesign: a Menu button top-left (Profiles, New profile,
+  Projects, New project, Export, Import, Settings, How to Use
+  Stella); a collapsible profile tree on the left (each profile
+  expands to show its projects); the main area shows the current
+  training session: profile and project summary, model download,
+  Train panel, Sleep panel. Clicking a project in the tree sets the
+  training session, and the session is remembered across restarts.
+  Nothing is selected on first run.
+- Dedicated windows, no cramming: double-clicking a profile or a
+  project row opens its own window, with the v0.3.1 plain-words help
+  lines under every field. Settings has its own window (Stella home,
+  Ollama status + host, training defaults, Debug report button).
+- One-click model downloads (new `stella/provision.py`): a Download
+  model button in the Profile window and the session view. Base
+  weights download from Hugging Face in a separate process with a
+  progress bar and a Cancel button; interrupted downloads resume
+  where they left off. Status shows Not downloaded / Downloading x%
+  / Ready + size on disk. When training starts and the weights are
+  missing, Stella offers the download first instead of failing.
+  Plain-words failures: no network, no Base ref set, not enough disk
+  (checked before the download starts).
+- How to Use Stella window: a full index (Getting started, Picking a
+  model, Profiles, Projects, Training, Sleep, Export and import, The
+  refusal probe, GGUF export to Ollama, Troubleshooting) in plain
+  words, accurate about what Stella actually does: MetaMorphAi modes
+  do nothing yet, full fine-tuning doesn't run on this PC, training
+  takes hours on CPU.
+- Debug log layer (U12): rotating timestamped logs under the Stella
+  home, last-200 ring buffer, traceback capture, scrubbed debug
+  report from the Settings window, crash handler in the real app
+  entry.
+- Single instance (U27): re-clicking the icon focuses the running
+  app, never starts a second copy.
+- Destructive confirmations default to No, and Escape leaves things
+  untouched (U23/U31). The delete confirm used to default to Yes.
+- Window geometry and tree expansion are remembered between runs
+  (U5); tree expansion and scroll survive refreshes (U28); a visible
+  activity light + status text shows what Stella is doing during
+  downloads, training, and sleep (U16).
+- No em-dashes in any visible UI text (U33): every user-visible
+  string in the window, the dialogs, the status messages, and the
+  engine error messages was swept. Same words, em-dashes out.
+
 ## v0.3.1 — 2026-11-13
 
 Real-PC usability patch, from Joshua's first run on his Mint PC.

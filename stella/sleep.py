@@ -285,7 +285,7 @@ def dream_rows(
     """
     if not model_tag:
         return [], (
-            "no Ollama model tag — set one on the profile or pass "
+            "no Ollama model tag. Set one on the profile or pass "
             "--dream-model"
         )
     if count <= 0:
@@ -297,7 +297,7 @@ def dream_rows(
             model_tag, _dream_prompt(seeds[:3], count), ollama_url, timeout
         )
     except (urllib.error.URLError, OSError, TimeoutError, ValueError) as exc:
-        return [], f"Ollama unreachable ({exc}) — dreaming skipped"
+        return [], f"Ollama unreachable ({exc}) . Dreaming skipped"
     kept: list[dict] = []
     seen = set(exclude_hashes)
     for line_no, line in enumerate(raw.splitlines(), 1):
@@ -359,14 +359,14 @@ def replay_check(
         from .train import LFM3_HF_REPO
 
         raise StellaError(
-            f"profile {profile!r} has no base_ref — set it to the "
+            f"profile {profile!r} has no base_ref. Set it to the "
             f"Hugging Face repo of the base model (e.g. {LFM3_HF_REPO!r})"
         )
     cycle_dir = Path(cycle_dir)
     new_adapter = cycle_dir / "adapter"
     if not (new_adapter / "adapter_config.json").is_file():
         raise StellaError(
-            f"cycle {cycle_dir.name} has no trained adapter yet — "
+            f"cycle {cycle_dir.name} has no trained adapter yet. "
             "consolidation must finish before the replay check"
         )
 
@@ -549,7 +549,7 @@ def sleep_project(
     base_ref = prof.get("base_ref") or ""
     if not base_ref:
         raise StellaError(
-            f"profile {profile!r} has no base_ref — set it to the "
+            f"profile {profile!r} has no base_ref. Set it to the "
             f"Hugging Face repo of the base model (e.g. {LFM3_HF_REPO!r})"
         )
 
@@ -574,7 +574,7 @@ def sleep_project(
             raise StellaError(
                 f"sleep cycle {cycle_no} was interrupted and its input "
                 f"file is damaged ({exc}). Delete "
-                f"{cycle_dir} and run sleep again — no rows are lost, "
+                f"{cycle_dir} and run sleep again. No rows are lost, "
                 "they are still in the dataset."
             ) from exc
         train_rows = _load_rows_file(cycle_dir / "train_rows.jsonl")
@@ -592,7 +592,7 @@ def sleep_project(
             dataset_ref = proj.get("dataset_ref") or ""
             if not dataset_ref:
                 raise StellaError(
-                    f"project {project!r} has no dataset set — pick a "
+                    f"project {project!r} has no dataset set. Pick a "
                     ".jsonl dataset in the Train panel, or pass --rows"
                 )
             data_path = resolve_dataset_ref(
@@ -602,7 +602,7 @@ def sleep_project(
         new_rows = [ex for ex in all_rows if row_hash(ex) not in slept]
         if not new_rows:
             raise StellaError(
-                "No new rows to sleep on — every row in the dataset "
+                "No new rows to sleep on. Every row in the dataset "
                 "has already been slept on. Add rows to the dataset "
                 "or pass --rows with a file of new rows."
             )
@@ -635,7 +635,7 @@ def sleep_project(
         cycle_rows = list(new_rows) + dreamed_rows
         if len(cycle_rows) < 2:
             raise StellaError(
-                "A sleep cycle needs at least 2 rows — only "
+                "A sleep cycle needs at least 2 rows. Only "
                 f"{len(cycle_rows)} new row(s) found. Add more rows "
                 "or try --dream for synthetic ones."
             )
@@ -664,7 +664,7 @@ def sleep_project(
 
     if controller is not None and controller.stop_requested:
         raise StellaError(
-            "Sleep paused before training started — run sleep again "
+            "Sleep paused before training started. Run sleep again "
             "to start this cycle."
         )
 

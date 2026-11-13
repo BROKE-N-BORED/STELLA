@@ -72,18 +72,18 @@ def export_project(store: Store, profile: str, project: str, dest: str | Path) -
     )
     role = prof.get("role") or "no role set"
     (out / "README.md").write_text(
-        f"# {proj.get('display_name', proj['name'])} — Stella export\n\n"
+        f"# {proj.get('display_name', proj['name'])}: Stella export\n\n"
         f"Fine-tune of profile **{prof.get('display_name', prof['name'])}** "
         f"(role: {role}, base: {prof.get('ollama_tag') or prof.get('base_ref') or 'not set'}).\n\n"
         f"MetaMorphAi mode: **{manifest['project']['metamorph'].get('mode', 'morph')}**.\n"
         f"Dataset: {proj.get('dataset_ref') or 'not set'}.\n"
         f"Status: {proj.get('status', 'draft')}.\n\n"
         "## Contents\n\n"
-        "- `manifest.json` — the full profile + project record.\n"
-        "- `config.json` — training settings.\n"
-        "- `weights/` — adapter / merged weights (Item 3).\n"
-        "- `checkpoints/` — training checkpoints, if any were made.\n"
-        "- `sleep/` — sleep cycles (adapters, manifest, replay "
+        "- `manifest.json`: the full profile + project record.\n"
+        "- `config.json`: training settings.\n"
+        "- `weights/`: adapter / merged weights (Item 3).\n"
+        "- `checkpoints/`: training checkpoints, if any were made.\n"
+        "- `sleep/`: sleep cycles (adapters, manifest, replay "
         "reports), if any were run.\n\n"
         "Import back into Stella with: `stella import <this folder>`\n"
         "or the Import button in the Stella window.\n",
@@ -101,7 +101,7 @@ def export_project(store: Store, profile: str, project: str, dest: str | Path) -
                 shutil.copytree(item, weights / item.name)
     else:
         (weights / "README.txt").write_text(
-            "No trained adapter yet — train first:\n"
+            "No trained adapter yet. Train first:\n"
             f"  stella train {profile} {project}\n"
             "then export again and the adapter ships in this folder.\n",
             encoding="utf-8",

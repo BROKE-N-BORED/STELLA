@@ -137,11 +137,11 @@ def probe_gate(result: dict, *, max_increase: float = 0.0) -> tuple[bool, str]:
     if delta <= max_increase:
         return True, (
             f"refusal rate {before:.0%} before, {after:.0%} after "
-            f"(change {delta:+.0%}) — gate passed"
+            f"(change {delta:+.0%}). Gate passed"
         )
     return False, (
         f"refusal rate ROSE {before:.0%} before to {after:.0%} after "
-        f"(change {delta:+.0%}) — tuning re-taught refusals, gate failed"
+        f"(change {delta:+.0%}). Tuning re-taught refusals, gate failed"
     )
 
 
@@ -168,13 +168,13 @@ def probe_project(
     base_ref = prof.get("base_ref") or ""
     if not base_ref:
         raise StellaError(
-            f"profile {profile!r} has no base_ref — set it to the "
+            f"profile {profile!r} has no base_ref. Set it to the "
             f"Hugging Face repo of the base model (e.g. {LFM3_HF_REPO!r})"
         )
     adapter_dir = project_dir / "adapter"
     if not (adapter_dir / "adapter_config.json").is_file():
         raise StellaError(
-            f"project {project!r} has no trained adapter yet — "
+            f"project {project!r} has no trained adapter yet. "
             "run training first, then probe"
         )
     # The cheap checks above run before the dependency gate, so a

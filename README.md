@@ -25,6 +25,13 @@ job, export it as a usable package.
   model); every profile and project field explains itself in plain
   words; new ✨ icon; installer fixes (unquoted Icon=, trusted
   desktop launcher, no launch timeout).
+- v0.4.0 redesign (2026-11-13): Menu button + collapsible profile
+  tree + training session main area, with Profile, Project,
+  Settings, and How to Use windows of their own. One-click model
+  downloads (Download model button, progress + Cancel, resumes
+  after a stop). Built-in How to Use index. Debug report button in
+  Settings. Single instance, geometry memory, delete confirms
+  default to No.
 
 ## Install
 

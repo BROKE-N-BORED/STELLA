@@ -251,14 +251,14 @@ def export_gguf(
         adapter_dir = project_dir / "adapter"
         if not (adapter_dir / "adapter_config.json").is_file():
             raise StellaError(
-                f"project {project!r} has no trained adapter yet — "
+                f"project {project!r} has no trained adapter yet. "
                 "run training first (stella train "
                 f"{profile} {project})"
             )
     base_ref = prof.get("base_ref") or ""
     if not base_ref:
         raise StellaError(
-            f"profile {profile!r} has no base_ref — set it to the "
+            f"profile {profile!r} has no base_ref. Set it to the "
             f"Hugging Face repo of the base model (e.g. {LFM3_HF_REPO!r})"
         )
     dest = Path(dest).expanduser()

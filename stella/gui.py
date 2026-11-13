@@ -1,25 +1,44 @@
-"""STELLA window — native Qt, one window, three panes.
+"""STELLA window — native Qt, menu + tree + session.
 
-Left: profiles (friendly role names, Ollama tag stays the identifier).
-Middle: the selected profile's projects.
-Right: detail — profile settings on top, project settings + notes
-below, then the Train panel (dataset, Start / Pause / Resume,
-progress, checkpoints, GGUF export, refusal probe, log) and the
-Sleep panel (Item 4: sleep cycle, dream checkbox, cycle list).
+The main window is deliberately uncluttered: a menu button top-left,
+a collapsible profile tree on the left (each profile expands to show
+its projects), and the current training session on the right (profile
+and project summary, model download, Train panel, Sleep panel).
 
-No web UI, no network beyond localhost Ollama. No "&" in any visible
-label — Qt eats a bare & as a mnemonic marker.
+Everything else lives in its own window, reached from the menu or by
+double-clicking a tree row: Profile window, Project window, Settings
+window, How to Use window. Nothing is crammed into one window.
 
-Training runs in a worker thread so the window stays responsive; the
-worker only talks to the window through Qt signals.
+Clicking a project in the tree SETS THE TRAINING SESSION (current
+profile + project). The session is remembered across restarts via
+QSettings — that is the user's own pick coming back, not a default:
+on first run nothing is selected at all.
+
+No web UI, no network beyond localhost Ollama and the Hugging Face
+download. No "&" in any visible label — Qt eats a bare & as a
+mnemonic marker. No em-dashes in any visible text.
+
+Training, sleep, and model downloads run off the GUI thread (worker
+threads / a subprocess) so the window stays responsive; they only
+talk to the window through Qt signals.
 """
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import (
+    QObject,
+    QProcess,
+    QProcessEnvironment,
+    QSettings,
+    Qt,
+    QThread,
+    Signal,
+)
+from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QApplication,
@@ -35,6 +54,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QProgressBar,
@@ -42,20 +62,50 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSpinBox,
     QSplitter,
+    QTextBrowser,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
 from . import export as export_mod
+from . import provision
+from .debug_log import DebugLogger, check_ollama
+from .howto import topic_text, topic_titles
 from .model import (
+    DEFAULT_SETTINGS,
     METAMORPH_MODES,
     STELLA_VERSION,
     StellaError,
     Store,
     slug_from_model,
 )
-from .ollama import list_models
+from .ollama import list_models, ollama_url
 from .train import TrainController
+
+
+def _help_label(text):
+    """A small grey plain-words line under a field."""
+    label = QLabel(text)
+    label.setStyleSheet("color: #9a9a9a; font-size: 11px;")
+    label.setWordWrap(True)
+    return label
+
+
+def _weights_label(status):
+    """A weights_status dict as one plain-words line."""
+    state = status["state"]
+    if state == "no-repo":
+        return "No Hugging Face repo set. Set Base ref in the profile window."
+    if state == "missing":
+        return "Not downloaded yet."
+    if state == "partial":
+        return (
+            "Partly downloaded "
+            f"({provision.format_size(status['size_bytes'])} so far)."
+        )
+    return f"Ready: {provision.format_size(status['size_bytes'])} on disk."
 
 
 class NewProfileDialog(QDialog):
@@ -69,7 +119,7 @@ class NewProfileDialog(QDialog):
 
     And it used to demand a role, a display name, and a base ref up
     front. It doesn't anymore: the profile's name comes from the model,
-    and role/display/base can be changed later in the profile panel.
+    and role/display/base can be changed later in the profile window.
     One pick, one button.
     """
 
@@ -78,7 +128,7 @@ class NewProfileDialog(QDialog):
         self.setWindowTitle("New profile")
         self.installed_models = list_models()
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Pick a model — that's all it takes."))
+        layout.addWidget(QLabel("Pick a model: that is all it takes."))
         self.model_combo = QComboBox()
         self.model_combo.setEditable(True)
         if self.installed_models:
@@ -91,7 +141,7 @@ class NewProfileDialog(QDialog):
         layout.addWidget(self.model_combo)
         if not self.installed_models:
             layout.addWidget(
-                QLabel("Ollama is not answering — type the model by hand.")
+                QLabel("Ollama is not answering. Type the model by hand.")
             )
         self.name_note = QLabel("")
         layout.addWidget(self.name_note)
@@ -165,7 +215,7 @@ class TrainWorker(QThread):
         elif kind == "paused":
             self.log.emit(f"Paused at step {event['step']}.")
         elif kind == "done":
-            self.log.emit(f"Done — adapter saved to {event['adapter']}")
+            self.log.emit(f"Done. Adapter saved to {event['adapter']}")
 
     def run(self):
         from .train import train_project
@@ -249,15 +299,15 @@ class SleepWorker(QThread):
             fmt = lambda v: f"{v:.4f}" if v is not None else "n/a"
             self.log.emit(
                 f"old loss {fmt(before)} -> {fmt(after)}, "
-                f"new loss {fmt(new)} — {event['status']}"
+                f"new loss {fmt(new)}, {event['status']}"
             )
         elif kind == "paused":
             self.log.emit(
-                f"Paused at step {event['step']} — run sleep again to resume."
+                f"Paused at step {event['step']}. Run sleep again to resume."
             )
         elif kind == "done":
             self.log.emit(
-                f"Sleep cycle {event['cycle']} done — {event['status']}."
+                f"Sleep cycle {event['cycle']} done: {event['status']}."
             )
 
     def run(self):
@@ -281,13 +331,13 @@ class SleepWorker(QThread):
         if report.get("status") == "paused":
             self.finished.emit(
                 True,
-                f"Sleep paused at step {report['steps']} — "
-                "run sleep again to resume.",
+                f"Sleep paused at step {report['steps']}. "
+                "Run sleep again to resume.",
             )
             return
         self.finished.emit(
             True,
-            f"Sleep cycle {report['cycle']} done — {report['status']}.",
+            f"Sleep cycle {report['cycle']} done: {report['status']}.",
         )
 
 
@@ -314,11 +364,682 @@ class JobWorker(QThread):
         self.finished.emit(True, message)
 
 
+class DownloadManager(QObject):
+    """Downloads base weights in a separate process.
+
+    The download runs as `python -m stella.provision download <repo>`
+    in a QProcess, so a big multi-GB download can never block the
+    window, and cancelling it just kills the process: the Hugging
+    Face hub resumes an interrupted download on the next run, so a
+    cancelled download never loses what it already fetched.
+
+    The subprocess prints PROGRESS / DONE / ERROR lines on stdout;
+    this manager parses them into signals. `command` overrides the
+    subprocess for tests: [program, *args].
+    """
+
+    progress = Signal(int, int)  # downloaded bytes, total bytes (0 unknown)
+    finished = Signal(bool, str)  # ok, message
+
+    def __init__(self, parent=None, command=None):
+        super().__init__(parent)
+        self._command = command
+        self._process: QProcess | None = None
+        self._cancelled = False
+        self._buffer = ""
+        self._done_path: str | None = None
+        self._error: str | None = None
+
+    def is_running(self):
+        return (
+            self._process is not None
+            and self._process.state() != QProcess.NotRunning
+        )
+
+    def was_cancelled(self):
+        return self._cancelled
+
+    def start(self, repo_id):
+        if self.is_running():
+            return False
+        self._cancelled = False
+        self._buffer = ""
+        self._done_path = None
+        self._error = None
+        proc = QProcess(self)
+        proc.readyReadStandardOutput.connect(self._on_ready_read)
+        proc.finished.connect(self._on_finished)
+        if self._command is not None:
+            program, args = self._command[0], list(self._command[1:])
+        else:
+            program = sys.executable
+            args = ["-m", "stella.provision", "download", repo_id]
+            # The child must find the stella package even when the
+            # window was launched from another folder.
+            env = QProcessEnvironment.systemEnvironment()
+            parent_dir = str(Path(__file__).resolve().parent.parent)
+            existing = env.value("PYTHONPATH", "")
+            env.insert(
+                "PYTHONPATH",
+                parent_dir + (os.pathsep + existing if existing else ""),
+            )
+            proc.setProcessEnvironment(env)
+        self._process = proc
+        proc.start(program, args)
+        return True
+
+    def cancel(self):
+        if self.is_running():
+            self._cancelled = True
+            self._process.kill()
+
+    def wait_for_finished(self, msecs=5000):
+        if self._process is not None:
+            self._process.waitForFinished(msecs)
+
+    def _on_ready_read(self):
+        if self._process is None:
+            return
+        data = bytes(self._process.readAllStandardOutput()).decode(
+            "utf-8", "replace"
+        )
+        self._buffer += data
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            self._handle_line(line.strip())
+
+    def _handle_line(self, line):
+        if line.startswith("PROGRESS "):
+            try:
+                _, down, total = line.split()
+                self.progress.emit(int(down), int(total))
+            except ValueError:
+                pass
+        elif line.startswith("DONE "):
+            self._done_path = line[5:].strip()
+        elif line.startswith("ERROR "):
+            self._error = line[6:].strip()
+
+    def _on_finished(self, exit_code, _status):
+        # readyRead may not have fired for the tail: drain it, so a
+        # DONE/ERROR line printed just before exit is not lost.
+        if self._process is not None:
+            rest = bytes(self._process.readAllStandardOutput()).decode(
+                "utf-8", "replace"
+            )
+            self._buffer += rest
+            while "\n" in self._buffer:
+                line, self._buffer = self._buffer.split("\n", 1)
+                self._handle_line(line.strip())
+            if self._buffer.strip():
+                self._handle_line(self._buffer.strip())
+            self._buffer = ""
+        self._process = None
+        if self._cancelled:
+            self.finished.emit(
+                False,
+                "Download stopped. It will pick up where it left off.",
+            )
+        elif self._error is not None:
+            self.finished.emit(False, self._error)
+        elif exit_code == 0 and self._done_path:
+            self.finished.emit(True, self._done_path)
+        elif exit_code == 0:
+            self.finished.emit(True, "")
+        else:
+            self.finished.emit(
+                False, "The download stopped unexpectedly. Try again."
+            )
+
+
+# ---------------------------------------------------------------- windows
+
+
+class ProfileWindow(QDialog):
+    """One profile's settings, in its own window.
+
+    Reached from the menu (Profiles) or by double-clicking a profile
+    row in the tree. Every field explains itself in plain words
+    underneath. Also the home of the Download model button: the base
+    weights for this profile, with progress and cancel.
+    """
+
+    def __init__(self, main, slug, parent=None):
+        super().__init__(parent)
+        self._main = main
+        self._slug = slug
+        self.setWindowTitle(f"Profile: {slug}")
+        self.setMinimumWidth(480)
+        layout = QVBoxLayout(self)
+
+        form = QFormLayout()
+        self.display_edit = QLineEdit()
+        self.role_edit = QLineEdit()
+        self.role_edit.setPlaceholderText("driver, reviewer, vision...")
+        self.tag_combo = QComboBox()
+        self.tag_combo.setEditable(True)
+        self.base_edit = QLineEdit()
+        form.addRow("Display name", self.display_edit)
+        form.addRow(
+            "",
+            _help_label(
+                "Just a label for the list. It already says the model's name."
+            ),
+        )
+        form.addRow("Role", self.role_edit)
+        form.addRow(
+            "",
+            _help_label(
+                "Only matters if Code Forge uses this profile as a seat "
+                "(driver, reviewer...). Leave blank otherwise."
+            ),
+        )
+        form.addRow("Ollama tag", self.tag_combo)
+        form.addRow(
+            "",
+            _help_label(
+                "The model as Ollama knows it on this PC. "
+                "Used for dreaming and the refusal probe."
+            ),
+        )
+        form.addRow("Base ref", self.base_edit)
+        form.addRow(
+            "",
+            _help_label(
+                "Where training loads the base model from: a Hugging Face "
+                "repo like LiquidAI/LFM3-1.7B. Needed before you train."
+            ),
+        )
+        # No Processor row: the stored field exists but nothing in
+        # Stella reads it — showing it only asked a question nobody
+        # could answer. It stays in profile.json for compatibility.
+        layout.addLayout(form)
+
+        save_btn = QPushButton("Save profile")
+        save_btn.clicked.connect(self.save)
+        layout.addWidget(save_btn)
+
+        layout.addWidget(QLabel("Model weights"))
+        self.download_status = QLabel("")
+        self.download_status.setWordWrap(True)
+        layout.addWidget(self.download_status)
+        self.download_progress = QProgressBar()
+        self.download_progress.setMaximum(100)
+        self.download_progress.setValue(0)
+        layout.addWidget(self.download_progress)
+        dl_btns = QHBoxLayout()
+        self.download_btn = QPushButton("Download model")
+        self.download_btn.clicked.connect(
+            lambda: self._main.start_download(self._slug)
+        )
+        self.download_cancel_btn = QPushButton("Cancel")
+        self.download_cancel_btn.clicked.connect(self._main.cancel_download)
+        self.download_cancel_btn.setEnabled(False)
+        dl_btns.addWidget(self.download_btn)
+        dl_btns.addWidget(self.download_cancel_btn)
+        dl_btns.addStretch(1)
+        layout.addLayout(dl_btns)
+        layout.addWidget(
+            _help_label(
+                "Downloads the base weights from Hugging Face. If it "
+                "stops, press Download again: it picks up where it left "
+                "off, nothing is downloaded twice."
+            )
+        )
+
+        btns = QHBoxLayout()
+        rename_btn = QPushButton("Rename")
+        rename_btn.clicked.connect(lambda: self._main.rename_profile(self._slug))
+        delete_btn = QPushButton("Delete")
+        delete_btn.clicked.connect(lambda: self._main.delete_profile(self._slug))
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.close)
+        btns.addWidget(rename_btn)
+        btns.addWidget(delete_btn)
+        btns.addStretch(1)
+        btns.addWidget(close_btn)
+        layout.addLayout(btns)
+        layout.addStretch(1)
+
+        self._load()
+        self.refresh_download_status()
+
+    @property
+    def slug(self):
+        return self._slug
+
+    def retarget(self, new_slug):
+        """The profile was renamed: follow it to the new name."""
+        self._slug = new_slug
+        self.setWindowTitle(f"Profile: {new_slug}")
+        self._load()
+        self.refresh_download_status()
+
+    def _load(self):
+        self.tag_combo.clear()
+        models = list_models()
+        if models:
+            self.tag_combo.addItems(models)
+        try:
+            p = self._main.store.get_profile(self._slug)
+        except StellaError:
+            self.display_edit.setText("")
+            self.role_edit.setText("")
+            self.base_edit.setText("")
+            return
+        self.display_edit.setText(p.get("display_name", ""))
+        self.role_edit.setText(p.get("role", ""))
+        tag = p.get("ollama_tag", "")
+        if tag and tag not in models:
+            self.tag_combo.addItem(tag)
+        self.tag_combo.setCurrentText(tag)
+        self.base_edit.setText(p.get("base_ref", ""))
+
+    def save(self):
+        try:
+            self._main.store.update_profile(
+                self._slug,
+                display_name=self.display_edit.text().strip(),
+                role=self.role_edit.text().strip(),
+                ollama_tag=self.tag_combo.currentText().strip(),
+                base_ref=self.base_edit.text().strip(),
+            )
+        except StellaError as exc:
+            QMessageBox.warning(self, "Stella", str(exc))
+            return
+        self._main.refresh_tree()
+        self._main.refresh_session()
+        self.refresh_download_status()
+        self._main._say(f"Saved profile {self._slug}.")
+
+    def refresh_download_status(self):
+        """Re-read the weights state from disk (called after a
+        download finishes and whenever the window opens)."""
+        manager = self._main.download_manager
+        running_here = (
+            manager.is_running()
+            and self._main.download_profile == self._slug
+        )
+        self.download_btn.setEnabled(not running_here)
+        self.download_cancel_btn.setEnabled(running_here)
+        try:
+            status = provision.weights_status(self._main.store, self._slug)
+        except StellaError:
+            self.download_status.setText("Profile not found.")
+            return
+        self.download_status.setText(_weights_label(status))
+        self.download_progress.setMaximum(100)
+        self.download_progress.setValue(
+            100 if status["state"] == "ready" else 0
+        )
+
+    def on_download_progress(self, downloaded, total):
+        if total > 0:
+            pct = downloaded * 100 // total
+            self.download_progress.setMaximum(100)
+            self.download_progress.setValue(pct)
+            self.download_status.setText(
+                f"Downloading: {pct}% "
+                f"({provision.format_size(downloaded)} of "
+                f"{provision.format_size(total)})"
+            )
+        else:
+            self.download_progress.setMaximum(0)
+            self.download_status.setText(
+                "Downloading: "
+                f"{provision.format_size(downloaded)} so far"
+            )
+
+
+class ProjectWindow(QDialog):
+    """One project's settings, in its own window.
+
+    Reached from the menu (Projects) or by double-clicking a project
+    row in the tree. Every field explains itself in plain words
+    underneath. Saving here is what training reads: there is no
+    project form in the main window anymore.
+    """
+
+    def __init__(self, main, profile, project, parent=None):
+        super().__init__(parent)
+        self._main = main
+        self._profile = profile
+        self._project = project
+        self.setWindowTitle(f"Project: {profile} / {project}")
+        self.setMinimumWidth(480)
+        self.resize(520, 640)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        body = QWidget()
+        layout = QVBoxLayout(body)
+        scroll.setWidget(body)
+        outer = QVBoxLayout(self)
+        outer.addWidget(scroll)
+
+        form = QFormLayout()
+        self.display_edit = QLineEdit()
+        self.dataset_edit = QLineEdit()
+        self.dataset_edit.setPlaceholderText("path or name of the training data")
+        self.method_combo = QComboBox()
+        self.method_combo.addItems(["lora", "full"])
+        # "full" is not feasible on this PC (and train.py never reads
+        # the setting anyway — it always trains LoRA). Keep it listed
+        # so old projects still show it, but nobody new can pick it.
+        self.method_combo.model().item(1).setEnabled(False)
+        self.rank_spin = QSpinBox()
+        self.rank_spin.setRange(1, 64)
+        self.lr_edit = QLineEdit()
+        self.epochs_spin = QSpinBox()
+        self.epochs_spin.setRange(1, 100)
+        self.batch_spin = QSpinBox()
+        self.batch_spin.setRange(1, 32)
+        self.seq_spin = QSpinBox()
+        self.seq_spin.setRange(128, 32768)
+        self.metamorph_combo = QComboBox()
+        self.metamorph_combo.addItems(list(METAMORPH_MODES))
+        self.metamorph_combo.setToolTip(
+            "MetaMorphAi modes are not wired up yet. This is stored "
+            "but training ignores it."
+        )
+        form.addRow("Display name", self.display_edit)
+        form.addRow("", _help_label("Just a label for the project list."))
+        form.addRow("Dataset", self.dataset_edit)
+        form.addRow(
+            "",
+            _help_label(
+                "The training data: a .jsonl file of examples. "
+                "The Train panel has a sample to try."
+            ),
+        )
+        form.addRow("Method", self.method_combo)
+        form.addRow(
+            "",
+            _help_label(
+                "lora trains a small adapter on top of the base: the "
+                "only way that fits this PC."
+            ),
+        )
+        form.addRow("LoRA rank", self.rank_spin)
+        form.addRow(
+            "",
+            _help_label(
+                "How big the adapter is. 8 is the usual. Bigger learns "
+                "more but uses more RAM."
+            ),
+        )
+        form.addRow("Learning rate", self.lr_edit)
+        form.addRow(
+            "",
+            _help_label(
+                "How big each training step is. 0.0002 is the usual. "
+                "Bigger learns faster but can wreck the model."
+            ),
+        )
+        form.addRow("Epochs", self.epochs_spin)
+        form.addRow(
+            "", _help_label("How many full passes over the data. 3 is the usual.")
+        )
+        form.addRow("Batch size", self.batch_spin)
+        form.addRow(
+            "", _help_label("Examples per training step. 1 fits this PC. Leave it.")
+        )
+        form.addRow("Max seq len", self.seq_spin)
+        form.addRow(
+            "", _help_label("Longest example, in tokens. 1024 is the usual.")
+        )
+        form.addRow("MetaMorphAi", self.metamorph_combo)
+        form.addRow(
+            "",
+            _help_label(
+                "Does nothing yet. The modes are not wired to training. "
+                "Leave it alone for now."
+            ),
+        )
+        layout.addLayout(form)
+
+        layout.addWidget(QLabel("Notes"))
+        self.notes_edit = QPlainTextEdit()
+        self.notes_edit.setMinimumHeight(100)
+        layout.addWidget(self.notes_edit)
+        layout.addWidget(
+            _help_label("Anything you want to remember about this fine-tune.")
+        )
+
+        save_btn = QPushButton("Save project")
+        save_btn.clicked.connect(self.save)
+        layout.addWidget(save_btn)
+
+        btns = QHBoxLayout()
+        rename_btn = QPushButton("Rename")
+        rename_btn.clicked.connect(
+            lambda: self._main.rename_project(self._profile, self._project)
+        )
+        delete_btn = QPushButton("Delete")
+        delete_btn.clicked.connect(
+            lambda: self._main.delete_project(self._profile, self._project)
+        )
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.close)
+        btns.addWidget(rename_btn)
+        btns.addWidget(delete_btn)
+        btns.addStretch(1)
+        btns.addWidget(close_btn)
+        layout.addLayout(btns)
+        layout.addStretch(1)
+
+        self._load()
+
+    @property
+    def profile(self):
+        return self._profile
+
+    @property
+    def project(self):
+        return self._project
+
+    def retarget(self, new_project):
+        """The project was renamed: follow it to the new name."""
+        self._project = new_project
+        self.setWindowTitle(f"Project: {self._profile} / {new_project}")
+        self._load()
+
+    def retarget_profile(self, new_profile):
+        """The profile was renamed: follow it to the new name."""
+        self._profile = new_profile
+        self.setWindowTitle(f"Project: {new_profile} / {self._project}")
+        self._load()
+
+    def _load(self):
+        try:
+            p = self._main.store.get_project(self._profile, self._project)
+            notes = self._main.store.read_notes(self._profile, self._project)
+        except StellaError:
+            return
+        self.display_edit.setText(p.get("display_name", ""))
+        self.dataset_edit.setText(p.get("dataset_ref", ""))
+        settings = p.get("settings", {})
+        method = settings.get("method", "lora")
+        idx = self.method_combo.findText(method)
+        self.method_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.rank_spin.setValue(int(settings.get("rank", 8)))
+        self.lr_edit.setText(str(settings.get("learning_rate", 0.0002)))
+        self.epochs_spin.setValue(int(settings.get("epochs", 3)))
+        self.batch_spin.setValue(int(settings.get("batch_size", 1)))
+        self.seq_spin.setValue(int(settings.get("max_seq_len", 1024)))
+        mode = (p.get("metamorph") or {}).get("mode", "morph")
+        idx = self.metamorph_combo.findText(mode)
+        self.metamorph_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.notes_edit.setPlainText(notes)
+
+    def save(self) -> bool:
+        """Save the project form. Returns True on success, False when
+        nothing was saved (bad learning rate, store error)."""
+        try:
+            lr = float(self.lr_edit.text().strip() or "0.0002")
+        except ValueError:
+            QMessageBox.warning(
+                self, "Stella", "Learning rate must be a number, like 0.0002."
+            )
+            return False
+        try:
+            self._main.store.update_project(
+                self._profile,
+                self._project,
+                display_name=self.display_edit.text().strip(),
+                dataset_ref=self.dataset_edit.text().strip(),
+                settings={
+                    "method": self.method_combo.currentText(),
+                    "rank": self.rank_spin.value(),
+                    "learning_rate": lr,
+                    "epochs": self.epochs_spin.value(),
+                    "batch_size": self.batch_spin.value(),
+                    "max_seq_len": self.seq_spin.value(),
+                },
+                metamorph={"mode": self.metamorph_combo.currentText()},
+            )
+            self._main.store.write_notes(
+                self._profile,
+                self._project,
+                self.notes_edit.toPlainText(),
+            )
+        except StellaError as exc:
+            QMessageBox.warning(self, "Stella", str(exc))
+            return False
+        self._main.refresh_tree()
+        self._main.refresh_session()
+        self._main._say(f"Saved project {self._project}.")
+        return True
+
+
+class SettingsWindow(QDialog):
+    """Settings, in its own window. Only settings that exist are
+    shown: where Stella keeps its files, whether Ollama is answering,
+    and the defaults new projects start with. Nothing invented."""
+
+    def __init__(self, main, parent=None):
+        super().__init__(parent)
+        self._main = main
+        self.setWindowTitle("Settings")
+        self.setMinimumWidth(480)
+        layout = QVBoxLayout(self)
+
+        layout.addWidget(QLabel("Where Stella keeps things"))
+        self.home_label = QLabel(str(main.store.home))
+        self.home_label.setWordWrap(True)
+        self.home_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(self.home_label)
+        layout.addWidget(
+            _help_label("Your profiles and projects live here.")
+        )
+
+        layout.addWidget(QLabel("Ollama"))
+        self.ollama_host = QLabel(f"Host: {ollama_url()}")
+        self.ollama_host.setWordWrap(True)
+        layout.addWidget(self.ollama_host)
+        self.ollama_status = QLabel("")
+        self.ollama_status.setWordWrap(True)
+        layout.addWidget(self.ollama_status)
+        refresh_btn = QPushButton("Refresh Ollama status")
+        refresh_btn.clicked.connect(self.refresh_ollama_status)
+        layout.addWidget(refresh_btn)
+        layout.addWidget(
+            _help_label(
+                "Ollama runs the models on this PC. Stella uses it for "
+                "dreaming and the refusal probe, not for training."
+            )
+        )
+
+        layout.addWidget(QLabel("Training defaults"))
+        form = QFormLayout()
+        form.addRow("LoRA rank", QLabel(str(DEFAULT_SETTINGS["rank"])))
+        form.addRow(
+            "Learning rate", QLabel(str(DEFAULT_SETTINGS["learning_rate"]))
+        )
+        form.addRow("Epochs", QLabel(str(DEFAULT_SETTINGS["epochs"])))
+        form.addRow("Batch size", QLabel(str(DEFAULT_SETTINGS["batch_size"])))
+        form.addRow(
+            "Max seq len", QLabel(str(DEFAULT_SETTINGS["max_seq_len"]))
+        )
+        layout.addLayout(form)
+        layout.addWidget(
+            _help_label(
+                "New projects start with these. Change them per project "
+                "in the project window."
+            )
+        )
+
+        layout.addWidget(QLabel("Debug report"))
+        self.debug_btn = QPushButton("Write debug report")
+        self.debug_btn.clicked.connect(self._on_debug_report)
+        layout.addWidget(self.debug_btn)
+        layout.addWidget(
+            _help_label(
+                "Writes a report file with the recent log and the app "
+                "state. Secrets are scrubbed out."
+            )
+        )
+
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.close)
+        layout.addWidget(close_btn)
+        layout.addStretch(1)
+
+        self.refresh_ollama_status()
+
+    def refresh_ollama_status(self):
+        self.ollama_status.setText(f"Status: {check_ollama(ollama_url())}")
+
+    def _on_debug_report(self):
+        try:
+            path = self._main.debug_log.generate_report()
+        except Exception as exc:  # noqa: BLE001 - show it, don't crash
+            QMessageBox.warning(
+                self, "Stella", f"Could not write the debug report: {exc}"
+            )
+            return
+        QMessageBox.information(
+            self, "Stella", f"Debug report written to:\n{path}"
+        )
+
+
+class HowToUseWindow(QDialog):
+    """The built-in guide: topics on the left, plain-words content
+    on the right. Nothing is selected at first: pick a topic."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("How to Use Stella")
+        self.resize(900, 600)
+        layout = QHBoxLayout(self)
+        self.topic_list = QListWidget()
+        self.topic_list.addItems(topic_titles())
+        self.topic_list.currentItemChanged.connect(self._on_topic)
+        layout.addWidget(self.topic_list, 1)
+        self.content = QTextBrowser()
+        self.content.setPlainText(
+            "Pick a topic on the left to read how it works."
+        )
+        layout.addWidget(self.content, 2)
+
+    def _on_topic(self, current, _previous):
+        if current is None:
+            return
+        text = topic_text(current.text())
+        if text is not None:
+            self.content.setPlainText(text)
+
+
 class MainWindow(QMainWindow):
-    def __init__(self, store: Store | None = None):
+    def __init__(self, store: Store | None = None, settings=None):
         super().__init__()
         self.store = store or Store()
-        self.setWindowTitle(f"STELLA {STELLA_VERSION} — fine-tune models on your PC")
+        # Tests pass a QSettings on a temp file; the real app uses
+        # the shared BrokeNBored/Stella settings.
+        self.settings = settings or QSettings("BrokeNBored", "Stella")
+        self.setWindowTitle(
+            f"STELLA {STELLA_VERSION}: fine-tune models on your PC"
+        )
         icon_path = Path(__file__).resolve().parent.parent / "assets" / "stella.png"
         if icon_path.exists():
             self.setWindowIcon(QIcon(str(icon_path)))
@@ -326,254 +1047,190 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(900, 540)
         self._current_profile: str | None = None
         self._current_project: str | None = None
+        self._train_panel_project: tuple | None = None
         self._building = False
         self._train_worker: TrainWorker | None = None
         self._sleep_worker: SleepWorker | None = None
         self._job_worker: JobWorker | None = None
+        self._profile_windows: dict[str, ProfileWindow] = {}
+        self._project_windows: dict[tuple, ProjectWindow] = {}
+        self._settings_window: SettingsWindow | None = None
+        self._howto_window: HowToUseWindow | None = None
+        self._tree_profiles: dict[str, QTreeWidgetItem] = {}
+        self._tree_projects: dict[tuple, QTreeWidgetItem] = {}
+        self._download_profile: str | None = None
+
+        # Debug log layer (U12): rotating log under the Stella home,
+        # ring buffer, scrubbed report on demand from Settings.
+        self.debug_log = DebugLogger(
+            "stella", STELLA_VERSION, log_dir=str(self.store.home / "logs")
+        )
+        self.debug_log.set_setting("home", str(self.store.home))
+        self.debug_log.register_service(
+            "ollama", lambda: check_ollama(ollama_url())
+        )
+        for dep in (
+            "PySide6",
+            "torch",
+            "transformers",
+            "peft",
+            "huggingface_hub",
+        ):
+            self.debug_log.register_dependency(dep)
+
+        self.download_manager = DownloadManager(self)
+        self.download_manager.progress.connect(self._on_download_progress)
+        self.download_manager.finished.connect(self._on_download_finished)
+
         self._build_ui()
-        self.refresh_profiles()
+        geometry = self.settings.value("geometry")
+        if geometry is not None:
+            self.restoreGeometry(geometry)
+        splitter_state = self.settings.value("splitter")
+        if splitter_state is not None:
+            self.splitter.restoreState(splitter_state)
+        self.refresh_tree()
+        # Restore the last session (the user's own pick, not a
+        # default) and the tree expansion, if they still exist.
+        expanded = self.settings.value("tree/expanded", [])
+        if isinstance(expanded, str):
+            expanded = [expanded]
+        for slug in expanded or []:
+            item = self._tree_profiles.get(slug)
+            if item is not None:
+                item.setExpanded(True)
+        saved_profile = self.settings.value("session/profile") or None
+        saved_project = self.settings.value("session/project") or None
+        if saved_profile and saved_profile in self._tree_profiles:
+            if saved_project and (saved_profile, saved_project) in (
+                self._tree_projects
+            ):
+                self.set_session(saved_profile, saved_project)
+            else:
+                self.set_session(saved_profile, None)
+        else:
+            self.refresh_session()
 
     # -- layout -----------------------------------------------------
     def _build_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
         outer = QVBoxLayout(central)
-        header = QLabel("STELLA  —  shape a base model into its proper job")
+
+        header_row = QHBoxLayout()
+        self.menu_button = QPushButton("Menu")
+        self.menu_button.setMenu(self._build_menu())
+        header_row.addWidget(self.menu_button)
+        header = QLabel("STELLA: shape a base model into its proper job")
         header.setStyleSheet("font-size: 16px; font-weight: bold; padding: 6px 2px;")
-        outer.addWidget(header)
+        header_row.addWidget(header, 1)
+        # Activity indicator (U16): a light plus small status text,
+        # so the user never wonders whether anything is happening.
+        self.activity_dot = QLabel("\u25cf")
+        self.activity_dot.setStyleSheet("color: #888888; font-size: 16px;")
+        header_row.addWidget(self.activity_dot)
+        self.activity_text = QLabel("Idle")
+        header_row.addWidget(self.activity_text)
+        outer.addLayout(header_row)
 
-        splitter = QSplitter(Qt.Horizontal)
-        outer.addWidget(splitter, 1)
+        self.splitter = QSplitter(Qt.Horizontal)
+        outer.addWidget(self.splitter, 1)
 
-        # Left pane: profiles.
+        # Left panel: the collapsible profile menu.
         left = QWidget()
         left_layout = QVBoxLayout(left)
         left_layout.addWidget(QLabel("Profiles"))
-        self.profile_list = QListWidget()
-        self.profile_list.currentItemChanged.connect(self._on_profile_selected)
-        left_layout.addWidget(self.profile_list, 1)
-        prof_btns = QHBoxLayout()
-        self.new_profile_btn = QPushButton("New profile")
-        self.new_profile_btn.clicked.connect(self.new_profile)
-        self.rename_profile_btn = QPushButton("Rename")
-        self.rename_profile_btn.clicked.connect(self.rename_profile)
-        self.delete_profile_btn = QPushButton("Delete")
-        self.delete_profile_btn.clicked.connect(self.delete_profile)
-        prof_btns.addWidget(self.new_profile_btn)
-        prof_btns.addWidget(self.rename_profile_btn)
-        prof_btns.addWidget(self.delete_profile_btn)
-        left_layout.addLayout(prof_btns)
-        splitter.addWidget(left)
+        self.tree = QTreeWidget()
+        self.tree.setHeaderHidden(True)
+        self.tree.setColumnCount(1)
+        self.tree.currentItemChanged.connect(self._on_tree_current_changed)
+        self.tree.itemDoubleClicked.connect(self._on_tree_double_clicked)
+        left_layout.addWidget(self.tree, 1)
+        self.splitter.addWidget(left)
 
-        # Middle pane: projects.
-        mid = QWidget()
-        mid_layout = QVBoxLayout(mid)
-        mid_layout.addWidget(QLabel("Projects"))
-        self.project_list = QListWidget()
-        self.project_list.currentItemChanged.connect(self._on_project_selected)
-        mid_layout.addWidget(self.project_list, 1)
-        proj_btns = QHBoxLayout()
-        self.new_project_btn = QPushButton("New project")
-        self.new_project_btn.clicked.connect(self.new_project)
-        self.rename_project_btn = QPushButton("Rename")
-        self.rename_project_btn.clicked.connect(self.rename_project)
-        self.delete_project_btn = QPushButton("Delete")
-        self.delete_project_btn.clicked.connect(self.delete_project)
-        proj_btns.addWidget(self.new_project_btn)
-        proj_btns.addWidget(self.rename_project_btn)
-        proj_btns.addWidget(self.delete_project_btn)
-        mid_layout.addLayout(proj_btns)
-        splitter.addWidget(mid)
-
-        # Right pane: detail (scrollable).
-        self.detail_scroll = QScrollArea()
-        self.detail_scroll.setWidgetResizable(True)
-        detail = QWidget()
-        self.detail_layout = QVBoxLayout(detail)
-        self.detail_scroll.setWidget(detail)
-        self._build_detail()
-        splitter.addWidget(self.detail_scroll)
-        splitter.setSizes([260, 200, 640])
-
-        # Bottom bar: export / import.
-        bottom = QHBoxLayout()
-        self.export_btn = QPushButton("Export project")
-        self.export_btn.clicked.connect(self.export_project)
-        self.import_btn = QPushButton("Import package")
-        self.import_btn.clicked.connect(self.import_package)
-        bottom.addWidget(self.export_btn)
-        bottom.addWidget(self.import_btn)
-        bottom.addStretch(1)
-        outer.addLayout(bottom)
+        # Main area: the current training session (scrollable).
+        self.session_scroll = QScrollArea()
+        self.session_scroll.setWidgetResizable(True)
+        session = QWidget()
+        self.session_layout = QVBoxLayout(session)
+        self.session_scroll.setWidget(session)
+        self._build_session()
+        self.splitter.addWidget(self.session_scroll)
+        self.splitter.setSizes([260, 840])
         self.statusBar().showMessage("Stella ready.")
 
-    def _build_detail(self):
-        self.detail_layout.addWidget(QLabel("Profile"))
-        prof_form = QFormLayout()
+    def _build_menu(self):
+        menu = QMenu(self)
+        self.menu = menu
+        self._menu_action_profiles = menu.addAction(
+            "Profiles", self.open_current_profile_window
+        )
+        self._menu_action_new_profile = menu.addAction(
+            "New profile...", self.new_profile
+        )
+        menu.addSeparator()
+        self._menu_action_projects = menu.addAction(
+            "Projects", self.open_current_project_window
+        )
+        self._menu_action_new_project = menu.addAction(
+            "New project...", self.new_project
+        )
+        menu.addSeparator()
+        self._menu_action_export = menu.addAction(
+            "Export project...", self.export_project
+        )
+        self._menu_action_import = menu.addAction(
+            "Import package...", self.import_package
+        )
+        menu.addSeparator()
+        self._menu_action_settings = menu.addAction(
+            "Settings...", self.open_settings_window
+        )
+        self._menu_action_howto = menu.addAction(
+            "How to Use Stella...", self.open_howto_window
+        )
+        return menu
 
-        def _help(text):
-            label = QLabel(text)
-            label.setStyleSheet("color: #9a9a9a; font-size: 11px;")
-            label.setWordWrap(True)
-            return label
+    def _build_session(self):
+        self.session_title = QLabel("No training session yet.")
+        self.session_title.setStyleSheet("font-size: 14px; font-weight: bold;")
+        self.session_layout.addWidget(self.session_title)
+        self.session_summary = QLabel("")
+        self.session_summary.setWordWrap(True)
+        self.session_layout.addWidget(self.session_summary)
 
-        self.prof_display = QLineEdit()
-        self.prof_role = QLineEdit()
-        self.prof_role.setPlaceholderText("driver, reviewer, vision...")
-        self.prof_tag = QComboBox()
-        self.prof_tag.setEditable(True)
-        self.prof_base = QLineEdit()
-        prof_form.addRow("Display name", self.prof_display)
-        prof_form.addRow(
-            "", _help("Just a label for the list. It already says the model's name.")
+        # Model download row.
+        self.session_layout.addWidget(QLabel("Model weights"))
+        self.download_status_label = QLabel("")
+        self.download_status_label.setWordWrap(True)
+        self.session_layout.addWidget(self.download_status_label)
+        self.download_progress = QProgressBar()
+        self.download_progress.setMaximum(100)
+        self.download_progress.setValue(0)
+        self.session_layout.addWidget(self.download_progress)
+        dl_btns = QHBoxLayout()
+        self.download_btn = QPushButton("Download model")
+        self.download_btn.clicked.connect(
+            lambda: self.start_download(self._current_profile)
         )
-        prof_form.addRow("Role", self.prof_role)
-        prof_form.addRow(
-            "",
-            _help(
-                "Only matters if Code Forge uses this profile as a seat "
-                "(driver, reviewer…). Leave blank otherwise."
-            ),
+        self.download_cancel_btn = QPushButton("Cancel")
+        self.download_cancel_btn.clicked.connect(self.cancel_download)
+        self.download_cancel_btn.setEnabled(False)
+        dl_btns.addWidget(self.download_btn)
+        dl_btns.addWidget(self.download_cancel_btn)
+        dl_btns.addStretch(1)
+        self.session_layout.addLayout(dl_btns)
+        self.session_layout.addWidget(
+            _help_label(
+                "Downloads the base weights from Hugging Face. If it "
+                "stops, press Download again: it picks up where it left "
+                "off, nothing is downloaded twice."
+            )
         )
-        prof_form.addRow("Ollama tag", self.prof_tag)
-        prof_form.addRow(
-            "",
-            _help(
-                "The model as Ollama knows it on this PC. "
-                "Used for dreaming and the refusal probe."
-            ),
-        )
-        prof_form.addRow("Base ref", self.prof_base)
-        prof_form.addRow(
-            "",
-            _help(
-                "Where training loads the base model from — a Hugging Face "
-                "repo like LiquidAI/LFM3-1.7B. Needed before you train."
-            ),
-        )
-        # No Processor row: the stored field exists but nothing in
-        # Stella reads it — showing it only asked a question nobody
-        # could answer. It stays in profile.json for compatibility.
-        self.detail_layout.addLayout(prof_form)
-        self.save_profile_btn = QPushButton("Save profile")
-        self.save_profile_btn.clicked.connect(self.save_profile)
-        self.detail_layout.addWidget(self.save_profile_btn)
 
-        self.detail_layout.addWidget(QLabel("Project"))
-        proj_form = QFormLayout()
-        self.proj_display = QLineEdit()
-        self.proj_dataset = QLineEdit()
-        self.proj_dataset.setPlaceholderText("path or name of the training data")
-        self.proj_method = QComboBox()
-        self.proj_method.addItems(["lora", "full"])
-        # "full" is not feasible on this PC (and train.py never reads
-        # the setting anyway — it always trains LoRA). Keep it listed
-        # so old projects still show it, but nobody new can pick it.
-        self.proj_method.model().item(1).setEnabled(False)
-        self.proj_rank = QSpinBox()
-        self.proj_rank.setRange(1, 64)
-        self.proj_lr = QLineEdit()
-        self.proj_epochs = QSpinBox()
-        self.proj_epochs.setRange(1, 100)
-        self.proj_batch = QSpinBox()
-        self.proj_batch.setRange(1, 32)
-        self.proj_seq = QSpinBox()
-        self.proj_seq.setRange(128, 32768)
-        self.proj_metamorph = QComboBox()
-        self.proj_metamorph.addItems(list(METAMORPH_MODES))
-        self.proj_metamorph.setToolTip(
-            "MetaMorphAi modes aren't wired up yet — this is stored "
-            "but training ignores it."
-        )
-        proj_form.addRow("Display name", self.proj_display)
-        proj_form.addRow("", _help("Just a label for the project list."))
-        proj_form.addRow("Dataset", self.proj_dataset)
-        proj_form.addRow(
-            "",
-            _help(
-                "The training data — a .jsonl file of examples. "
-                "The Train panel below has a sample to try."
-            ),
-        )
-        proj_form.addRow("Method", self.proj_method)
-        proj_form.addRow(
-            "",
-            _help(
-                "lora trains a small adapter on top of the base — the "
-                "only way that fits this PC."
-            ),
-        )
-        proj_form.addRow("LoRA rank", self.proj_rank)
-        proj_form.addRow(
-            "",
-            _help(
-                "How big the adapter is. 8 is the usual — bigger learns "
-                "more but uses more RAM."
-            ),
-        )
-        proj_form.addRow("Learning rate", self.proj_lr)
-        proj_form.addRow(
-            "",
-            _help(
-                "How big each training step is. 0.0002 is the usual — "
-                "bigger learns faster but can wreck the model."
-            ),
-        )
-        proj_form.addRow("Epochs", self.proj_epochs)
-        proj_form.addRow(
-            "", _help("How many full passes over the data. 3 is the usual.")
-        )
-        proj_form.addRow("Batch size", self.proj_batch)
-        proj_form.addRow(
-            "", _help("Examples per training step. 1 fits this PC — leave it.")
-        )
-        proj_form.addRow("Max seq len", self.proj_seq)
-        proj_form.addRow(
-            "", _help("Longest example, in tokens. 1024 is the usual.")
-        )
-        proj_form.addRow("MetaMorphAi", self.proj_metamorph)
-        proj_form.addRow(
-            "",
-            _help(
-                "Does nothing yet — the modes aren't wired to training. "
-                "Leave it alone for now."
-            ),
-        )
-        self.detail_layout.addLayout(proj_form)
-        self.save_project_btn = QPushButton("Save project")
-        self.save_project_btn.clicked.connect(self.save_project)
-        self.detail_layout.addWidget(self.save_project_btn)
-        self.detail_layout.addWidget(QLabel("Notes"))
-        self.proj_notes = QPlainTextEdit()
-        self.proj_notes.setMinimumHeight(120)
-        self.detail_layout.addWidget(self.proj_notes)
-        # The forms grey out when nothing is selected, so an empty
-        # panel never looks like real settings (the spinboxes used to
-        # show 1 / 1 / 128, which were just their minimums).
-        self._profile_widgets = [
-            self.prof_display,
-            self.prof_role,
-            self.prof_tag,
-            self.prof_base,
-            self.save_profile_btn,
-        ]
-        self._project_widgets = [
-            self.proj_display,
-            self.proj_dataset,
-            self.proj_method,
-            self.proj_rank,
-            self.proj_lr,
-            self.proj_epochs,
-            self.proj_batch,
-            self.proj_seq,
-            self.proj_metamorph,
-            self.proj_notes,
-            self.save_project_btn,
-        ]
-
-        # Train panel (Item 3): dataset, Start / Pause / Resume,
-        # progress, checkpoints, GGUF export, refusal probe, log.
-        self.detail_layout.addWidget(QLabel("Train"))
+        # Train panel: dataset, Start / Pause / Resume, progress,
+        # checkpoints, GGUF export, refusal probe, log.
+        self.session_layout.addWidget(QLabel("Train"))
         dataset_btns = QHBoxLayout()
         self.train_pick_dataset_btn = QPushButton("Pick dataset file")
         self.train_pick_dataset_btn.clicked.connect(self.pick_dataset)
@@ -581,7 +1238,7 @@ class MainWindow(QMainWindow):
         self.train_sample_btn.clicked.connect(self.use_sample_dataset)
         dataset_btns.addWidget(self.train_pick_dataset_btn)
         dataset_btns.addWidget(self.train_sample_btn)
-        self.detail_layout.addLayout(dataset_btns)
+        self.session_layout.addLayout(dataset_btns)
         train_btns = QHBoxLayout()
         self.train_start_btn = QPushButton("Start training")
         self.train_start_btn.clicked.connect(
@@ -597,16 +1254,16 @@ class MainWindow(QMainWindow):
         train_btns.addWidget(self.train_start_btn)
         train_btns.addWidget(self.train_pause_btn)
         train_btns.addWidget(self.train_resume_btn)
-        self.detail_layout.addLayout(train_btns)
+        self.session_layout.addLayout(train_btns)
         self.train_progress = QProgressBar()
         self.train_progress.setValue(0)
-        self.detail_layout.addWidget(self.train_progress)
+        self.session_layout.addWidget(self.train_progress)
         self.train_loss = QLabel("Not started.")
-        self.detail_layout.addWidget(self.train_loss)
-        self.detail_layout.addWidget(QLabel("Checkpoints"))
+        self.session_layout.addWidget(self.train_loss)
+        self.session_layout.addWidget(QLabel("Checkpoints"))
         self.train_checkpoints = QListWidget()
         self.train_checkpoints.setMaximumHeight(90)
-        self.detail_layout.addWidget(self.train_checkpoints)
+        self.session_layout.addWidget(self.train_checkpoints)
         export_btns = QHBoxLayout()
         self.train_export_gguf_btn = QPushButton("Export GGUF")
         self.train_export_gguf_btn.clicked.connect(self.export_gguf_gui)
@@ -614,35 +1271,37 @@ class MainWindow(QMainWindow):
         self.train_probe_btn.clicked.connect(self.run_probe_gui)
         export_btns.addWidget(self.train_export_gguf_btn)
         export_btns.addWidget(self.train_probe_btn)
-        self.detail_layout.addLayout(export_btns)
-        self.detail_layout.addWidget(QLabel("Training log"))
+        self.session_layout.addLayout(export_btns)
+        self.session_layout.addWidget(QLabel("Training log"))
         self.train_log = QPlainTextEdit()
         self.train_log.setReadOnly(True)
         self.train_log.setMinimumHeight(120)
-        self.detail_layout.addWidget(self.train_log)
+        self.session_layout.addWidget(self.train_log)
 
-        # Sleep panel (Item 4): run a sleep cycle, dream synthetic
-        # rows first, and see every cycle's replay verdict.
-        self.detail_layout.addWidget(QLabel("Sleep"))
+        # Sleep panel: run a sleep cycle, dream synthetic rows
+        # first, and see every cycle's replay verdict.
+        self.session_layout.addWidget(QLabel("Sleep"))
         sleep_btns = QHBoxLayout()
         self.sleep_btn = QPushButton("Sleep")
         self.sleep_btn.clicked.connect(self.start_sleep)
         self.sleep_dream_check = QCheckBox("Dream first")
         self.sleep_dream_check.setToolTip(
             "Dream synthetic practice rows from the local Ollama model "
-            "before consolidating (best effort — sleep still runs on "
+            "before consolidating (best effort: sleep still runs on "
             "real rows if Ollama is down)."
         )
         sleep_btns.addWidget(self.sleep_btn)
         sleep_btns.addWidget(self.sleep_dream_check)
         sleep_btns.addStretch(1)
-        self.detail_layout.addLayout(sleep_btns)
-        self.detail_layout.addWidget(QLabel("Sleep cycles (click one to see its report)"))
+        self.session_layout.addLayout(sleep_btns)
+        self.session_layout.addWidget(
+            QLabel("Sleep cycles (click one to see its report)")
+        )
         self.sleep_cycles = QListWidget()
         self.sleep_cycles.setMaximumHeight(90)
         self.sleep_cycles.itemClicked.connect(self._on_sleep_cycle_clicked)
-        self.detail_layout.addWidget(self.sleep_cycles)
-        self.detail_layout.addStretch(1)
+        self.session_layout.addWidget(self.sleep_cycles)
+        self.session_layout.addStretch(1)
 
     # -- helpers ----------------------------------------------------
     def _say(self, text: str):
@@ -654,210 +1313,436 @@ class MainWindow(QMainWindow):
     def _warn(self, text: str):
         QMessageBox.warning(self, "Stella", text)
 
+    def _set_activity(self, state: str, text: str):
+        """The activity light + text (U16). States: idle,
+        downloading, training, sleep, job."""
+        colors = {
+            "idle": "#888888",
+            "downloading": "#e8a90c",
+            "training": "#4caf50",
+            "sleep": "#4caf50",
+            "job": "#e8a90c",
+        }
+        self.activity_dot.setStyleSheet(
+            f"color: {colors.get(state, '#888888')}; font-size: 16px;"
+        )
+        self.activity_text.setText(text)
+
     def _selected_profile(self) -> str | None:
-        item = self.profile_list.currentItem()
-        return item.data(Qt.UserRole) if item else None
+        return self._current_profile
 
     def _selected_project(self) -> str | None:
-        item = self.project_list.currentItem()
-        return item.data(Qt.UserRole) if item else None
+        return self._current_project
 
-    # -- refresh ----------------------------------------------------
-    def refresh_profiles(self):
-        self._building = True
-        keep = self._current_profile
-        self.profile_list.clear()
-        for p in self.store.list_profiles():
-            role = p.get("role") or ""
-            tag = p.get("ollama_tag") or p.get("base_ref") or ""
-            label = p.get("display_name") or p["name"]
-            if role:
-                label += f"  [{role}]"
-            if tag:
-                label += f"  — {tag}"
-            item = QListWidgetItem(label)
-            item.setData(Qt.UserRole, p["name"])
-            self.profile_list.addItem(item)
-        self._building = False
-        if keep:
-            for i in range(self.profile_list.count()):
-                if self.profile_list.item(i).data(Qt.UserRole) == keep:
-                    self.profile_list.setCurrentRow(i)
-                    return
-        if self.profile_list.count():
-            self.profile_list.setCurrentRow(0)
-        else:
-            self._current_profile = None
-            self.refresh_projects()
+    @property
+    def download_profile(self) -> str | None:
+        """The profile whose weights are downloading, if any."""
+        return self._download_profile
 
-    def refresh_projects(self):
-        self._building = True
-        keep = self._current_project
-        self.project_list.clear()
-        profile = self._current_profile
-        if profile:
-            for p in self.store.list_projects(profile):
-                label = p.get("display_name") or p["name"]
-                mode = (p.get("metamorph") or {}).get("mode", "morph")
-                label += f"  — {mode}"
-                item = QListWidgetItem(label)
-                item.setData(Qt.UserRole, p["name"])
-                self.project_list.addItem(item)
-        self._building = False
-        if keep:
-            for i in range(self.project_list.count()):
-                if self.project_list.item(i).data(Qt.UserRole) == keep:
-                    self.project_list.setCurrentRow(i)
-                    return
-        if self.project_list.count():
-            self.project_list.setCurrentRow(0)
-        else:
-            self._current_project = None
-            self._show_project_detail()
 
-    # -- selection --------------------------------------------------
-    def _on_profile_selected(self, current, _previous):
-        if self._building:
-            return
-        self._current_profile = current.data(Qt.UserRole) if current else None
-        self._current_project = None
-        self._show_profile_detail()
-        self.refresh_projects()
+    # -- tree -------------------------------------------------------
+    @staticmethod
+    def _profile_label(p):
+        label = p.get("display_name") or p["name"]
+        role = p.get("role") or ""
+        tag = p.get("ollama_tag") or p.get("base_ref") or ""
+        if role:
+            label += f" [{role}]"
+        if tag:
+            label += f" ({tag})"
+        return label
 
-    def _on_project_selected(self, current, _previous):
-        if self._building:
-            return
-        self._current_project = current.data(Qt.UserRole) if current else None
-        self._show_project_detail()
-
-    def _show_profile_detail(self):
-        for w in self._profile_widgets:
-            w.setEnabled(bool(self._current_profile))
-        self.prof_tag.clear()
-        models = list_models()
-        if models:
-            self.prof_tag.addItems(models)
-        if not self._current_profile:
-            for w in (self.prof_display, self.prof_role, self.prof_base):
-                w.setText("")
-            self.prof_tag.setCurrentText("")
-            return
-        try:
-            p = self.store.get_profile(self._current_profile)
-        except StellaError as exc:
-            self._say(str(exc))
-            return
-        self.prof_display.setText(p.get("display_name", ""))
-        self.prof_role.setText(p.get("role", ""))
-        tag = p.get("ollama_tag", "")
-        if tag and tag not in models:
-            self.prof_tag.addItem(tag)
-        self.prof_tag.setCurrentText(tag)
-        self.prof_base.setText(p.get("base_ref", ""))
-
-    def _show_project_detail(self):
-        has_project = bool(self._current_profile and self._current_project)
-        for w in self._project_widgets:
-            w.setEnabled(has_project)
-        if not has_project:
-            for w in (self.proj_display, self.proj_dataset):
-                w.setText("")
-            self.proj_notes.setPlainText("")
-            # Greyed-out, the panel shows the defaults a new project
-            # gets — not the spinbox minimums (1 / 1 / 128), which
-            # looked like real settings.
-            self.proj_rank.setValue(8)
-            self.proj_lr.setText("0.0002")
-            self.proj_epochs.setValue(3)
-            self.proj_batch.setValue(1)
-            self.proj_seq.setValue(1024)
-            if self._current_profile:
-                self._say(f"Profile: {self._current_profile} — no project yet.")
-            else:
-                self._say("Pick a profile to begin.")
-            self.refresh_train_panel()
-            return
-        try:
-            p = self.store.get_project(self._current_profile, self._current_project)
-            notes = self.store.read_notes(self._current_profile, self._current_project)
-        except StellaError as exc:
-            self._say(str(exc))
-            return
-        self.proj_display.setText(p.get("display_name", ""))
-        self.proj_dataset.setText(p.get("dataset_ref", ""))
-        settings = p.get("settings", {})
-        method = settings.get("method", "lora")
-        idx = self.proj_method.findText(method)
-        self.proj_method.setCurrentIndex(idx if idx >= 0 else 0)
-        self.proj_rank.setValue(int(settings.get("rank", 8)))
-        self.proj_lr.setText(str(settings.get("learning_rate", 0.0002)))
-        self.proj_epochs.setValue(int(settings.get("epochs", 3)))
-        self.proj_batch.setValue(int(settings.get("batch_size", 1)))
-        self.proj_seq.setValue(int(settings.get("max_seq_len", 1024)))
+    @staticmethod
+    def _project_label(p):
+        label = p.get("display_name") or p["name"]
         mode = (p.get("metamorph") or {}).get("mode", "morph")
-        idx = self.proj_metamorph.findText(mode)
-        self.proj_metamorph.setCurrentIndex(idx if idx >= 0 else 0)
-        self.proj_notes.setPlainText(notes)
-        self._say(f"Profile: {self._current_profile} — project: {self._current_project}.")
+        return f"{label} ({mode})"
+
+    def refresh_tree(self):
+        """Sync the tree with the store WITHOUT rebuilding it (U28):
+        add missing rows, remove stale ones, relabel in place.
+        Expansion, scroll position, and selection survive."""
+        expanded = {
+            slug for slug, item in self._tree_profiles.items()
+            if item.isExpanded()
+        }
+        vbar = self.tree.verticalScrollBar()
+        scroll = vbar.value() if vbar is not None else 0
+        profiles = {p["name"]: p for p in self.store.list_profiles()}
+        for slug in list(self._tree_profiles):
+            if slug not in profiles:
+                item = self._tree_profiles.pop(slug)
+                for key in list(self._tree_projects):
+                    if key[0] == slug:
+                        del self._tree_projects[key]
+                self.tree.takeTopLevelItem(
+                    self.tree.indexOfTopLevelItem(item)
+                )
+        for slug, p in profiles.items():
+            item = self._tree_profiles.get(slug)
+            if item is None:
+                item = QTreeWidgetItem(self.tree, [self._profile_label(p)])
+                item.setData(0, Qt.UserRole, (slug, None))
+                self._tree_profiles[slug] = item
+            else:
+                item.setText(0, self._profile_label(p))
+            projects = {
+                pr["name"]: pr for pr in self.store.list_projects(slug)
+            }
+            for key in list(self._tree_projects):
+                if key[0] == slug and key[1] not in projects:
+                    item.removeChild(self._tree_projects.pop(key))
+            for pname, pr in projects.items():
+                key = (slug, pname)
+                child = self._tree_projects.get(key)
+                if child is None:
+                    child = QTreeWidgetItem(item, [self._project_label(pr)])
+                    child.setData(0, Qt.UserRole, key)
+                    self._tree_projects[key] = child
+                else:
+                    child.setText(0, self._project_label(pr))
+        self.tree.sortItems(0, Qt.AscendingOrder)
+        for slug, item in self._tree_profiles.items():
+            item.setExpanded(slug in expanded)
+        if vbar is not None:
+            vbar.setValue(scroll)
+        self._sync_tree_selection()
+
+    def _sync_tree_selection(self):
+        """Select the tree row matching the current session (or
+        nothing, when there is no session). Guarded so the program
+        move does not re-enter set_session."""
+        self._building = True
+        try:
+            if self._current_profile and self._current_project:
+                item = self._tree_projects.get(
+                    (self._current_profile, self._current_project)
+                )
+            elif self._current_profile:
+                item = self._tree_profiles.get(self._current_profile)
+            else:
+                item = None
+            if item is not None:
+                self.tree.setCurrentItem(item)
+            else:
+                self.tree.setCurrentItem(None)
+        finally:
+            self._building = False
+
+    def _on_tree_current_changed(self, current, _previous):
+        if self._building or current is None:
+            return
+        data = current.data(0, Qt.UserRole)
+        if data is None:
+            return
+        profile, project = data
+        self.set_session(profile, project)
+
+    def _on_tree_double_clicked(self, item, _column):
+        data = item.data(0, Qt.UserRole)
+        if data is None:
+            return
+        profile, project = data
+        if project is None:
+            self.open_profile_window(profile)
+        else:
+            self.open_project_window(profile, project)
+
+    # -- session ----------------------------------------------------
+    def set_session(self, profile, project):
+        """Clicking a project in the tree sets the training session.
+        The session is remembered across restarts (QSettings)."""
+        self._current_profile = profile
+        self._current_project = project
+        self.settings.setValue("session/profile", profile or "")
+        self.settings.setValue("session/project", project or "")
+        self.refresh_tree()
+        self.refresh_session()
+
+    def refresh_session(self):
+        """The main area follows the current session."""
+        has_profile = bool(self._current_profile)
+        has_session = bool(self._current_profile and self._current_project)
+        if has_session:
+            try:
+                prof = self.store.get_profile(self._current_profile)
+                proj = self.store.get_project(
+                    self._current_profile, self._current_project
+                )
+            except StellaError as exc:
+                self._say(str(exc))
+                return
+            self.session_title.setText(
+                f"{prof.get('display_name') or self._current_profile} / "
+                f"{proj.get('display_name') or self._current_project}"
+            )
+            settings = proj.get("settings", {})
+            model = (
+                prof.get("ollama_tag") or prof.get("base_ref") or "not set"
+            )
+            dataset = proj.get("dataset_ref") or "not set yet"
+            self.session_summary.setText(
+                f"Model: {model}\n"
+                f"Dataset: {dataset}\n"
+                f"LoRA rank {settings.get('rank', 8)}, learning rate "
+                f"{settings.get('learning_rate', 0.0002)}, "
+                f"{settings.get('epochs', 3)} epochs. "
+                f"Status: {proj.get('status', 'draft')}."
+            )
+            self._say(
+                f"Profile: {self._current_profile}, "
+                f"project: {self._current_project}."
+            )
+        elif has_profile:
+            try:
+                prof = self.store.get_profile(self._current_profile)
+                name = prof.get("display_name") or self._current_profile
+            except StellaError:
+                name = self._current_profile
+            self.session_title.setText(name)
+            self.session_summary.setText(
+                "Pick a project on the left to set the training session, "
+                "or make one from the menu: New project."
+            )
+            self._say(f"Profile: {self._current_profile}, no project yet.")
+        else:
+            self.session_title.setText("No training session yet.")
+            self.session_summary.setText(
+                "Pick a project in the list on the left. That sets the "
+                "training session: the model and the fine-tune you are "
+                "working on."
+            )
+            self._say("Pick a profile to begin.")
+        for w in (
+            self.train_pick_dataset_btn,
+            self.train_sample_btn,
+            self.train_start_btn,
+            self.train_resume_btn,
+            self.sleep_btn,
+            self.train_export_gguf_btn,
+            self.train_probe_btn,
+        ):
+            w.setEnabled(has_session)
+        self.download_btn.setEnabled(
+            has_profile and not self.download_manager.is_running()
+        )
+        self.download_cancel_btn.setEnabled(
+            self.download_manager.is_running()
+        )
+        self._refresh_download_row()
         self.refresh_train_panel()
 
-    # -- save -------------------------------------------------------
-    def save_profile(self):
+    def _refresh_download_row(self):
         if not self._current_profile:
+            self.download_status_label.setText("Pick a profile first.")
+            self.download_progress.setMaximum(100)
+            self.download_progress.setValue(0)
             return
         try:
-            self.store.update_profile(
-                self._current_profile,
-                display_name=self.prof_display.text().strip(),
-                role=self.prof_role.text().strip(),
-                ollama_tag=self.prof_tag.currentText().strip(),
-                base_ref=self.prof_base.text().strip(),
+            status = provision.weights_status(
+                self.store, self._current_profile
             )
-        except StellaError as exc:
-            self._warn(str(exc))
+        except StellaError:
+            self.download_status_label.setText("Profile not found.")
             return
-        self.refresh_profiles()
-        self._say(f"Saved profile {self._current_profile}.")
+        if self.download_manager.is_running():
+            return  # progress updates own the label while downloading
+        self.download_status_label.setText(_weights_label(status))
+        self.download_progress.setMaximum(100)
+        self.download_progress.setValue(
+            100 if status["state"] == "ready" else 0
+        )
 
-    def save_project(self) -> bool:
-        """Save the project form. Returns True on success, False when
-        nothing was saved (no project, bad learning rate, store
-        error) — callers that start work on the saved settings must
-        check this instead of starting on stale settings."""
-        if not self._current_profile or not self._current_project:
-            return False
+    # -- downloads --------------------------------------------------
+    def start_download(self, profile=None):
+        slug = profile or self._current_profile
+        if not slug:
+            self._warn("Pick a profile first.")
+            return
+        if self.download_manager.is_running():
+            self._say("A download is already running.")
+            return
         try:
-            lr = float(self.proj_lr.text().strip() or "0.0002")
-        except ValueError:
-            self._warn("Learning rate must be a number, like 0.0002.")
-            return False
+            status = provision.weights_status(self.store, slug)
+        except StellaError as exc:
+            self._warn(str(exc))
+            return
+        if status["state"] == "ready":
+            self._say("Model already downloaded.")
+            self._refresh_download_row()
+            return
+        if status["state"] == "no-repo":
+            self._warn(
+                "No Hugging Face repo set for this profile. Open the "
+                "profile and set Base ref to a repo like "
+                "LiquidAI/LFM3-1.7B."
+            )
+            return
+        if not provision.hub_available():
+            self._warn(
+                "The download tool is not installed. Run this once in "
+                "the Stella folder: bash install-training.sh"
+            )
+            return
+        repo = status["repo"]
+        self._download_profile = slug
+        self.download_manager.start(repo)
+        self._set_activity("downloading", "Downloading model: 0%")
+        self.download_btn.setEnabled(False)
+        self.download_cancel_btn.setEnabled(True)
+        self.download_progress.setMaximum(100)
+        self.download_progress.setValue(0)
+        self.download_status_label.setText("Downloading: 0%")
+        win = self._profile_windows.get(slug)
+        if win is not None:
+            win.refresh_download_status()
+        self._say(f"Downloading {repo}...")
+        self.debug_log.action(f"download started: {repo} ({slug})")
+
+    def cancel_download(self):
+        self.download_manager.cancel()
+
+    def _on_download_progress(self, downloaded, total):
+        if total > 0:
+            pct = downloaded * 100 // total
+            self.download_progress.setMaximum(100)
+            self.download_progress.setValue(pct)
+            self._set_activity("downloading", f"Downloading model: {pct}%")
+            self.download_status_label.setText(
+                f"Downloading: {pct}% "
+                f"({provision.format_size(downloaded)} of "
+                f"{provision.format_size(total)})"
+            )
+        else:
+            self.download_progress.setMaximum(0)
+            self._set_activity("downloading", "Downloading model...")
+            self.download_status_label.setText(
+                "Downloading: "
+                f"{provision.format_size(downloaded)} so far"
+            )
+        win = (
+            self._profile_windows.get(self._download_profile)
+            if self._download_profile
+            else None
+        )
+        if win is not None:
+            win.on_download_progress(downloaded, total)
+
+    def _on_download_finished(self, ok, message):
+        slug = self._download_profile
+        self._download_profile = None
+        self._set_activity("idle", "Idle")
+        self.download_btn.setEnabled(bool(self._current_profile))
+        self.download_cancel_btn.setEnabled(False)
+        self.download_progress.setMaximum(100)
+        if ok:
+            self.download_progress.setValue(100)
+            self._say("Model ready.")
+            self.debug_log.action(f"download finished: {slug}")
+        else:
+            self.download_progress.setValue(0)
+            if self.download_manager.was_cancelled():
+                self._say(
+                    "Download stopped. It will pick up where it left off."
+                )
+            else:
+                self._say("Download failed.")
+                self._warn(message)
+                self.debug_log.action(f"download failed: {slug}: {message}")
+        self._refresh_download_row()
+        if slug:
+            win = self._profile_windows.get(slug)
+            if win is not None:
+                win.refresh_download_status()
+
+    def _weights_offer(self, profile) -> bool:
+        """True when training may start. When the weights are
+        missing, offer the download first instead of failing
+        cryptically in the training thread."""
         try:
-            self.store.update_project(
-                self._current_profile,
-                self._current_project,
-                display_name=self.proj_display.text().strip(),
-                dataset_ref=self.proj_dataset.text().strip(),
-                settings={
-                    "method": self.proj_method.currentText(),
-                    "rank": self.proj_rank.value(),
-                    "learning_rate": lr,
-                    "epochs": self.proj_epochs.value(),
-                    "batch_size": self.proj_batch.value(),
-                    "max_seq_len": self.proj_seq.value(),
-                },
-                metamorph={"mode": self.proj_metamorph.currentText()},
-            )
-            self.store.write_notes(
-                self._current_profile,
-                self._current_project,
-                self.proj_notes.toPlainText(),
-            )
+            status = provision.weights_status(self.store, profile)
         except StellaError as exc:
             self._warn(str(exc))
             return False
-        self.refresh_projects()
-        self._say(f"Saved project {self._current_project}.")
-        return True
+        if status["state"] == "ready":
+            return True
+        if status["state"] == "no-repo":
+            self._warn(
+                "This profile has no Hugging Face repo set. Open the "
+                "profile and set Base ref to a repo like "
+                "LiquidAI/LFM3-1.7B, then download the model."
+            )
+            return False
+        answer = QMessageBox.question(
+            self,
+            "Download the model first?",
+            "The base weights for this profile are not downloaded yet "
+            f"({_weights_label(status).lower()}). Download them now?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if answer == QMessageBox.Yes:
+            self.start_download(profile)
+        return False
+
+    # -- dedicated windows ------------------------------------------
+    def open_profile_window(self, slug=None):
+        slug = slug or self._current_profile
+        if not slug:
+            self._warn("Pick a profile first.")
+            return None
+        win = self._profile_windows.get(slug)
+        if win is None:
+            win = ProfileWindow(self, slug, parent=self)
+            win.destroyed.connect(
+                lambda _obj, s=slug: self._profile_windows.pop(s, None)
+            )
+            self._profile_windows[slug] = win
+        win.show()
+        win.raise_()
+        win.activateWindow()
+        return win
+
+    def open_current_profile_window(self):
+        self.open_profile_window()
+
+    def open_project_window(self, profile=None, project=None):
+        profile = profile or self._current_profile
+        project = project or self._current_project
+        if not profile or not project:
+            self._warn("Pick a project first.")
+            return None
+        key = (profile, project)
+        win = self._project_windows.get(key)
+        if win is None:
+            win = ProjectWindow(self, profile, project, parent=self)
+            win.destroyed.connect(
+                lambda _obj, k=key: self._project_windows.pop(k, None)
+            )
+            self._project_windows[key] = win
+        win.show()
+        win.raise_()
+        win.activateWindow()
+        return win
+
+    def open_current_project_window(self):
+        self.open_project_window()
+
+    def open_settings_window(self):
+        if self._settings_window is None:
+            self._settings_window = SettingsWindow(self, parent=self)
+        self._settings_window.show()
+        self._settings_window.raise_()
+        self._settings_window.activateWindow()
+        return self._settings_window
+
+    def open_howto_window(self):
+        if self._howto_window is None:
+            self._howto_window = HowToUseWindow(parent=self)
+        self._howto_window.show()
+        self._howto_window.raise_()
+        self._howto_window.activateWindow()
+        return self._howto_window
 
     # -- profile actions --------------------------------------------
     def new_profile(self):
@@ -894,12 +1779,12 @@ class MainWindow(QMainWindow):
             self._warn(str(exc))
             return
         dialog.accept()
-        self._current_profile = slug
+        self.debug_log.action(f"profile created: {slug} (from {model})")
+        self.set_session(slug, None)
         self._say(f"Created profile {slug}.")
-        self.refresh_profiles()
 
-    def rename_profile(self):
-        slug = self._selected_profile()
+    def rename_profile(self, slug=None):
+        slug = slug or self._current_profile
         if not slug:
             return
         text, ok = QInputDialog.getText(self, "Rename profile", "New name:", text=slug)
@@ -910,15 +1795,39 @@ class MainWindow(QMainWindow):
         except StellaError as exc:
             self._warn(str(exc))
             return
-        self._current_profile = data["name"]
-        self.refresh_profiles()
+        new = data["name"]
+        win = self._profile_windows.pop(slug, None)
+        if win is not None:
+            win.retarget(new)
+            self._profile_windows[new] = win
+        for key in list(self._project_windows):
+            if key[0] == slug:
+                proj_win = self._project_windows.pop(key)
+                proj_win.retarget_profile(new)
+                self._project_windows[(new, key[1])] = proj_win
+        if self._current_profile == slug:
+            self.set_session(new, self._current_project)
+        else:
+            self.refresh_tree()
 
-    def delete_profile(self):
-        slug = self._selected_profile()
+    def _delete_confirm(self, title, text):
+        """A destructive confirmation that defaults to No, and where
+        Escape leaves things untouched (U23/U31)."""
+        box = QMessageBox(self)
+        box.setWindowTitle(title)
+        box.setText(text)
+        box.setIcon(QMessageBox.Warning)
+        box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        box.setDefaultButton(QMessageBox.No)
+        box.setEscapeButton(QMessageBox.No)
+        return box.exec()
+
+    def delete_profile(self, slug=None):
+        slug = slug or self._current_profile
         if not slug:
             return
-        answer = QMessageBox.question(
-            self, "Delete profile",
+        answer = self._delete_confirm(
+            "Delete profile",
             f"Delete profile {slug!r} and all its projects? This cannot be undone.",
         )
         if answer != QMessageBox.Yes:
@@ -928,9 +1837,17 @@ class MainWindow(QMainWindow):
         except StellaError as exc:
             self._warn(str(exc))
             return
-        self._current_profile = None
-        self._current_project = None
-        self.refresh_profiles()
+        win = self._profile_windows.pop(slug, None)
+        if win is not None:
+            win.close()
+        for key in list(self._project_windows):
+            if key[0] == slug:
+                self._project_windows.pop(key).close()
+        self.debug_log.action(f"profile deleted: {slug}")
+        if self._current_profile == slug:
+            self.set_session(None, None)
+        else:
+            self.refresh_tree()
 
     # -- project actions --------------------------------------------
     def new_project(self):
@@ -949,12 +1866,15 @@ class MainWindow(QMainWindow):
             self._warn(str(exc))
             return
         self._current_project = text.strip().lower()
+        self.debug_log.action(
+            f"project created: {profile}/{self._current_project}"
+        )
+        self.set_session(profile, self._current_project)
         self._say(f"Created project {self._current_project}.")
-        self.refresh_projects()
 
-    def rename_project(self):
-        profile = self._selected_profile()
-        project = self._selected_project()
+    def rename_project(self, profile=None, project=None):
+        profile = profile or self._selected_profile()
+        project = project or self._selected_project()
         if not profile or not project:
             return
         text, ok = QInputDialog.getText(
@@ -967,16 +1887,26 @@ class MainWindow(QMainWindow):
         except StellaError as exc:
             self._warn(str(exc))
             return
-        self._current_project = data["name"]
-        self.refresh_projects()
+        new = data["name"]
+        win = self._project_windows.pop((profile, project), None)
+        if win is not None:
+            win.retarget(new)
+            self._project_windows[(profile, new)] = win
+        if (
+            self._current_profile == profile
+            and self._current_project == project
+        ):
+            self.set_session(profile, new)
+        else:
+            self.refresh_tree()
 
-    def delete_project(self):
-        profile = self._selected_profile()
-        project = self._selected_project()
+    def delete_project(self, profile=None, project=None):
+        profile = profile or self._selected_profile()
+        project = project or self._selected_project()
         if not profile or not project:
             return
-        answer = QMessageBox.question(
-            self, "Delete project",
+        answer = self._delete_confirm(
+            "Delete project",
             f"Delete project {project!r}? This cannot be undone.",
         )
         if answer != QMessageBox.Yes:
@@ -986,8 +1916,17 @@ class MainWindow(QMainWindow):
         except StellaError as exc:
             self._warn(str(exc))
             return
-        self._current_project = None
-        self.refresh_projects()
+        win = self._project_windows.pop((profile, project), None)
+        if win is not None:
+            win.close()
+        self.debug_log.action(f"project deleted: {profile}/{project}")
+        if (
+            self._current_profile == profile
+            and self._current_project == project
+        ):
+            self.set_session(profile, None)
+        else:
+            self.refresh_tree()
 
     # -- export / import --------------------------------------------
     def export_project(self):
@@ -1006,6 +1945,7 @@ class MainWindow(QMainWindow):
         except StellaError as exc:
             self._warn(str(exc))
             return
+        self.debug_log.action(f"project exported: {profile}/{project} to {out}")
         self._say(f"Exported to {out}.")
         QMessageBox.information(self, "Stella", f"Exported project to:\n{out}")
 
@@ -1020,10 +1960,11 @@ class MainWindow(QMainWindow):
         except StellaError as exc:
             self._warn(str(exc))
             return
-        self._current_profile = result["profile"]
-        self._current_project = result["project"]
+        self.debug_log.action(
+            f"project imported: {result['profile']}/{result['project']}"
+        )
+        self.set_session(result["profile"], result["project"])
         self._say(f"Imported {result['project']} into {result['profile']}.")
-        self.refresh_profiles()
 
     # -- training ---------------------------------------------------
     def _train_log_line(self, text: str):
@@ -1045,7 +1986,16 @@ class MainWindow(QMainWindow):
         self.sleep_cycles.clear()
         if not self._current_profile or not self._current_project:
             self.train_loss.setText("Pick a project to train.")
+            self._train_panel_project = None
             return
+        # A new project gets a fresh loss line; the same project
+        # keeps its last progress (a finished run's final step/loss
+        # must survive the refresh that follows it).
+        key = (self._current_profile, self._current_project)
+        if self._train_panel_project != key:
+            self._train_panel_project = key
+            if not self._training_running() and not self._sleep_running():
+                self.train_loss.setText("Not started.")
         from .train import list_checkpoints
 
         for ck in list_checkpoints(
@@ -1068,7 +2018,7 @@ class MainWindow(QMainWindow):
                 delta = (after - before) / before
             delta_text = f"{delta:+.1%}" if delta is not None else "n/a"
             label = (
-                f"cycle {c['cycle']} — {c['status']} — "
+                f"cycle {c['cycle']}: {c['status']}, "
                 f"{c['real_rows']} new, {c['dreamed_rows']} dreamed, "
                 f"old-loss {delta_text}"
             )
@@ -1088,19 +2038,42 @@ class MainWindow(QMainWindow):
             self.train_log.setPlainText("")
 
     def pick_dataset(self):
+        if not self._current_profile or not self._current_project:
+            self._warn("Pick a project first.")
+            return
         path, _ = QFileDialog.getOpenFileName(
             self, "Pick a dataset file", str(Path.home()),
             "JSONL datasets (*.jsonl);;All files (*)",
         )
-        if path:
-            self.proj_dataset.setText(path)
+        if not path:
+            return
+        try:
+            self.store.update_project(
+                self._current_profile, self._current_project,
+                dataset_ref=path,
+            )
+        except StellaError as exc:
+            self._warn(str(exc))
+            return
+        self.refresh_session()
+        self._say(f"Dataset set to {path}.")
 
     def use_sample_dataset(self):
-        self.proj_dataset.setText("sample-tool-calls.jsonl")
-        self.save_project()
+        if not self._current_profile or not self._current_project:
+            self._warn("Pick a project first.")
+            return
+        try:
+            self.store.update_project(
+                self._current_profile, self._current_project,
+                dataset_ref="sample-tool-calls.jsonl",
+            )
+        except StellaError as exc:
+            self._warn(str(exc))
+            return
+        self.refresh_session()
         self._train_log_line(
             "Dataset set to the bundled sample (20 synthetic tool-call "
-            "examples). Save is done — Start training when ready."
+            "examples). Start training when ready."
         )
 
     def start_training(self, resume: bool = False):
@@ -1126,9 +2099,13 @@ class MainWindow(QMainWindow):
                 "Run this once in the Stella folder: bash install-training.sh"
             )
             self._train_log_line(hint)
-            self._say("Training packages missing — see the Train log.")
+            self._say("Training packages missing. See the Train log.")
             return
-        self.save_project()  # persist the dataset + settings from the form
+        # Settings live in the store now (the project window saves
+        # them); there is no form left to save from here. But the
+        # weights may still be missing: offer the download first.
+        if not self._weights_offer(profile):
+            return
         self._train_worker = TrainWorker(
             self.store, profile, project, resume=resume
         )
@@ -1138,8 +2115,14 @@ class MainWindow(QMainWindow):
         self.train_start_btn.setEnabled(False)
         self.train_resume_btn.setEnabled(False)
         self.train_pause_btn.setEnabled(True)
+        self._set_activity(
+            "training", "Resuming training..." if resume else "Training..."
+        )
         self._train_log_line(
             "Resuming training..." if resume else "Starting training..."
+        )
+        self.debug_log.action(
+            f"training started: {profile}/{project} (resume={resume})"
         )
         self._train_worker.start()
 
@@ -1153,18 +2136,25 @@ class MainWindow(QMainWindow):
     def _on_train_progress(self, step: int, total: int, loss: float):
         self.train_progress.setMaximum(max(1, total))
         self.train_progress.setValue(step)
-        self.train_loss.setText(f"Step {step} / {total} — loss {loss:.4f}")
+        self.train_loss.setText(f"Step {step} / {total}, loss {loss:.4f}")
+        if self._sleep_running():
+            self._set_activity("sleep", f"Sleep: step {step} / {total}")
+        else:
+            self._set_activity("training", f"Training: step {step} / {total}")
 
     def _on_train_finished(self, ok: bool, message: str):
         self.train_start_btn.setEnabled(True)
         self.train_resume_btn.setEnabled(True)
         self.train_pause_btn.setEnabled(False)
+        self._set_activity("idle", "Idle")
         self._train_log_line(message)
+        self.debug_log.action(f"training finished: ok={ok}: {message}")
         self._say(message.splitlines()[0] if message else "Training done.")
-        self.refresh_train_panel()
-        self.refresh_projects()
+        self.refresh_tree()
+        self.refresh_session()
 
     def _on_job_finished(self, ok: bool, message: str):
+        self._set_activity("idle", "Idle")
         self._train_log_line(message)
         self._say(message.splitlines()[0] if message else "Done.")
         self.refresh_train_panel()
@@ -1191,11 +2181,9 @@ class MainWindow(QMainWindow):
                 "Run this once in the Stella folder: bash install-training.sh"
             )
             self._train_log_line(hint)
-            self._say("Training packages missing — see the Train log.")
+            self._say("Training packages missing. See the Train log.")
             return
-        # Gate on save success: a failed save (bad learning rate, a
-        # store error) must NOT start a cycle on stale settings.
-        if not self.save_project():
+        if not self._weights_offer(profile):
             return
         self._sleep_worker = SleepWorker(
             self.store, profile, project,
@@ -1205,15 +2193,19 @@ class MainWindow(QMainWindow):
         self._sleep_worker.log.connect(self._train_log_line)
         self._sleep_worker.finished.connect(self._on_sleep_finished)
         self.sleep_btn.setEnabled(False)
+        self._set_activity("sleep", "Sleep: starting...")
         self._train_log_line("Starting sleep cycle...")
+        self.debug_log.action(f"sleep started: {profile}/{project}")
         self._sleep_worker.start()
 
     def _on_sleep_finished(self, ok: bool, message: str):
         self.sleep_btn.setEnabled(True)
+        self._set_activity("idle", "Idle")
         self._train_log_line(message)
+        self.debug_log.action(f"sleep finished: ok={ok}: {message}")
         self._say(message.splitlines()[0] if message else "Sleep done.")
-        self.refresh_train_panel()
-        self.refresh_projects()
+        self.refresh_tree()
+        self.refresh_session()
 
     def _on_sleep_cycle_clicked(self, item):
         cycle = item.data(Qt.UserRole)
@@ -1232,7 +2224,7 @@ class MainWindow(QMainWindow):
         delta = report.get("old_delta_relative")
         delta_text = f"{delta:+.1%}" if delta is not None else "n/a"
         lines = [
-            f"Sleep cycle {report['cycle']} — {report['status']}",
+            f"Sleep cycle {report['cycle']}: {report['status']}",
             f"Finished: {report.get('timestamp', '')}",
             f"Rows: {report['real_rows']} new, {report['dreamed_rows']} dreamed",
             f"Steps: {report['steps']}, LoRA rank {report.get('rank', '')}",
@@ -1270,6 +2262,7 @@ class MainWindow(QMainWindow):
         self._job_worker = JobWorker(job)
         self._job_worker.log.connect(self._train_log_line)
         self._job_worker.finished.connect(self._on_job_finished)
+        self._set_activity("job", "Working: exporting GGUF...")
         self._train_log_line("Exporting GGUF (merge, convert, quantize)...")
         self._job_worker.start()
 
@@ -1295,23 +2288,76 @@ class MainWindow(QMainWindow):
         self._job_worker = JobWorker(job)
         self._job_worker.log.connect(self._train_log_line)
         self._job_worker.finished.connect(self._on_job_finished)
+        self._set_activity("job", "Working: running refusal probe...")
         self._train_log_line("Running refusal probe (before vs after)...")
         self._job_worker.start()
 
     def closeEvent(self, event):
+        self.settings.setValue("geometry", self.saveGeometry())
+        self.settings.setValue("splitter", self.splitter.saveState())
+        self.settings.setValue("session/profile", self._current_profile or "")
+        self.settings.setValue("session/project", self._current_project or "")
+        self.settings.setValue(
+            "tree/expanded",
+            [
+                slug
+                for slug, item in self._tree_profiles.items()
+                if item.isExpanded()
+            ],
+        )
         if self._training_running():
             self._train_worker.request_stop()
             self._train_worker.wait(15000)
         if self._sleep_running():
             self._sleep_worker.request_stop()
             self._sleep_worker.wait(15000)
+        if self.download_manager.is_running():
+            self.download_manager.cancel()
+            self.download_manager.wait_for_finished(5000)
         super().closeEvent(event)
 
 
 def main(argv: list[str] | None = None) -> int:
     app = QApplication(sys.argv if argv is None else argv)
     app.setApplicationName("Stella")
+    app.setOrganizationName("BrokeNBored")
+
+    # Single instance (U27): re-clicking the icon focuses the running
+    # app instead of starting a second copy.
+    server_name = "stella-single-instance"
+    probe = QLocalSocket()
+    probe.connectToServer(server_name)
+    if probe.waitForConnected(500):
+        probe.write(b"raise")
+        probe.waitForBytesWritten(500)
+        probe.disconnectFromServer()
+        return 0
+    # A crashed run leaves its socket behind: clear it before
+    # listening, or listen fails "Address in use". Safe: a live
+    # instance would already have answered the probe above, so any
+    # socket file here is stale.
+    QLocalServer.removeServer(server_name)
+    server = QLocalServer()
+    if not server.listen(server_name):
+        # Best effort: run without the guard rather than not at all.
+        server = None
+
     window = MainWindow()
+    if server is not None:
+        def _on_new_connection():
+            while server.hasPendingConnections():
+                sock = server.nextPendingConnection()
+                if sock is not None:
+                    sock.disconnectFromServer()
+            window.show()
+            window.raise_()
+            window.activateWindow()
+
+        server.newConnection.connect(_on_new_connection)
+
+    # The crash handler writes a debug report on an unhandled
+    # exception. Installed here (the real app entry), never in tests.
+    window.debug_log.install_crash_handler()
     window.show()
     return app.exec()
 

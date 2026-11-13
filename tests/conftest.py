@@ -39,6 +39,18 @@ def seeded(store):
     return store
 
 
+@pytest.fixture()
+def settings(tmp_path):
+    """A QSettings on a temp file, so GUI tests never share the real
+    ~/.config settings — session restore would otherwise make tests
+    order-dependent."""
+    from PySide6.QtCore import QSettings
+
+    return QSettings(
+        str(tmp_path / "settings.ini"), QSettings.Format.IniFormat
+    )
+
+
 @pytest.fixture(scope="session")
 def qapp():
     from PySide6.QtWidgets import QApplication

@@ -156,7 +156,7 @@ def test_load_dataset_mixed_formats_rejected(tmp_path):
 
 def test_load_dataset_too_small(tmp_path):
     path = write_dataset(tmp_path / "d.jsonl", prompt_rows(1))
-    with pytest.raises(StellaError, match="at least 2"):
+    with pytest.raises(StellaError, match="At least 2"):
         load_dataset(path)
 
 

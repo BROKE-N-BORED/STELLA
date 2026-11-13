@@ -59,7 +59,7 @@ def test_probe_gate_passes_when_rate_falls_or_holds():
         {"before": {"rate": 0.25}, "after": {"rate": 0.0}, "delta": -0.25}
     )
     assert ok is True
-    assert "gate passed" in msg
+    assert "Gate passed" in msg
     ok, _ = probe_gate(
         {"before": {"rate": 0.0}, "after": {"rate": 0.0}, "delta": 0.0}
     )

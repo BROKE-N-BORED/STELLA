@@ -1,4 +1,4 @@
-"""STELLA — fine-tune models on your own PC. v0.3.1: real New Profile window, one-pick create, sparkles icon, installer fixes."""
+"""STELLA: fine-tune models on your own PC. v0.4.0: menu + tree + session window, one-click model downloads, built-in How to Use guide, debug log layer."""
 
 from .model import STELLA_VERSION
 

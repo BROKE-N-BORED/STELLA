@@ -203,7 +203,7 @@ def load_dataset(path: str | Path) -> tuple[list[dict], dict]:
             fmt = row_fmt
         elif fmt != row_fmt:
             raise StellaError(
-                f"dataset line {line_no}: mixed formats — the file "
+                f"dataset line {line_no}: mixed formats. The file "
                 f"started as {fmt!r} but this row is {row_fmt!r}"
             )
         prompt_chars += sum(len(m["content"]) for m in messages[:-1])
@@ -211,7 +211,7 @@ def load_dataset(path: str | Path) -> tuple[list[dict], dict]:
         examples.append({"messages": messages})
     if len(examples) < 2:
         raise StellaError(
-            f"dataset has {len(examples)} example(s) — at least 2 are "
+            f"dataset has {len(examples)} example(s). At least 2 are "
             "needed (1 to train on, 1 to validate)"
         )
     info = {
@@ -307,7 +307,7 @@ def check_ram_fit(estimate_bytes: int, limit_bytes: int = RAM_LIMIT_BYTES) -> No
     """Refuse to train if the estimate does not fit the RAM ceiling."""
     if estimate_bytes > limit_bytes:
         raise StellaError(
-            f"Training would need about {_gb(estimate_bytes)} of RAM — "
+            f"Training would need about {_gb(estimate_bytes)} of RAM, "
             f"over the {_gb(limit_bytes)} ceiling on this PC.\n"
             "Lower max_seq_len or the LoRA rank, or pick a smaller base "
             "model. A full fine-tune of a 1.7B model does not fit, ever: "
@@ -338,7 +338,7 @@ def load_base_model(base_ref: str, *, dtype: str = "bfloat16"):
     bad = _looks_like_gguf_or_tag(base_ref)
     if bad is not None:
         raise StellaError(
-            f"base_ref {base_ref!r} is {bad} — training needs Hugging "
+            f"base_ref {base_ref!r} is {bad} . Training needs Hugging "
             f"Face transformers weights. Set base_ref to a repo id "
             f"like {LFM3_HF_REPO!r}, or a local folder of HF weights."
         )
@@ -637,7 +637,7 @@ def run_training_loop(
     total_steps = steps_per_epoch * epochs
     if start_step >= total_steps:
         raise StellaError(
-            f"already at step {start_step} of {total_steps} — nothing left to train"
+            f"already at step {start_step} of {total_steps}. Nothing left to train"
         )
 
     if optimizer is None:
@@ -841,7 +841,7 @@ def train_project(
     ref = base_ref or prof.get("base_ref") or ""
     if not ref:
         raise StellaError(
-            f"profile {profile!r} has no base_ref — set it to the "
+            f"profile {profile!r} has no base_ref. Set it to the "
             f"Hugging Face repo of the base model (e.g. {LFM3_HF_REPO!r})"
         )
     # Refuse GGUF / Ollama tags here, not just in load_base_model —
@@ -849,7 +849,7 @@ def train_project(
     bad = _looks_like_gguf_or_tag(ref)
     if bad is not None:
         raise StellaError(
-            f"base_ref {ref!r} is {bad} — training needs Hugging "
+            f"base_ref {ref!r} is {bad} . Training needs Hugging "
             f"Face transformers weights. Set base_ref to a repo id "
             f"like {LFM3_HF_REPO!r}, or a local folder of HF weights."
         )
@@ -863,7 +863,7 @@ def train_project(
         dataset_ref = proj.get("dataset_ref") or ""
         if not dataset_ref:
             raise StellaError(
-                f"project {project!r} has no dataset set — pick a .jsonl "
+                f"project {project!r} has no dataset set. Pick a .jsonl "
                 "dataset in the Train panel, or use the sample dataset"
             )
         data_path = resolve_dataset_ref(store, profile, project, dataset_ref)
@@ -901,7 +901,7 @@ def train_project(
         )
         if not checkpoints:
             raise StellaError(
-                "nothing to resume — this project has no checkpoints yet"
+                "nothing to resume. This project has no checkpoints yet"
             )
         latest = checkpoints[-1]
         ckpt_dir = Path(latest["path"])

@@ -1,5 +1,15 @@
-"""Drive the Stella window offscreen and save a screenshot for eyeballing."""
+"""Drive the Stella window offscreen and save screenshots for eyeballing.
+
+Grabs: the main window (session set), the menu open, the Profile
+window, the How to Use window. Run with the Qt test env:
+
+  LD_LIBRARY_PATH=~/workspace/qt-libs/root/usr/lib/x86_64-linux-gnu \
+  __EGL_VENDOR_LIBRARY_DIRS=~/workspace/qt-libs/root/usr/share/glvnd/egl_vendor.d \
+  QT_QPA_PLATFORM=offscreen TMPDIR=/tmp \
+  ~/workspace/forge-v2-testenv/bin/python drive_gui.py
+"""
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -7,13 +17,13 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
 
-from stella.model import Store
 from stella.gui import MainWindow
+from stella.model import Store
 
 home = Path("/tmp/stella-shoot-home")
-import shutil
 if home.exists():
     shutil.rmtree(home)
 store = Store(home)
@@ -31,31 +41,61 @@ store.write_notes("lfm3-tool", "tool-calls",
 store.create_project("minicpm5-driver", "forge-dialect", metamorph_mode="morph")
 
 app = QApplication([])
-win = MainWindow(store=store)
+settings = QSettings("/tmp/stella-shoot-settings.ini",
+                     QSettings.Format.IniFormat)
+win = MainWindow(store=store, settings=settings)
 win.show()
 app.processEvents()
-# Select the first profile / first project explicitly.
-win.profile_list.setCurrentRow(0)
+# Set the session: lfm3-tool / tool-calls, and expand the profile.
+win.set_session("lfm3-tool", "tool-calls")
 app.processEvents()
-win.project_list.setCurrentRow(0)
+print("profiles:", win.tree.topLevelItemCount(),
+      "projects under lfm3-tool:",
+      win.tree.topLevelItem(0).childCount()
+      if win.tree.topLevelItemCount() else 0)
+print("session:", win.session_title.text())
+print("summary:", win.session_summary.text().replace("\n", " | "))
+
+
+def _save(widget, name):
+    out = Path(f"/tmp/{name}")
+    pixmap = widget.grab()
+    pixmap.save(str(out))
+    print(f"saved {out} {pixmap.width()}x{pixmap.height()} "
+          f"({out.stat().st_size} bytes)")
+
+
+# 1. Main window with a session set.
+_save(win, "stella-v04-window.png")
+
+# 2. The menu open. showMenu() pops it; grab the window (the popup
+# is a separate top-level window offscreen, so grab the menu itself).
+win.menu_button.showMenu()
 app.processEvents()
-out = Path("/tmp/stella-window.png")
-pixmap = win.grab()
-pixmap.save(str(out))
-print(f"saved {out} {pixmap.width()}x{pixmap.height()} ({out.stat().st_size} bytes)")
-print("profiles:", win.profile_list.count(), "projects:", win.project_list.count())
-print("profile0:", win.profile_list.item(0).text())
-print("project0:", win.project_list.item(0).text())
-print("role field:", win.prof_role.text(), "| tag:", win.prof_tag.currentText())
-# Second grab: scroll the detail pane to the Train panel (v0.2).
-win.detail_scroll.verticalScrollBar().setValue(
-    win.detail_scroll.verticalScrollBar().maximum()
+menu = win.menu
+_save(menu, "stella-v04-menu.png")
+menu.close()
+app.processEvents()
+
+# 3. The Profile window.
+prof_win = win.open_profile_window("lfm3-tool")
+app.processEvents()
+_save(prof_win, "stella-v04-profile.png")
+print("profile window title:", prof_win.windowTitle())
+
+# 4. The How to Use window, first topic selected.
+howto = win.open_howto_window()
+howto.topic_list.setCurrentRow(0)
+app.processEvents()
+_save(howto, "stella-v04-howto.png")
+
+# 5. The session scrolled to the Train panel.
+win.session_scroll.verticalScrollBar().setValue(
+    win.session_scroll.verticalScrollBar().maximum()
 )
 app.processEvents()
-out2 = Path("/tmp/stella-train-panel.png")
-pixmap2 = win.grab()
-pixmap2.save(str(out2))
-print(f"saved {out2} {pixmap2.width()}x{pixmap2.height()} ({out2.stat().st_size} bytes)")
+_save(win, "stella-v04-train-panel.png")
 print("train widgets:", win.train_start_btn.text(), "|",
       win.train_pause_btn.text(), "|", win.train_resume_btn.text(), "|",
       win.train_export_gguf_btn.text(), "|", win.train_probe_btn.text())
+print("activity:", win.activity_text.text())

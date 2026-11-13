@@ -78,9 +78,11 @@ def test_cli_export_missing_project(home, tmp_path):
 
 
 def test_cli_version(home):
+    from stella.model import STELLA_VERSION
+
     res = run_cli(home, "--version")
     assert res.returncode == 0
-    assert "0.3" in res.stdout
+    assert STELLA_VERSION in res.stdout
 
 
 def test_cli_through_symlink(home, tmp_path):

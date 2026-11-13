@@ -100,7 +100,7 @@ def cmd_train(args) -> int:
         if kind == "started":
             print(
                 f"Training: {event['total_steps']} steps, "
-                f"LoRA rank {event['rank']} (CPU, batch 1 — this is slow, "
+                f"LoRA rank {event['rank']} (CPU, batch 1. This is slow, "
                 "checkpoints save as it goes)"
             )
         elif kind == "step":
@@ -116,9 +116,9 @@ def cmd_train(args) -> int:
         elif kind == "val":
             print(f"epoch {event['epoch']} validation loss {event['loss']:.4f}")
         elif kind == "paused":
-            print(f"Paused at step {event['step']} — resume with --resume.")
+            print(f"Paused at step {event['step']}. Resume with --resume.")
         elif kind == "done":
-            print(f"Done — adapter saved to {event['adapter']}")
+            print(f"Done. Adapter saved to {event['adapter']}")
 
     # Ctrl+C pauses cleanly: the loop checkpoints after the current
     # step and the run resumes with --resume. A hard kill mid-step
@@ -263,13 +263,13 @@ def cmd_sleep(args) -> int:
             print(
                 f"old loss {_fmt_loss(event['old_loss_before'])} -> "
                 f"{_fmt_loss(event['old_loss_after'])}, "
-                f"new loss {_fmt_loss(event['new_loss'])} — "
+                f"new loss {_fmt_loss(event['new_loss'])}, "
                 f"{event['status']}"
             )
         elif kind == "paused":
-            print(f"Paused at step {event['step']} — run sleep again to resume.")
+            print(f"Paused at step {event['step']}. Run sleep again to resume.")
         elif kind == "done":
-            print(f"Sleep cycle {event['cycle']} done — {event['status']}.")
+            print(f"Sleep cycle {event['cycle']} done: {event['status']}.")
 
     # Ctrl+C pauses cleanly: the consolidation loop checkpoints after
     # the current step and the cycle resumes on the next sleep run.
@@ -314,7 +314,7 @@ def cmd_sleep(args) -> int:
     print(f"  new loss: {_fmt_loss(report['new_loss'])}")
     if report["status"] == "DEGRADED":
         print(
-            "  The new adapter forgot old rows — the cycle is saved "
+            "  The new adapter forgot old rows. The cycle is saved "
             "but flagged. Check the new rows before using this adapter."
         )
     return 0
@@ -337,7 +337,7 @@ def cmd_sleep_status(args) -> int:
                 delta = (after - before) / before
             delta_text = f"{delta:+.1%}" if delta is not None else "n/a"
             print(
-                f"cycle {c['cycle']}: {c['status']} — "
+                f"cycle {c['cycle']}: {c['status']}, "
                 f"{c['real_rows']} new rows, {c['dreamed_rows']} dreamed, "
                 f"{c['steps']} steps, old-loss delta {delta_text}"
             )
@@ -358,7 +358,7 @@ def cmd_sleep_status(args) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="stella", description="Stella — fine-tune models on your own PC."
+        prog="stella", description="Stella: fine-tune models on your own PC."
     )
     parser.add_argument("--version", action="version", version=f"stella {STELLA_VERSION}")
     sub = parser.add_subparsers(dest="command", required=True)
