@@ -4,7 +4,8 @@ Left: profiles (friendly role names, Ollama tag stays the identifier).
 Middle: the selected profile's projects.
 Right: detail — profile settings on top, project settings + notes
 below, then the Train panel (dataset, Start / Pause / Resume,
-progress, checkpoints, GGUF export, refusal probe, log).
+progress, checkpoints, GGUF export, refusal probe, log) and the
+Sleep panel (Item 4: sleep cycle, dream checkbox, cycle list).
 
 No web UI, no network beyond localhost Ollama. No "&" in any visible
 label — Qt eats a bare & as a mnemonic marker.
@@ -21,6 +22,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QFormLayout,
@@ -169,6 +171,109 @@ class TrainWorker(QThread):
         self.finished.emit(True, f"Trained {summary['steps']} steps.")
 
 
+class SleepWorker(QThread):
+    """Runs sleep_project off the GUI thread. Same signal pattern
+    as TrainWorker — progress goes to the shared bar, everything
+    else to the log."""
+
+    progress = Signal(int, int, float)  # step, total, loss
+    log = Signal(str)
+    finished = Signal(bool, str)  # ok, message
+
+    def __init__(self, store, profile, project, dream=False, parent=None):
+        super().__init__(parent)
+        self._store = store
+        self._profile = profile
+        self._project = project
+        self._dream = dream
+        self._controller = TrainController()
+
+    def request_stop(self):
+        self._controller.request_stop()
+
+    def _event(self, event: dict):
+        kind = event.get("type")
+        if kind == "started":
+            self.log.emit(
+                f"Sleep cycle {event['cycle']}: {event['new_rows']} new rows"
+                + (
+                    f", {event['dreamed_rows']} dreamed"
+                    if event.get("dreamed_rows")
+                    else ""
+                )
+                + (", resuming" if event.get("resumed") else "")
+                + "."
+            )
+        elif kind == "dream":
+            self.log.emit(f"Dreamed {event['kept']} practice rows.")
+        elif kind == "dream_skipped":
+            self.log.emit(f"Dreaming skipped: {event['reason']}")
+        elif kind == "step":
+            self.progress.emit(
+                event["step"], event["total_steps"], float(event["loss"])
+            )
+            self.log.emit(
+                f"step {event['step']}/{event['total_steps']} "
+                f"loss {event['loss']:.4f}"
+            )
+        elif kind == "checkpoint":
+            self.log.emit(f"checkpoint saved: step {event['step']}")
+        elif kind == "val":
+            self.log.emit(
+                f"epoch {event['epoch']} validation loss "
+                f"{event['loss']:.4f}"
+            )
+        elif kind == "replay":
+            self.log.emit("Replay check: old rows vs new adapter...")
+        elif kind == "replay_done":
+            before = event["old_loss_before"]
+            after = event["old_loss_after"]
+            new = event["new_loss"]
+            fmt = lambda v: f"{v:.4f}" if v is not None else "n/a"
+            self.log.emit(
+                f"old loss {fmt(before)} -> {fmt(after)}, "
+                f"new loss {fmt(new)} — {event['status']}"
+            )
+        elif kind == "paused":
+            self.log.emit(
+                f"Paused at step {event['step']} — run sleep again to resume."
+            )
+        elif kind == "done":
+            self.log.emit(
+                f"Sleep cycle {event['cycle']} done — {event['status']}."
+            )
+
+    def run(self):
+        from .sleep import sleep_project
+
+        try:
+            report = sleep_project(
+                self._store,
+                self._profile,
+                self._project,
+                dream=self._dream,
+                on_event=self._event,
+                controller=self._controller,
+            )
+        except StellaError as exc:
+            self.finished.emit(False, str(exc))
+            return
+        except Exception as exc:  # keep the window alive on a crash
+            self.finished.emit(False, f"Sleep failed: {exc}")
+            return
+        if report.get("status") == "paused":
+            self.finished.emit(
+                True,
+                f"Sleep paused at step {report['steps']} — "
+                "run sleep again to resume.",
+            )
+            return
+        self.finished.emit(
+            True,
+            f"Sleep cycle {report['cycle']} done — {report['status']}.",
+        )
+
+
 class JobWorker(QThread):
     """Generic off-thread job (GGUF export, refusal probe). The job
     function takes a log callable and returns its finish message."""
@@ -203,6 +308,7 @@ class MainWindow(QMainWindow):
         self._current_project: str | None = None
         self._building = False
         self._train_worker: TrainWorker | None = None
+        self._sleep_worker: SleepWorker | None = None
         self._job_worker: JobWorker | None = None
         self._build_ui()
         self.refresh_profiles()
@@ -390,6 +496,28 @@ class MainWindow(QMainWindow):
         self.train_log.setReadOnly(True)
         self.train_log.setMinimumHeight(120)
         self.detail_layout.addWidget(self.train_log)
+
+        # Sleep panel (Item 4): run a sleep cycle, dream synthetic
+        # rows first, and see every cycle's replay verdict.
+        self.detail_layout.addWidget(QLabel("Sleep"))
+        sleep_btns = QHBoxLayout()
+        self.sleep_btn = QPushButton("Sleep")
+        self.sleep_btn.clicked.connect(self.start_sleep)
+        self.sleep_dream_check = QCheckBox("Dream first")
+        self.sleep_dream_check.setToolTip(
+            "Dream synthetic practice rows from the local Ollama model "
+            "before consolidating (best effort — sleep still runs on "
+            "real rows if Ollama is down)."
+        )
+        sleep_btns.addWidget(self.sleep_btn)
+        sleep_btns.addWidget(self.sleep_dream_check)
+        sleep_btns.addStretch(1)
+        self.detail_layout.addLayout(sleep_btns)
+        self.detail_layout.addWidget(QLabel("Sleep cycles (click one to see its report)"))
+        self.sleep_cycles = QListWidget()
+        self.sleep_cycles.setMaximumHeight(90)
+        self.sleep_cycles.itemClicked.connect(self._on_sleep_cycle_clicked)
+        self.detail_layout.addWidget(self.sleep_cycles)
         self.detail_layout.addStretch(1)
 
     # -- helpers ----------------------------------------------------
@@ -557,14 +685,18 @@ class MainWindow(QMainWindow):
         self.refresh_profiles()
         self._say(f"Saved profile {self._current_profile}.")
 
-    def save_project(self):
+    def save_project(self) -> bool:
+        """Save the project form. Returns True on success, False when
+        nothing was saved (no project, bad learning rate, store
+        error) — callers that start work on the saved settings must
+        check this instead of starting on stale settings."""
         if not self._current_profile or not self._current_project:
-            return
+            return False
         try:
             lr = float(self.proj_lr.text().strip() or "0.0002")
         except ValueError:
             self._warn("Learning rate must be a number, like 0.0002.")
-            return
+            return False
         try:
             self.store.update_project(
                 self._current_profile,
@@ -588,9 +720,10 @@ class MainWindow(QMainWindow):
             )
         except StellaError as exc:
             self._warn(str(exc))
-            return
+            return False
         self.refresh_projects()
         self._say(f"Saved project {self._current_project}.")
+        return True
 
     # -- profile actions --------------------------------------------
     def new_profile(self):
@@ -756,9 +889,15 @@ class MainWindow(QMainWindow):
             self._train_worker is not None and self._train_worker.isRunning()
         )
 
+    def _sleep_running(self) -> bool:
+        return (
+            self._sleep_worker is not None and self._sleep_worker.isRunning()
+        )
+
     def refresh_train_panel(self):
         """Checkpoints list + log tail for the selected project."""
         self.train_checkpoints.clear()
+        self.sleep_cycles.clear()
         if not self._current_profile or not self._current_project:
             self.train_loss.setText("Pick a project to train.")
             return
@@ -772,6 +911,25 @@ class MainWindow(QMainWindow):
             if loss is not None:
                 label += f"  loss {loss:.4f}"
             self.train_checkpoints.addItem(label)
+        from .sleep import list_sleep_cycles
+
+        for c in list_sleep_cycles(
+            self.store, self._current_profile, self._current_project
+        ):
+            before = c.get("old_loss_before")
+            after = c.get("old_loss_after")
+            delta = None
+            if before is not None and after is not None and before > 0:
+                delta = (after - before) / before
+            delta_text = f"{delta:+.1%}" if delta is not None else "n/a"
+            label = (
+                f"cycle {c['cycle']} — {c['status']} — "
+                f"{c['real_rows']} new, {c['dreamed_rows']} dreamed, "
+                f"old-loss {delta_text}"
+            )
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, c["cycle"])
+            self.sleep_cycles.addItem(item)
         if self._training_running():
             return  # never wipe the live log mid-run
         log_path = (
@@ -808,6 +966,11 @@ class MainWindow(QMainWindow):
             return
         if self._training_running():
             self._say("Training is already running.")
+            return
+        if self._sleep_running():
+            # Training and sleep each load the base model — running
+            # both at once would blow the 8 GB ceiling.
+            self._say("Sleep is already running.")
             return
         from .train import training_deps_missing
 
@@ -860,6 +1023,83 @@ class MainWindow(QMainWindow):
         self._train_log_line(message)
         self._say(message.splitlines()[0] if message else "Done.")
         self.refresh_train_panel()
+
+    # -- sleep ------------------------------------------------------
+    def start_sleep(self):
+        profile = self._selected_profile()
+        project = self._selected_project()
+        if not profile or not project:
+            self._warn("Pick a project to sleep.")
+            return
+        if self._training_running():
+            self._say("Training is already running.")
+            return
+        if self._sleep_running():
+            self._say("Sleep is already running.")
+            return
+        from .train import training_deps_missing
+
+        missing = training_deps_missing()
+        if missing:
+            hint = (
+                "Training packages missing: " + ", ".join(missing) + ". "
+                "Run this once in the Stella folder: bash install-training.sh"
+            )
+            self._train_log_line(hint)
+            self._say("Training packages missing — see the Train log.")
+            return
+        # Gate on save success: a failed save (bad learning rate, a
+        # store error) must NOT start a cycle on stale settings.
+        if not self.save_project():
+            return
+        self._sleep_worker = SleepWorker(
+            self.store, profile, project,
+            dream=self.sleep_dream_check.isChecked(),
+        )
+        self._sleep_worker.progress.connect(self._on_train_progress)
+        self._sleep_worker.log.connect(self._train_log_line)
+        self._sleep_worker.finished.connect(self._on_sleep_finished)
+        self.sleep_btn.setEnabled(False)
+        self._train_log_line("Starting sleep cycle...")
+        self._sleep_worker.start()
+
+    def _on_sleep_finished(self, ok: bool, message: str):
+        self.sleep_btn.setEnabled(True)
+        self._train_log_line(message)
+        self._say(message.splitlines()[0] if message else "Sleep done.")
+        self.refresh_train_panel()
+        self.refresh_projects()
+
+    def _on_sleep_cycle_clicked(self, item):
+        cycle = item.data(Qt.UserRole)
+        if cycle is None:
+            return
+        from .sleep import read_cycle_report
+
+        try:
+            report = read_cycle_report(
+                self.store, self._current_profile, self._current_project, cycle
+            )
+        except StellaError as exc:
+            self._warn(str(exc))
+            return
+        fmt = lambda v: f"{v:.4f}" if v is not None else "n/a"
+        delta = report.get("old_delta_relative")
+        delta_text = f"{delta:+.1%}" if delta is not None else "n/a"
+        lines = [
+            f"Sleep cycle {report['cycle']} — {report['status']}",
+            f"Finished: {report.get('timestamp', '')}",
+            f"Rows: {report['real_rows']} new, {report['dreamed_rows']} dreamed",
+            f"Steps: {report['steps']}, LoRA rank {report.get('rank', '')}",
+            f"Old loss: {fmt(report.get('old_loss_before'))} -> "
+            f"{fmt(report.get('old_loss_after'))} ({delta_text})",
+            f"New loss: {fmt(report.get('new_loss'))}",
+            f"Threshold: {report.get('threshold', '')} "
+            f"({'in-sample new val' if report.get('new_val_in_sample') else 'held-out new val'})",
+        ]
+        QMessageBox.information(
+            self, f"Sleep cycle {cycle}", "\n".join(lines)
+        )
 
     def export_gguf_gui(self):
         profile = self._selected_profile()
@@ -917,6 +1157,9 @@ class MainWindow(QMainWindow):
         if self._training_running():
             self._train_worker.request_stop()
             self._train_worker.wait(15000)
+        if self._sleep_running():
+            self._sleep_worker.request_stop()
+            self._sleep_worker.wait(15000)
         super().closeEvent(event)
 
 

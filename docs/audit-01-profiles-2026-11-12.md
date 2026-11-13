@@ -259,6 +259,13 @@ same tag (allowed by design, but nothing notes it).
   It opens as a separate 420x320 window, not centered on the parent,
   with no dialog framing. It reads as unanchored next to the main
   window.
+  CORRECTION (audit #4, 2026-11-12): the "separate window" description
+  was wrong — it is not a separate window at all. The widget has a
+  parent and no Qt.Window flag, so it renders as a frameless,
+  background-less form smeared over the top-left of the main window
+  at (0,0), its labels overlapping the header and both lists
+  (screenshot verified in audit #4). The fix direction stands — make
+  it a real QDialog — and audit #4 raises it to P0 (W1).
 - **U4 — The tag combo re-fetches on every selection (see W4).**
   While Ollama is down the combo is briefly empty before the stored
   tag is re-added — a small flicker on every click.

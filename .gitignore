@@ -1,0 +1,29 @@
+# Secrets — NEVER in code (Joshua's immutable rule, 2026-11-13).
+# Sensitive info and API keys live ONLY in gitignored files, never in
+# source, docs, tests, or anything pushed to GitHub.
+.env
+*.env
+.env.*
+providers.json
+*credentials*
+*secret*.json
+*.pem
+*.key
+id_rsa*
+*.p12
+*.pfx
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Local user data (Stella homes live in ~/.stella, never in the repo)
+.stella/
+
+# Build outputs (releases carry the zips, not the repo)
+*.zip
+dist/
+build/

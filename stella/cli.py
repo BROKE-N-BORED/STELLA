@@ -9,6 +9,12 @@
     stella export-gguf <profile> <project> <dir>
                                           merge + convert + quantize to GGUF
     stella probe <profile> <project>      refusal probe, before vs after
+    stella sleep <profile> <project>      consolidate new rows into a new
+                                          LoRA adapter, with a replay check
+                                          (Item 4); --dream adds synthetic
+                                          rows from the local Ollama model
+    stella sleep-status <profile> <project>
+                                          per-cycle sleep stats
 
 Reads STELLA_HOME for the home dir (default ~/.stella).
 """
@@ -206,6 +212,150 @@ def cmd_create_project(args) -> int:
     return 0
 
 
+def _fmt_loss(value) -> str:
+    return f"{value:.4f}" if value is not None else "n/a"
+
+
+def cmd_sleep(args) -> int:
+    import signal
+
+    from .sleep import sleep_project
+    from .train import TrainController
+
+    store = _store()
+    controller = TrainController()
+
+    def on_event(event: dict):
+        kind = event.get("type")
+        if kind == "started":
+            resumed = " (resuming)" if event.get("resumed") else ""
+            print(
+                f"Sleep cycle {event['cycle']}{resumed}: "
+                f"{event['new_rows']} new rows"
+                + (
+                    f", {event['dreamed_rows']} dreamed rows"
+                    if event.get("dreamed_rows")
+                    else ""
+                )
+                + "."
+            )
+        elif kind == "dream":
+            print(
+                f"Dreamed {event['kept']} practice rows "
+                f"(asked for {event['requested']})."
+            )
+        elif kind == "dream_skipped":
+            print(f"Dreaming skipped: {event['reason']}")
+        elif kind == "step":
+            print(
+                f"step {event['step']}/{event['total_steps']} "
+                f"epoch {event['epoch']} loss {event['loss']:.4f} "
+                f"lr {event['lr']:.2e}",
+                flush=True,
+            )
+        elif kind == "checkpoint":
+            print(f"checkpoint saved: step {event['step']}", flush=True)
+        elif kind == "val":
+            print(f"epoch {event['epoch']} validation loss {event['loss']:.4f}")
+        elif kind == "replay":
+            print("Replay check: old rows vs new adapter...")
+        elif kind == "replay_done":
+            print(
+                f"old loss {_fmt_loss(event['old_loss_before'])} -> "
+                f"{_fmt_loss(event['old_loss_after'])}, "
+                f"new loss {_fmt_loss(event['new_loss'])} — "
+                f"{event['status']}"
+            )
+        elif kind == "paused":
+            print(f"Paused at step {event['step']} — run sleep again to resume.")
+        elif kind == "done":
+            print(f"Sleep cycle {event['cycle']} done — {event['status']}.")
+
+    # Ctrl+C pauses cleanly: the consolidation loop checkpoints after
+    # the current step and the cycle resumes on the next sleep run.
+    # The handler sets the flag ONLY — printing inside a signal
+    # handler races with buffered stdout and crashed the train
+    # command's pause (audit #5 W1). The "paused" event prints.
+    def _sigint(signum, frame):
+        controller.request_stop()
+
+    old_handler = signal.signal(signal.SIGINT, _sigint)
+    try:
+        report = sleep_project(
+            store,
+            args.profile,
+            args.project,
+            dream=args.dream,
+            dream_model=args.dream_model,
+            rows_path=args.rows,
+            threshold=args.threshold,
+            on_event=on_event,
+            controller=controller,
+        )
+    finally:
+        signal.signal(signal.SIGINT, old_handler)
+    if report.get("status") == "paused":
+        return 0
+    delta = report.get("old_delta_relative")
+    delta_text = f"{delta:+.1%}" if delta is not None else "n/a (no old rows yet)"
+    print()
+    print(f"Sleep cycle {report['cycle']}: {report['status']}")
+    print(
+        f"  rows: {report['real_rows']} new"
+        + (
+            f", {report['dreamed_rows']} dreamed"
+            if report.get("dreamed_rows")
+            else ""
+        )
+        + f", {report['steps']} steps, rank {report['rank']}"
+    )
+    print(f"  old loss: {_fmt_loss(report['old_loss_before'])} -> "
+          f"{_fmt_loss(report['old_loss_after'])} ({delta_text})")
+    print(f"  new loss: {_fmt_loss(report['new_loss'])}")
+    if report["status"] == "DEGRADED":
+        print(
+            "  The new adapter forgot old rows — the cycle is saved "
+            "but flagged. Check the new rows before using this adapter."
+        )
+    return 0
+
+
+def cmd_sleep_status(args) -> int:
+    from .sleep import sleep_status
+
+    store = _store()
+    status = sleep_status(store, args.profile, args.project)
+    cycles = status["cycles"]
+    if not cycles:
+        print(f"No sleep cycles yet for {args.project!r}.")
+    else:
+        for c in cycles:
+            delta = None
+            before = c.get("old_loss_before")
+            after = c.get("old_loss_after")
+            if before is not None and after is not None and before > 0:
+                delta = (after - before) / before
+            delta_text = f"{delta:+.1%}" if delta is not None else "n/a"
+            print(
+                f"cycle {c['cycle']}: {c['status']} — "
+                f"{c['real_rows']} new rows, {c['dreamed_rows']} dreamed, "
+                f"{c['steps']} steps, old-loss delta {delta_text}"
+            )
+    total = status["total_rows"]
+    unslept = status["unslept_rows"]
+    if total is not None:
+        print(
+            f"{status['slept_rows']} rows slept on, {unslept} of {total} "
+            "still awake."
+        )
+    else:
+        print(
+            f"{status['slept_rows']} rows slept on "
+            "(no dataset set, so unslept rows are unknown)."
+        )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="stella", description="Stella — fine-tune models on your own PC."
@@ -278,6 +428,33 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("profile")
     p.add_argument("project")
     p.set_defaults(func=cmd_probe)
+
+    p = sub.add_parser(
+        "sleep",
+        help="sleep cycle: consolidate new rows into a new LoRA "
+        "adapter, with a replay check against old rows",
+    )
+    p.add_argument("profile")
+    p.add_argument("project")
+    p.add_argument("--dream", action="store_true",
+                   help="dream synthetic practice rows from the local "
+                   "Ollama model before consolidating")
+    p.add_argument("--dream-model", default=None,
+                   help="Ollama tag to dream with (default: the "
+                   "profile's ollama_tag)")
+    p.add_argument("--rows", default=None,
+                   help="JSONL file of new rows (default: the project's "
+                   "dataset rows not yet slept on)")
+    p.add_argument("--threshold", type=float, default=0.10,
+                   help="forgetting threshold: a cycle is DEGRADED when "
+                   "the old loss rises more than this, relative "
+                   "(default 0.10)")
+    p.set_defaults(func=cmd_sleep)
+
+    p = sub.add_parser("sleep-status", help="per-cycle sleep stats")
+    p.add_argument("profile")
+    p.add_argument("project")
+    p.set_defaults(func=cmd_sleep_status)
     return parser
 
 

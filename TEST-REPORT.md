@@ -1,77 +1,165 @@
-# STELLA v0.2 — Test Report
+# STELLA v0.3 — Test Report
 
-Verified 2026-11-12 in the sandbox (Python 3.12.3, PySide6 6.12,
-offscreen Qt; training stack torch 2.15.0+cpu, transformers 5.22.2,
-peft 0.21.2, accelerate 1.15.0). Every check below was run, not assumed.
+Verified 2026-11-13 in the sandbox (Python 3.12.3, PySide6 offscreen
+Qt; training stack torch 2.15.0+cpu, transformers 5.22.2, peft
+0.21.2, accelerate 1.15.0). Every check below was run from a FRESH
+UNZIP of stella-v0.3.zip, not assumed. The v0.3 builder was
+interrupted before verifying; this report is the finisher's
+verification of the finished tree.
 
-## Suite: 110/110 green
+## Suite: 142/142 green
 
-`bash run_tests.sh` (pytest, from the build tree and from a fresh unzip).
-On a base install (PySide6 only) the training tests that need torch
-skip cleanly — the suite still goes green; the full 110 run after
-`bash install-training.sh`.
+`bash run_tests.sh` (pytest, from a fresh unzip).
 
-- `tests/test_model.py` (30) — profile/project CRUD, rename (incl.
-  the projects' stored profile pointer), delete, notes round-trip,
-  slug validation (rejects `..`, `a/b`, spaces, dots, over-long
-  names; lowercases input), metamorph mode validation, path-escape
-  blocking.
-- `tests/test_export.py` (11) — export folder structure (manifest,
-  config, README, weights, checkpoints, notes), checkpoint copy,
-  existing-dir refusal, verify accepts good / rejects missing
-  manifest, bad JSON, unknown metamorph mode, full round-trip into a
-  fresh home (profile + project + settings + notes match), import
-  into an existing profile, duplicate-project rejection.
-- `tests/test_cli.py` (14) — `profiles`, `projects`,
-  `create-profile` (incl. `--base`), `create-project`, `export`,
-  `import`, `train`/`export-gguf`/`probe` error paths (no base ref,
-  no adapter, missing deps), `--version`, bad-name exit 1,
-  missing-project exit 1, and the CLI-through-symlink regression test.
-- `tests/test_gui.py` (13) — window opens with three panes, role +
-  tag show in the profile list, detail fills from selection, save
-  profile / save project write through to disk, empty-store window,
-  no `&` in any visible label, window grabs a real frame, the status
-  bar is the only status surface, and the Train panel: widgets
-  exist, Start without deps logs the install hint (no worker
-  started), Use sample dataset sets the ref, progress updates.
-- `tests/test_ollama.py` (3) — model list from a fake localhost
-  Ollama server, empty list when Ollama is down, empty list on a bad
-  payload.
-- `tests/test_train.py` (23) — dataset validation (both formats,
-  bad JSON names its line, bad role, last message must be assistant,
-  mixed formats rejected, too small rejected), the bundled sample
-  dataset validates (20 examples, 14 tool calls / 6 plain),
-  deterministic splits, RAM math (LFM3 LoRA fits 8 GB, a full
-  1.7B fine-tune is refused, boundary exact), the deps gate names
-  install-training.sh, dataset resolution finds the sample,
-  LoRA target auto-detection on a tiny GPT-2 (c_attn, c_fc, c_proj),
-  a REAL 3-step LoRA run on a tiny random model (adapter saved,
-  checkpoints step-1/2/3, loss log, status trained, all event
-  kinds), pause-then-resume completing 6 steps across 2 epochs,
-  GGUF base and Ollama-tag base both refused, resume with no
-  checkpoints refused.
-- `tests/test_gguf.py` (8) — llama.cpp discovery (found + missing
-  with install hint), convert + quantize through a fake runner
-  (both commands, F16 intermediate, Q4_K_M output), non-HF dir
-  refused, Modelfile + `ollama create` command, a REAL adapter
-  merge on a tiny model (merged config + safetensors), the full
-  export end to end with fakes (Modelfile, gguf-export.json, status
-  exported), export with no adapter refused.
-- `tests/test_probe.py` (8) — refusal phrases detected, plain
-  answers not refusals, the 12-prompt set is all benign, counting
-  with a fake generator (2/12 refusals), the gate passes on a flat
-  or falling rate and fails on a rise, a before/after project probe
-  with fakes (0 before, 3 after, delta +0.25, results saved),
-  probe with no adapter refused.
+- Train venv (full stack): **142 passed, 15 warnings, 106.9s.**
+- Base install (PySide6 only, no torch): **120 passed, 22 skipped,
+  8.2s** — the training tests skip cleanly, the suite still goes
+  green.
 
-## Fresh-unzip check
+Per file: test_model 30, test_sleep 24, test_train 23, test_cli 18,
+test_gui 17, test_export 11, test_probe 8, test_gguf 8, test_ollama 3.
+
+The 15 warnings are all one known peft warning (`fan_in_fan_out`
+on the tiny Conv1D test model) — a test artifact, not a product
+issue. The v0.2 `float(out.loss)` requires_grad UserWarning is
+FIXED (both occurrences now use `.detach()`).
+
+Note: both suite runs print `malloc_consolidate(): unaligned
+fastbin chunk detected` AFTER pytest's summary, with exit code 0 —
+a post-run Qt teardown artifact in the sandbox, not a test failure
+(the same post-OK teardown abort seen on other Qt suites here).
+
+New in v0.3 (32 tests): test_sleep.py (24) — manifest/hash
+round-trips, orphan-report reconciliation, unslept counts, dreaming
+(filter/dedupe/cap/Ollama-down skip/no-tag skip), export/import
+round-trip of sleep cycles, end-to-end tiny cycles (cycle 1 + a
+second cycle replaying against old rows), dreaming with a fake
+Ollama server, Ollama-down still sleeps, replay verdicts with
+canned losses (DEGRADED at +50%, OK at -10%, exactly +10% is NOT
+degraded), the single-load proof (replay loads once; a full sleep
+loads twice total — one consolidate, one replay), rank capped at 8,
+RAM-guard refusal, pause-then-resume completing the same cycle,
+plus the two regression tests for defect 1 below. test_cli.py (+4)
+— sleep help, sleep-status with no cycles, sleep with no base_ref
+(cheap checks before the dependency gate), sleep with missing deps.
+test_gui.py (+4) — Sleep panel widgets exist, cycle list shows a
+seeded cycle, start-sleep with no deps logs the install hint,
+start-sleep gated on save failure (bad learning rate starts
+nothing).
+
+## CLI smoke: 22/22 green (script /tmp/stella-v03-smoke.py)
+
+Driven through `bash stella-cli` exactly as on a PC, from the fresh
+unzip: `--version` says 0.3; create-profile/create-project;
+sleep-status with no cycles; sleep with no dataset and sleep with a
+missing --rows file both exit 1 with a plain error and NO traceback
+(cheap checks run before the dependency gate); an API sleep with
+dream=True against a fake Ollama server (the CLI has no tiny-model
+hook, so the model step runs through the API exactly as the tests
+do) completed cycle 1 with 2 dreamed rows kept, 6 real rows, old
+losses None on cycle 1 (not faked), manifest 6 slept / 2 dreamed
+hashes, and dream + replay + done events; CLI sleep-status then
+showed `cycle 1 ... 2 dreamed` and `6 rows slept on, 0 of 6 still
+awake`; CLI export carried sleep/ (manifest, cycle-1 report,
+adapter) and CLI import into a fresh home restored it whole
+(manifest hashes, adapter file, sleep-status shows cycle 1).
+
+## GUI drive: 16/16 green (script /tmp/stella-v03-gui-drive.py)
+
+The real window, offscreen, against the smoke home (a finished
+cycle 1): window visible; profile + project listed; Sleep button
+present and enabled; "Dream first" checkbox present and unchecked;
+cycle list shows 1 item reading `cycle 1 — OK — 6 new, 2 dreamed`;
+clicking it opens the report dialog with the real numbers (cycle 1,
+OK, 6 new / 2 dreamed, new loss, threshold); no bare `&` in any
+visible label; start-sleep with the training deps hidden logs the
+install-training.sh hint and starts no worker.
+
+## Defects found and fixed in place (by the finisher)
+
+1. **Resume path crashed on a partially-written cycle dir
+   (sleep.py).** `_find_unfinished_cycle` only required
+   `train_rows.jsonl`, but the resume branch then read
+   `cycle_input.json` with an unguarded `json.loads` + key access
+   and `val_rows.jsonl` with no missing-file handling. The
+   fresh-cycle path writes train_rows, val_rows, then cycle_input
+   in sequence — a crash between the writes left a dir that made
+   every later `sleep` die with a raw traceback (FileNotFoundError /
+   JSONDecodeError / KeyError — the CLI catches only StellaError).
+   Fixed: the finder now requires all three input files (a partial
+   dir is ignored and the next fresh cycle reuses its number and
+   overwrites it — safe, because no checkpoints or adapter can
+   exist before cycle_input.json is written, training only starts
+   after it); the cycle_input parse + key access is wrapped and
+   raises a plain StellaError naming the cycle and the fix
+   (delete the cycle dir, re-run sleep — no rows are lost, they are
+   still in the dataset); `_load_rows_file` turns OSError into
+   StellaError. Pinned by two regression tests
+   (`test_sleep_partial_cycle_dir_self_heals`,
+   `test_sleep_corrupt_cycle_input_is_a_plain_error`).
+2. **Smoke-script bug (not product code):** the first smoke run
+   looked for the export in the given dir instead of the
+   `<project>-stella-export` subdir export_project creates, so 6
+   checks failed on paths while the export itself was correct
+   (the listing showed sleep/ complete with manifest, report,
+   adapter, checkpoints). Fixed in the script; re-run 22/22.
+
+No other defects found. The design was checked against the brief
+in full: new LoRA adapter per cycle on new rows only (content-hash
+manifest, base + prior adapters frozen); dreaming validated,
+deduped, capped, skipped cleanly when Ollama is down; replay check
+flags DEGRADED past the threshold and never silently passes a
+cycle; one model at a time in the replay path (proven by the
+single-load tests); RAM guard + checkpoint/resume reused from
+train.py; CLI sleep + sleep-status; worker-threaded Sleep panel
+with Dream checkbox + cycle list; export/import carries sleep/
+whole; README states the honest limits (SFT only, no RL on CPU; no
+MoE routing — Ollama cannot route LoRA experts, adapters merge via
+GGUF export; Google's numbers are authors'-only, unreplicated).
+
+## Secrets check
+
+Grep of the finished tree for hardcoded keys/tokens/passwords/
+credentialed URLs: ZERO matches. No .env, providers.json,
+credentials, .pem, or .key files anywhere. Stella talks to local
+Ollama and public Hugging Face downloads only. The repo
+`.gitignore` (added 2026-11-13) covers .env, providers.json,
+credential/secret files, .pem/.key/id_rsa, __pycache__, .venv,
+.stella/, and zips.
+
+## Not verified (needs his PC / real services)
+
+- A real LFM3 sleep cycle (sandbox proves the pipeline on a tiny
+  random model only — same standing caveat as the v0.2 proof run).
+- Dreaming against his real Ollama models (fake server only here).
+- Real llama.cpp GGUF merge of a sleep adapter (the merge path is
+  the v0.2 one, unchanged).
+- The visible window, Nemo double-click install, and app-menu icon
+  on his Mint PC (standing v0.1/v0.2 caveat).
+- The 120s dream timeout against a slow local CPU model (the
+  timeout path itself is proven by the Ollama-down tests).
+
+---
+
+# v0.2 — still applies (installer files unchanged in v0.3)
+
+Verified 2026-11-12 in the sandbox. Kept here because the installer,
+installed-app, and training-stack checks were not re-run for v0.3 —
+those files did not change.
+
+## v0.2 suite: 110/110 green
+
+test_model 30, test_train 23, test_cli 14, test_gui 13,
+test_export 11, test_probe 8, test_gguf 8, test_ollama 3.
+
+## v0.2 fresh-unzip check
 
 Unzipped `stella-v0.2.zip` to a clean directory: exec bits survived
 extraction (`install.sh`, `install-training.sh`, `run.sh`,
 `stella-cli`, `run_tests.sh` all `rwxr-xr-x`), and the suite runs
 110/110 green from the fresh tree.
 
-## Installer check (sandbox, fake HOME)
+## v0.2 installer check (sandbox, fake HOME)
 
 `bash install.sh` from the fresh unzip: creates the private `.venv`,
 installs PySide6-Essentials, passes both fatal import checks, writes
@@ -81,7 +169,7 @@ links `stella` into `~/.local/bin`, exits 0. If `python3-venv` is
 missing, the installer says so and names the fix
 (`sudo apt install python3-venv`) instead of failing cryptically.
 
-## Installed-app check
+## v0.2 installed-app check
 
 Through the installed `stella` command (fake HOME + fake PATH):
 create profile, create project, list both, export to a folder, import
@@ -91,7 +179,7 @@ The GUI was driven from the installed venv (offscreen): window renders
 Train panel renders with all controls (dataset buttons, Start/Pause/
 Resume, progress bar, checkpoints, Export GGUF, refusal probe, log).
 
-## Training-stack check (sandbox)
+## v0.2 training-stack check (sandbox)
 
 `bash install-training.sh` installs torch CPU + transformers + peft +
 accelerate into the private venv and passes its import check (torch
@@ -99,7 +187,7 @@ accelerate into the private venv and passes its import check (torch
 The training tests that need the stack ran against it: the tiny-model
 LoRA run, pause/resume, adapter merge, and probe all passed.
 
-## Defects found and fixed in place
+## v0.2 defects found and fixed in place
 
 1. LoRA target expectation: the first test run asserted GPT-2 targets
    were `["c_attn", "c_proj"]`, but the detector also correctly found

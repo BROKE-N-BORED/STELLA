@@ -80,7 +80,7 @@ def test_cli_export_missing_project(home, tmp_path):
 def test_cli_version(home):
     res = run_cli(home, "--version")
     assert res.returncode == 0
-    assert "0.2" in res.stdout
+    assert "0.3" in res.stdout
 
 
 def test_cli_through_symlink(home, tmp_path):
@@ -156,5 +156,49 @@ def test_cli_train_missing_deps_in_process(home, monkeypatch, capsys):
     run_cli(home, "create-profile", "p1", "--base", "test/tiny-model")
     run_cli(home, "create-project", "p1", "proj")
     code = cli_mod.main(["train", "p1", "proj"])
+    assert code == 1
+    assert "install-training.sh" in capsys.readouterr().err
+
+
+def test_cli_sleep_help(home):
+    res = run_cli(home, "sleep", "--help")
+    assert res.returncode == 0
+    assert "--dream" in res.stdout
+    assert "--rows" in res.stdout
+    assert "--threshold" in res.stdout
+
+
+def test_cli_sleep_status_no_cycles(home):
+    run_cli(home, "create-profile", "p1", "--tag", "x:1b")
+    run_cli(home, "create-project", "p1", "proj")
+    res = run_cli(home, "sleep-status", "p1", "proj")
+    assert res.returncode == 0
+    assert "No sleep cycles yet" in res.stdout
+
+
+def test_cli_sleep_no_base_ref(home):
+    # Cheap checks first: no base ref is reported even before the
+    # dependency gate, in both envs (base and training). The profile
+    # gets no tag either — create-profile defaults base_ref to the
+    # tag when one is given.
+    run_cli(home, "create-profile", "p1")
+    run_cli(home, "create-project", "p1", "proj")
+    res = run_cli(home, "sleep", "p1", "proj")
+    assert res.returncode == 1
+    assert "base_ref" in res.stderr
+
+
+def test_cli_sleep_missing_deps_in_process(home, monkeypatch, capsys):
+    import stella.cli as cli_mod
+    import stella.train as train_mod
+
+    monkeypatch.setenv("STELLA_HOME", str(home))
+    monkeypatch.setattr(
+        train_mod, "training_deps_missing", lambda: ["torch"]
+    )
+    run_cli(home, "create-profile", "p1", "--base", "test/tiny-model")
+    run_cli(home, "create-project", "p1", "proj",
+            "--dataset", "sample-tool-calls.jsonl")
+    code = cli_mod.main(["sleep", "p1", "proj"])
     assert code == 1
     assert "install-training.sh" in capsys.readouterr().err

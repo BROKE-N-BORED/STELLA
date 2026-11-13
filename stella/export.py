@@ -11,6 +11,8 @@ An export is a folder:
                         # then — Stella never pretends weights exist.
       checkpoints/      # copied from the project, if any exist
       probe_results.json  # refusal-probe before/after, if run
+      sleep/            # sleep cycles (adapters, manifest, replay
+                        # reports), if any were run (Item 4)
 
 Import reads a package back, verifies it (required keys, known
 metamorph mode, sane names), and recreates the profile (if missing)
@@ -80,7 +82,9 @@ def export_project(store: Store, profile: str, project: str, dest: str | Path) -
         "- `manifest.json` — the full profile + project record.\n"
         "- `config.json` — training settings.\n"
         "- `weights/` — adapter / merged weights (Item 3).\n"
-        "- `checkpoints/` — training checkpoints, if any were made.\n\n"
+        "- `checkpoints/` — training checkpoints, if any were made.\n"
+        "- `sleep/` — sleep cycles (adapters, manifest, replay "
+        "reports), if any were run.\n\n"
         "Import back into Stella with: `stella import <this folder>`\n"
         "or the Import button in the Stella window.\n",
         encoding="utf-8",
@@ -117,6 +121,14 @@ def export_project(store: Store, profile: str, project: str, dest: str | Path) -
     notes_src = store.project_dir(profile, project) / "notes.md"
     if notes_src.is_file():
         shutil.copy2(notes_src, out / "notes.md")
+    # Sleep cycles travel whole: manifest + every cycle's adapter,
+    # rows, and replay report. (The weights-drop bug — export
+    # carrying a payload import never brought back — is not repeated
+    # here: import restores sleep/ below, and a round-trip test pins
+    # it.)
+    src_sleep = store.project_dir(profile, project) / "sleep"
+    if src_sleep.is_dir():
+        shutil.copytree(src_sleep, out / "sleep")
     return out
 
 
@@ -198,6 +210,11 @@ def import_export(store: Store, path: str | Path) -> dict:
     notes_src = path / "notes.md"
     if notes_src.is_file():
         store.write_notes(slug, proj["name"], notes_src.read_text(encoding="utf-8"))
+    # Sleep cycles come back whole (manifest + adapters + reports).
+    src_sleep = path / "sleep"
+    if src_sleep.is_dir():
+        dst_sleep = store.project_dir(slug, proj["name"]) / "sleep"
+        shutil.copytree(src_sleep, dst_sleep)
     return {
         "profile": slug,
         "profile_existed": profile_existed,

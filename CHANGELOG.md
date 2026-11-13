@@ -1,5 +1,55 @@
 # Changelog
 
+## v0.3 — 2026-11-13
+
+Sleep phase (Item 4): consolidate new rows without forgetting old ones.
+
+- Sleep engine (stella/sleep.py): a sleep cycle trains a NEW
+  low-rank LoRA adapter (rank capped at 8) on the dataset rows
+  added since the last sleep, tracked by content hash in a sleep
+  manifest. The base and all prior adapters stay frozen. Each cycle
+  stores its adapter, checkpoints, rows, and report under
+  `sleep/cycle-N/`; an interrupted cycle resumes instead of
+  restarting. Consolidation reuses the training engine
+  (train_project with a per-cycle work dir) — it does not fork it.
+- Dreaming (optional, `--dream`): the local Ollama model writes
+  synthetic practice examples, seeded by real rows. Every dreamed
+  row passes the same validation as real data, dedupes against
+  real and already-dreamed rows, and dreamed rows are capped at
+  the number of real rows in the cycle (at most 10 per call). If
+  Ollama is unreachable, dreaming is skipped with a plain message
+  and sleep still runs on real rows.
+- Replay check (the forgetting guard): before a cycle is accepted,
+  the new adapter is evaluated on held-out OLD validation rows
+  (kept from prior cycles) plus NEW validation rows. A cycle whose
+  old loss degrades more than 10% relative (configurable) is
+  flagged DEGRADED — saved, never silently accepted. The replay
+  loads the base model ONCE and evaluates sequentially by adapter
+  swapping; it never loads two models at once.
+- RAM guard reused: sleep refuses when the estimate does not fit
+  8 GB, with a plain message. Sleep leaves the project status
+  alone — it is a background job, not a retrain.
+- CLI: `sleep` (with --dream, --dream-model, --rows, --threshold)
+  and `sleep-status` (per-cycle stats + unslept row count). Cheap
+  checks run before the dependency gate, so a missing dataset or
+  "nothing new" is reported even on a base install. The Ctrl+C
+  handler sets the pause flag only (no printing inside the signal
+  handler — the train command's pause crash is not repeated here).
+- Sleep panel in the window: Sleep button (worker-threaded, gated
+  on save success), Dream checkbox, cycle list with per-cycle
+  stats, click a cycle to read its full report. Sleep and training
+  cannot run at the same time (each loads the base model).
+- Export/import: sleep cycles travel with the export (manifest +
+  adapters + rows + replay reports) and import restores them
+  whole — a round-trip test pins it.
+- Training engine refactors (small, backward-compatible): per-row
+  dataset validation shared by load_dataset and dreaming; one
+  public evaluate_loss used by per-epoch validation and the replay
+  check; train_project takes a work dir, a status flag, and a
+  settings override so sleep can reuse it. The requires_grad
+  UserWarning from float(out.loss) is fixed in both places it
+  occurred.
+
 ## v0.2 — 2026-11-12
 
 First proof loop: the training engine (Item 3).

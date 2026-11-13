@@ -135,3 +135,61 @@ def test_train_progress_updates(window):
     assert window.train_progress.value() == 5
     assert "Step 5 / 20" in window.train_loss.text()
     assert "2.5000" in window.train_loss.text()
+
+
+def test_sleep_panel_widgets_exist(window):
+    assert window.sleep_btn is not None
+    assert window.sleep_btn.text() == "Sleep"
+    assert window.sleep_dream_check is not None
+    assert window.sleep_dream_check.text() == "Dream first"
+    assert window.sleep_dream_check.isChecked() is False
+    assert window.sleep_cycles is not None
+    assert window.sleep_cycles.count() == 0  # no cycles yet
+
+
+def test_sleep_cycle_list_shows_cycles(window, seeded):
+    from PySide6.QtCore import Qt
+
+    from stella.sleep import load_sleep_manifest, save_sleep_manifest
+
+    manifest = load_sleep_manifest(seeded, "lfm3-tool", "tool-calls")
+    manifest["cycles"] = [{
+        "cycle": 1, "status": "OK", "timestamp": "2026-11-13T00:00:00",
+        "real_rows": 6, "dreamed_rows": 2, "steps": 4,
+        "old_loss_before": 2.0, "old_loss_after": 1.9, "new_loss": 1.5,
+    }]
+    save_sleep_manifest(seeded, "lfm3-tool", "tool-calls", manifest)
+    window.refresh_train_panel()
+    assert window.sleep_cycles.count() == 1
+    text = window.sleep_cycles.item(0).text()
+    assert "cycle 1" in text
+    assert "OK" in text
+    assert "6 new" in text
+    assert "2 dreamed" in text
+    assert window.sleep_cycles.item(0).data(Qt.UserRole) == 1
+
+
+def test_start_sleep_without_deps_logs_hint(window, monkeypatch):
+    import stella.train as train_mod
+
+    monkeypatch.setattr(
+        train_mod, "training_deps_missing", lambda: ["torch", "peft"]
+    )
+    window.start_sleep()
+    assert "install-training.sh" in window.train_log.toPlainText()
+    assert window._sleep_worker is None
+
+
+def test_start_sleep_gated_on_save_failure(window, monkeypatch):
+    import stella.train as train_mod
+
+    # Deps present, but the learning rate is not a number — the save
+    # fails, and sleep must NOT start on the stale settings.
+    monkeypatch.setattr(train_mod, "training_deps_missing", lambda: [])
+    warnings = []
+    monkeypatch.setattr(window, "_warn", warnings.append)
+    window.proj_lr.setText("banana")
+    window.start_sleep()
+    assert window._sleep_worker is None
+    assert warnings
+    assert "Learning rate" in warnings[0]

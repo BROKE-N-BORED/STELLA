@@ -142,6 +142,34 @@ def _validate_messages(messages: object, line_no: int) -> list[dict]:
     return cleaned
 
 
+def validate_dataset_row(row: object, line_no: int) -> tuple[str, list[dict]]:
+    """Validate one dataset row. Returns (format, messages).
+
+    Shared by load_dataset (whole-file validation) and the sleep
+    phase (per-row validation of dreamed examples) — one rule for
+    what a row is, wherever the row comes from.
+    """
+    if not isinstance(row, dict):
+        raise StellaError(f"dataset line {line_no}: must be a JSON object")
+    if "messages" in row:
+        return "messages", _validate_messages(row["messages"], line_no)
+    if "prompt" in row and "completion" in row:
+        prompt = row["prompt"]
+        completion = row["completion"]
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise StellaError(f"dataset line {line_no}: empty prompt")
+        if not isinstance(completion, str) or not completion.strip():
+            raise StellaError(f"dataset line {line_no}: empty completion")
+        return "prompt", [
+            {"role": "user", "content": prompt},
+            {"role": "assistant", "content": completion},
+        ]
+    raise StellaError(
+        f"dataset line {line_no}: needs 'messages' or "
+        "'prompt' + 'completion'"
+    )
+
+
 def load_dataset(path: str | Path) -> tuple[list[dict], dict]:
     """Read + validate a JSONL dataset.
 
@@ -170,30 +198,7 @@ def load_dataset(path: str | Path) -> tuple[list[dict], dict]:
             raise StellaError(
                 f"dataset line {line_no}: not valid JSON: {exc}"
             ) from exc
-        if not isinstance(row, dict):
-            raise StellaError(f"dataset line {line_no}: must be a JSON object")
-        if "messages" in row:
-            row_fmt = "messages"
-            messages = _validate_messages(row["messages"], line_no)
-        elif "prompt" in row and "completion" in row:
-            row_fmt = "prompt"
-            prompt = row["prompt"]
-            completion = row["completion"]
-            if not isinstance(prompt, str) or not prompt.strip():
-                raise StellaError(f"dataset line {line_no}: empty prompt")
-            if not isinstance(completion, str) or not completion.strip():
-                raise StellaError(
-                    f"dataset line {line_no}: empty completion"
-                )
-            messages = [
-                {"role": "user", "content": prompt},
-                {"role": "assistant", "content": completion},
-            ]
-        else:
-            raise StellaError(
-                f"dataset line {line_no}: needs 'messages' or "
-                "'prompt' + 'completion'"
-            )
+        row_fmt, messages = validate_dataset_row(row, line_no)
         if fmt is None:
             fmt = row_fmt
         elif fmt != row_fmt:
@@ -459,11 +464,67 @@ def _collate(tokenizer, batch: list[dict]):
     )
 
 
+def evaluate_loss(
+    model,
+    tokenizer,
+    examples: list[dict],
+    *,
+    max_seq_len: int = 1024,
+    batch_size: int = 1,
+    limit: int = 50,
+) -> float | None:
+    """Average completion loss of `model` on `examples` (no gradients).
+
+    One evaluation path, shared by the training loop's per-epoch
+    validation and the sleep phase's replay check. Returns None when
+    there are no examples. Restores the model's train/eval mode
+    afterwards, so calling it mid-training is safe.
+    """
+    import torch
+
+    if not examples:
+        return None
+    was_training = model.training
+    tokenized = [
+        tokenize_example(tokenizer, ex, max_seq_len) for ex in examples
+    ]
+    use_bf16 = next(model.parameters()).dtype == torch.bfloat16
+    model.eval()
+    total_loss = 0.0
+    count = 0
+    try:
+        with torch.no_grad():
+            for i in range(0, min(len(tokenized), limit), batch_size):
+                batch = tokenized[i : i + batch_size]
+                input_ids, attention, labels = _collate(tokenizer, batch)
+                with torch.autocast(
+                    device_type="cpu", dtype=torch.bfloat16, enabled=use_bf16
+                ):
+                    out = model(
+                        input_ids=input_ids,
+                        attention_mask=attention,
+                        labels=labels,
+                    )
+                total_loss += float(out.loss.detach()) * len(batch)
+                count += len(batch)
+    finally:
+        if was_training:
+            model.train()
+    return total_loss / max(1, count)
+
+
 # -- checkpoints ----------------------------------------------------
 
-def list_checkpoints(store: Store, profile: str, project: str) -> list[dict]:
-    """Checkpoints for a project, oldest first."""
-    ckpt_dir = store.project_dir(profile, project) / "checkpoints"
+def list_checkpoints(
+    store: Store, profile: str, project: str, *, ckpt_dir: Path | None = None
+) -> list[dict]:
+    """Checkpoints for a project, oldest first.
+
+    `ckpt_dir` overrides the checkpoint folder — the sleep phase
+    lists the checkpoints of one cycle, not the whole project.
+    """
+    if ckpt_dir is None:
+        ckpt_dir = store.project_dir(profile, project) / "checkpoints"
     out = []
     if not ckpt_dir.is_dir():
         return out
@@ -584,30 +645,12 @@ def run_training_loop(
         optimizer = torch.optim.AdamW(trainable, lr=lr, weight_decay=0.0)
 
     tokenized = [tokenize_example(tokenizer, ex, max_seq_len) for ex in train_examples]
-    val_tokenized = [tokenize_example(tokenizer, ex, max_seq_len) for ex in val_examples]
 
     def evaluate() -> float | None:
-        if not val_tokenized:
-            return None
-        model.eval()
-        total_loss = 0.0
-        count = 0
-        with torch.no_grad():
-            for i in range(0, min(len(val_tokenized), 50), batch_size):
-                batch = val_tokenized[i : i + batch_size]
-                input_ids, attention, labels = _collate(tokenizer, batch)
-                with torch.autocast(
-                    device_type="cpu", dtype=torch.bfloat16, enabled=use_bf16
-                ):
-                    out = model(
-                        input_ids=input_ids,
-                        attention_mask=attention,
-                        labels=labels,
-                    )
-                total_loss += float(out.loss) * len(batch)
-                count += len(batch)
-        model.train()
-        return total_loss / max(1, count)
+        return evaluate_loss(
+            model, tokenizer, val_examples,
+            max_seq_len=max_seq_len, batch_size=batch_size, limit=50,
+        )
 
     emit({"type": "started", "total_steps": total_steps, "rank": rank})
     model.train()
@@ -639,7 +682,7 @@ def run_training_loop(
                 )
                 loss = out.loss / grad_accum
             loss.backward()
-            accum_loss += float(out.loss)
+            accum_loss += float(out.loss.detach())
             accum_count += 1
             is_last_micro = micro_idx >= len(order)
             if accum_count % grad_accum != 0 and not is_last_micro:
@@ -761,20 +804,35 @@ def train_project(
     controller: TrainController | None = None,
     _model_loader=None,
     _dtype: str = "bfloat16",
+    work_dir: str | Path | None = None,
+    update_status: bool = True,
+    settings_override: dict | None = None,
 ) -> dict:
     """Train one project end to end. Returns a summary dict.
 
     `_model_loader` is a test hook: a callable returning
     (model, tokenizer) so tests can train a tiny random model with no
     downloads. Real runs always load from Hugging Face.
+
+    `work_dir` overrides where checkpoints, the adapter, and the log
+    go (default: the project dir). The sleep phase trains into its
+    own cycle dir. `update_status=False` leaves the project status
+    untouched — sleep is a background consolidation job, not a
+    retrain of the project. `settings_override` merges over the
+    project settings for this run only (sleep caps the LoRA rank
+    at 8) without touching the stored project.
     """
     require_training_deps()
     prof = store.get_profile(profile)
     proj = store.get_project(profile, project)
     project_dir = store.project_dir(profile, project)
+    work_dir = Path(work_dir) if work_dir is not None else project_dir
+    work_dir.mkdir(parents=True, exist_ok=True)
 
     settings = dict(DEFAULT_TRAIN)
     settings.update(proj.get("settings", {}) or {})
+    if settings_override:
+        settings.update(settings_override)
     if max_steps is not None:
         # A step cap is a short proof run: shrink the epoch budget to
         # fit it (epochs are re-derived from the cap below).
@@ -838,7 +896,9 @@ def train_project(
     skip_in_epoch = 0
     optimizer = None
     if resume:
-        checkpoints = list_checkpoints(store, profile, project)
+        checkpoints = list_checkpoints(
+            store, profile, project, ckpt_dir=work_dir / "checkpoints"
+        )
         if not checkpoints:
             raise StellaError(
                 "nothing to resume — this project has no checkpoints yet"
@@ -895,7 +955,8 @@ def train_project(
         epochs_needed = max(1, math.ceil(int(settings["_max_steps"]) / steps_per_epoch))
         settings["epochs"] = min(int(settings.get("epochs", 3)), epochs_needed)
 
-    store.update_project(profile, project, status="training")
+    if update_status:
+        store.update_project(profile, project, status="training")
     try:
         summary = run_training_loop(
             model,
@@ -903,7 +964,7 @@ def train_project(
             train_examples,
             val_examples,
             settings,
-            project_dir,
+            work_dir,
             on_event=on_event,
             controller=controller,
             start_step=start_step,
@@ -912,11 +973,13 @@ def train_project(
             optimizer=optimizer,
         )
     except Exception:
-        store.update_project(profile, project, status="paused")
+        if update_status:
+            store.update_project(profile, project, status="paused")
         raise
-    store.update_project(
-        profile, project, status="paused" if summary["stopped"] else "trained"
-    )
+    if update_status:
+        store.update_project(
+            profile, project, status="paused" if summary["stopped"] else "trained"
+        )
     summary["dataset"] = info
     summary["trainable_params"] = trainable_params
     summary["target_modules"] = targets

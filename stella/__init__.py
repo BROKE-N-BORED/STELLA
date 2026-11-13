@@ -1,4 +1,4 @@
-"""STELLA — fine-tune models on your own PC. v0.2: training engine."""
+"""STELLA — fine-tune models on your own PC. v0.3: sleep phase."""
 
 from .model import STELLA_VERSION
 

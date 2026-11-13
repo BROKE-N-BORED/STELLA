@@ -15,6 +15,11 @@ job, export it as a usable package.
   done, verified, shipped.
 - Item 3 — Stella v0.2 training engine: done, verified in the sandbox.
   The real LFM3 proof run on your PC is the closer (see below).
+- Item 4 — Stella v0.3 sleep phase: done, verified in the sandbox.
+  Consolidate new rows into a fresh LoRA adapter per cycle, dream
+  synthetic rows from the local Ollama model, and check every cycle
+  against old rows before accepting it. Same closer as Item 3 — the
+  real LFM3 sleep run happens on your PC.
 
 ## Install
 
@@ -57,8 +62,8 @@ nothing trains silently and nothing downloads on its own.
 - **Projects** — fine-tunes live inside a profile as projects: own
   dataset, training settings, checkpoints, notes, fully customizable.
 - **Export** — a finished fine-tune exports as a usable package
-  (manifest, config, trained adapter, checkpoints, probe results)
-  and imports back in.
+  (manifest, config, trained adapter, checkpoints, probe results,
+  sleep cycles) and imports back in.
 
 All Stella data lives in `~/.stella/` as plain JSON and Markdown, so
 you can read it or fix it by hand. Set `STELLA_HOME` to move it.
@@ -101,6 +106,67 @@ slow on a Ryzen 3 — hours for a real run — and that is expected.
   after tuning, reporting the refusal-rate change. For LFM3 this is
   informational; for a governing-seat tune it is a gate — if tuning
   re-taught refusals, the gate fails the tune.
+
+## Sleep (v0.3)
+
+When new examples arrive, you don't retrain from scratch — you
+sleep on them. A sleep cycle is an offline background job: slow is
+fine, but it must fit in RAM and never forget what the model
+already knew.
+
+- **Consolidation** — Stella trains a NEW low-rank LoRA adapter
+  (rank capped at 8) on the new rows only — rows added to the
+  dataset since the last sleep, tracked by content hash in a sleep
+  manifest. The base and all prior adapters stay frozen. Each cycle
+  stores its adapter, checkpoints, rows, and report under
+  `sleep/cycle-N/`. An interrupted cycle resumes instead of
+  restarting.
+- **Dreaming** (optional, `--dream`) — the local Ollama model
+  writes its own practice examples, seeded by real ones. Every
+  dreamed row must pass the same validation as real data, must not
+  duplicate a real or already-dreamed row, and dreamed rows are
+  capped at the number of real rows in the cycle (at most 10 per
+  call). If Ollama is down, dreaming is skipped with a plain
+  message and sleep still runs on real rows — never a crash, never
+  a hang.
+- **Replay check** (the forgetting guard) — before a cycle is
+  accepted, the new adapter is evaluated on a held-out mix of OLD
+  validation rows (kept from prior cycles) and NEW validation
+  rows. If the old loss degrades more than 10% (relative,
+  configurable with `--threshold`), the cycle is flagged DEGRADED
+  in its report and the cycle list — still saved, never silently
+  accepted as good. The replay loads the base model ONCE and
+  evaluates old-then-new sequentially; it never loads two models
+  at once (two LFM3 loads would be ~7 GB on an 8 GB machine).
+- **Status** — `stella sleep-status <profile> <project>` lists
+  every cycle (rows, dreamed rows, old-loss delta, OK/DEGRADED)
+  and how many dataset rows are still awake. The window's Sleep
+  panel shows the same list; click a cycle to read its report.
+- **Export** — sleep cycles travel with the export (manifest +
+  every cycle's adapter, rows, and replay report) and import
+  restores them whole.
+
+What Stella Sleep IS and IS NOT (read this before trusting it):
+
+- It implements the two stages of Google Research's sleep
+  framework ("The sleep framework", blog Oct 27, 2026; "Language
+  Models Need Sleep", Behrouz et al., arXiv 2606.03979) at
+  Stella's scale. Google published NO code, and their numbers are
+  the authors' own — not independently reproduced. Stella does
+  NOT claim to reproduce Google's results. Their own ablation
+  credits dreaming with ~78% of the fact-learning gain while
+  consolidation drives reasoning and long-context — at Stella's
+  scale, with a 2B local model doing the dreaming, expect far less
+  than that.
+- No RL refinement — SFT only. Reinforcement learning on top of
+  dreaming is not feasible on a CPU-only 8 GB machine.
+- No MoE routing — Ollama cannot route LoRA experts. A sleep
+  adapter becomes usable the same way any adapter does: merged
+  into the base through the GGUF export path.
+- Dreaming quality depends entirely on the local model doing the
+  dreaming. A weak dreamer writes weak rows; the validation,
+  dedupe, and cap are there to limit the damage, not to guarantee
+  good data.
 
 ## The LFM3 proof run (Item 3 closer — on your PC)
 
@@ -164,6 +230,10 @@ After install, `stella` works in a terminal:
 `stella export-gguf <profile> <project> <dir> [--quant Q4_K_M]`
 
 `stella probe <profile> <project>`
+
+`stella sleep <profile> <project> [--dream] [--dream-model TAG] [--rows FILE] [--threshold 0.10]`
+
+`stella sleep-status <profile> <project>`
 
 Before install, the same commands run as `bash stella-cli ...` from
 inside the Stella folder.
