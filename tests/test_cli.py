@@ -44,11 +44,12 @@ def test_cli_projects_flow(home):
     res = run_cli(home, "projects", "p1")
     assert "No projects" in res.stdout
     res = run_cli(home, "create-project", "p1", "proj",
-                  "--dataset", "data.jsonl", "--metamorph", "both")
+                  "--dataset", "data.jsonl")
     assert res.returncode == 0
     res = run_cli(home, "projects", "p1")
     assert "proj" in res.stdout
-    assert "both" in res.stdout
+    # The listing shows name and status only: no dead mode column.
+    assert "metamorph" not in res.stdout
 
 
 def test_cli_export_and_import(home, tmp_path):

@@ -21,6 +21,14 @@
                                           (/quit to exit). Cloud
                                           providers need a key saved in
                                           Settings under AI providers.
+    stella requant <tag>                  re-quantize an installed Ollama
+                                          model to a smaller quant (default
+                                          Q4_K_M) and register it as a new
+                                          tag; the original is untouched
+    stella distill <profile> <project> --teacher <tag> --prompts <file>
+                                          ask a teacher model each prompt
+                                          and save the answers as the
+                                          project's dataset
 
 Reads STELLA_HOME for the home dir (default ~/.stella).
 """
@@ -60,8 +68,7 @@ def cmd_projects(args) -> int:
         print(f"No projects in profile {args.profile!r}.")
         return 0
     for p in projects:
-        mode = (p.get("metamorph") or {}).get("mode", "morph")
-        print(f"{p['name']}\tstatus: {p.get('status', 'draft')}\tmetamorph: {mode}")
+        print(f"{p['name']}\tstatus: {p.get('status', 'draft')}")
     return 0
 
 
@@ -212,7 +219,6 @@ def cmd_create_project(args) -> int:
         args.name,
         display_name=args.display or "",
         dataset_ref=args.dataset or "",
-        metamorph_mode=args.metamorph,
     )
     print(f"Created project {data['name']!r} in profile {args.profile!r}")
     return 0
@@ -434,6 +440,98 @@ def cmd_chat(args) -> int:
     return 0
 
 
+def _fmt_size(n: int) -> str:
+    if n >= 1024**3:
+        return f"{n / 1024**3:.2f} GB"
+    if n >= 1024**2:
+        return f"{n / 1024**2:.0f} MB"
+    return f"{n:,} bytes"
+
+
+def cmd_requant(args) -> int:
+    from .requant import requant_model
+
+    def on_event(event: dict):
+        kind = event.get("type")
+        if kind == "found":
+            source_quant = event.get("source_quant") or "unknown quant"
+            print(
+                f"Found {event['source_tag']} "
+                f"({_fmt_size(event['source_bytes'])}, {source_quant}). "
+                f"Shrinking to {event['quant']} as {event['new_tag']}..."
+            )
+        elif kind == "quantized":
+            print(
+                f"Shrunk: {_fmt_size(event['source_bytes'])} -> "
+                f"{_fmt_size(event['output_bytes'])}."
+            )
+        elif kind == "created":
+            print(f"Registered with Ollama as {event['new_tag']}.")
+
+    result = requant_model(
+        args.tag,
+        quant=args.quant,
+        new_tag=args.as_tag,
+        on_event=on_event,
+    )
+    print()
+    print(
+        f"Done. {result['new_tag']} is "
+        f"{_fmt_size(result['output_bytes'])} "
+        f"(was {_fmt_size(result['source_bytes'])}), {result['quant']}."
+    )
+    print(f"Run it: {result['ollama_run']}")
+    print(f"The original {result['source_tag']} is untouched.")
+    return 0
+
+
+def cmd_distill(args) -> int:
+    from .distill import distill_dataset
+
+    store = _store()
+
+    def on_event(event: dict):
+        kind = event.get("type")
+        if kind == "prompt":
+            print(
+                f"prompt {event['index']} of {event['total']}",
+                flush=True,
+            )
+
+    report = distill_dataset(
+        store,
+        args.profile,
+        args.project,
+        args.teacher,
+        args.prompts,
+        on_event=on_event,
+    )
+    print()
+    print(
+        f"Asked the teacher {report['asked']} prompt(s), "
+        f"kept {report['rows']} answer(s)."
+    )
+    if report["skipped_empty"]:
+        print(
+            f"  {report['skipped_empty']} empty answer(s) skipped."
+        )
+    if report["skipped_dup"]:
+        print(
+            f"  {report['skipped_dup']} duplicate answer(s) skipped."
+        )
+    if report["skipped_resumed"]:
+        print(
+            f"  {report['skipped_resumed']} prompt(s) already answered "
+            "in an earlier run."
+        )
+    print(f"Dataset saved: {report['dataset']}")
+    print(
+        "The project now points at it. Train it with:"
+    )
+    print(f"  stella train {args.profile} {args.project}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="stella", description="Stella: fine-tune models on your own PC."
@@ -473,8 +571,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("name")
     p.add_argument("--display", default="")
     p.add_argument("--dataset", default="")
-    p.add_argument("--metamorph", default="morph",
-                   choices=["morph", "compress", "both"])
     p.set_defaults(func=cmd_create_project)
 
     p = sub.add_parser("train", help="LoRA-tune a project on CPU")
@@ -549,6 +645,32 @@ def build_parser() -> argparse.ArgumentParser:
                    "(ollama), or a cloud provider with your key "
                    "(groq, gemini, custom)")
     p.set_defaults(func=cmd_chat)
+
+    p = sub.add_parser(
+        "requant",
+        help="re-quantize an installed Ollama model to a smaller "
+        "quant and register it as a new tag",
+    )
+    p.add_argument("tag", help="installed Ollama tag, e.g. qwen3.5:4b")
+    p.add_argument("--quant", default="Q4_K_M",
+                   help="llama.cpp quant type (default Q4_K_M)")
+    p.add_argument("--as", dest="as_tag", default=None,
+                   help="name for the smaller model "
+                   "(default: the old tag plus the quant)")
+    p.set_defaults(func=cmd_requant)
+
+    p = sub.add_parser(
+        "distill",
+        help="ask a teacher model each prompt in a file and save "
+        "the answers as the project's dataset",
+    )
+    p.add_argument("profile")
+    p.add_argument("project")
+    p.add_argument("--teacher", required=True,
+                   help="installed Ollama tag to learn from")
+    p.add_argument("--prompts", required=True,
+                   help="plain text file, one prompt per line")
+    p.set_defaults(func=cmd_distill)
     return parser
 
 

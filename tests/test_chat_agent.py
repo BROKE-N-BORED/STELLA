@@ -614,3 +614,152 @@ def test_no_em_dash_in_tool_text(agent):
         assert "—" not in narration, name
     for _key, _title, meaning in TEMPLATE_STEPS:
         assert "—" not in meaning
+
+
+# -- distill + requant tools (v0.8) -----------------------------------
+
+
+def test_distill_tool(agent, store, seeded, monkeypatch):
+    seen = {}
+
+    def fake_distill(store, profile, project, teacher, prompts, **kwargs):
+        seen.update(
+            profile=profile, project=project,
+            teacher=teacher, prompts=prompts,
+        )
+        return {
+            "teacher": teacher, "prompts": 3, "asked": 3,
+            "skipped_empty": 1, "skipped_dup": 0, "skipped_resumed": 0,
+            "rows": 2, "dataset": "/tmp/x/distilled.jsonl",
+        }
+
+    monkeypatch.setattr(chat_mod, "distill_dataset", fake_distill)
+    result = agent.call_tool(
+        "distill",
+        {"profile": "lfm3-tool", "project": "tool-calls",
+         "teacher": "qwen3.5:4b", "prompts": "/tmp/prompts.txt"},
+    )
+    assert "Asked the teacher 3 prompt(s)" in result
+    assert "kept 2 answer(s)" in result
+    assert "1 empty answer(s) were skipped" in result
+    assert "say train to start" in result
+    assert seen["teacher"] == "qwen3.5:4b"
+    assert seen["prompts"] == "/tmp/prompts.txt"
+
+
+def test_distill_tool_needs_teacher_and_prompts(agent, store, seeded):
+    result = agent.call_tool(
+        "distill", {"profile": "lfm3-tool", "project": "tool-calls"}
+    )
+    assert "which teacher model" in result
+    result = agent.call_tool(
+        "distill",
+        {"profile": "lfm3-tool", "project": "tool-calls",
+         "teacher": "qwen3.5:4b"},
+    )
+    assert "prompts file" in result
+
+
+def test_distill_tool_failure_is_plain_words(
+    agent, store, seeded, monkeypatch
+):
+    from stella.model import StellaError
+
+    def fake_distill(*args, **kwargs):
+        raise StellaError(
+            "Ollama is not running, so the teacher cannot answer."
+        )
+
+    monkeypatch.setattr(chat_mod, "distill_dataset", fake_distill)
+    result = agent.call_tool(
+        "distill",
+        {"profile": "lfm3-tool", "project": "tool-calls",
+         "teacher": "qwen3.5:4b", "prompts": "/tmp/prompts.txt"},
+    )
+    assert "That did not work" in result
+    assert "Ollama is not running" in result
+
+
+def test_requant_tool(agent, store, seeded, monkeypatch):
+    seen = {}
+
+    def fake_requant(tag, **kwargs):
+        seen.update(tag=tag, **kwargs)
+        return {
+            "source_tag": tag, "source_bytes": 2700000000,
+            "source_quant": "Q8_0", "new_tag": "qwen3.5:4b-q4-k-m",
+            "quant": "Q4_K_M", "output_bytes": 1800000000,
+            "ollama_run": "ollama run qwen3.5:4b-q4-k-m",
+        }
+
+    monkeypatch.setattr(chat_mod, "requant_model", fake_requant)
+    result = agent.call_tool("requant", {"tag": "qwen3.5:4b"})
+    assert "qwen3.5:4b-q4-k-m" in result
+    assert "untouched" in result
+    assert "ollama run qwen3.5:4b-q4-k-m" in result
+    assert seen["quant"] == "Q4_K_M"
+    assert seen["new_tag"] is None
+
+
+def test_requant_tool_passes_quant_and_name(agent, monkeypatch):
+    seen = {}
+
+    def fake_requant(tag, **kwargs):
+        seen.update(tag=tag, **kwargs)
+        return {
+            "source_tag": tag, "source_bytes": 2700000000,
+            "source_quant": "Q8_0", "new_tag": "small:1b",
+            "quant": "Q8_0", "output_bytes": 2600000000,
+            "ollama_run": "ollama run small:1b",
+        }
+
+    monkeypatch.setattr(chat_mod, "requant_model", fake_requant)
+    result = agent.call_tool(
+        "requant",
+        {"tag": "qwen3.5:4b", "quant": "Q8_0", "new_tag": "small:1b"},
+    )
+    assert "small:1b" in result
+    assert seen["quant"] == "Q8_0"
+    assert seen["new_tag"] == "small:1b"
+
+
+def test_requant_tool_needs_a_tag(agent):
+    result = agent.call_tool("requant", {})
+    assert "which installed model" in result
+
+
+def test_requant_tool_failure_is_plain_words(agent, monkeypatch):
+    from stella.model import StellaError
+
+    def fake_requant(tag, **kwargs):
+        raise StellaError("llama-quantize was not found.")
+
+    monkeypatch.setattr(chat_mod, "requant_model", fake_requant)
+    result = agent.call_tool("requant", {"tag": "qwen3.5:4b"})
+    assert "That did not work" in result
+    assert "llama-quantize was not found" in result
+
+
+def test_requant_tool_via_chat_loop(agent, store, seeded, monkeypatch):
+    def fake_requant(tag, **kwargs):
+        return {
+            "source_tag": tag, "source_bytes": 2700000000,
+            "source_quant": "Q8_0", "new_tag": "qwen3.5:4b-q4-k-m",
+            "quant": "Q4_K_M", "output_bytes": 1800000000,
+            "ollama_run": "ollama run qwen3.5:4b-q4-k-m",
+        }
+
+    monkeypatch.setattr(chat_mod, "requant_model", fake_requant)
+    scripted = ScriptedChat(
+        [
+            tool_block("requant", {"tag": "qwen3.5:4b"}),
+            "All done. Your smaller model is ready.",
+        ]
+    )
+    agent._chat_fn = scripted
+    reply = agent.reply("make qwen smaller")
+    assert reply == "All done. Your smaller model is ready."
+    second = scripted.calls[1]
+    tool_msgs = [m for m in second if m["role"] == "tool"]
+    assert len(tool_msgs) == 1
+    assert "qwen3.5:4b-q4-k-m" in tool_msgs[0]["content"]

@@ -77,7 +77,6 @@ from .debug_log import DebugLogger, check_ollama
 from .howto import topic_text, topic_titles
 from .model import (
     DEFAULT_SETTINGS,
-    METAMORPH_MODES,
     STELLA_VERSION,
     StellaError,
     Store,
@@ -748,12 +747,6 @@ class ProjectWindow(QDialog):
         self.batch_spin.setRange(1, 32)
         self.seq_spin = QSpinBox()
         self.seq_spin.setRange(128, 32768)
-        self.metamorph_combo = QComboBox()
-        self.metamorph_combo.addItems(list(METAMORPH_MODES))
-        self.metamorph_combo.setToolTip(
-            "MetaMorphAi modes are not wired up yet. This is stored "
-            "but training ignores it."
-        )
         form.addRow("Display name", self.display_edit)
         form.addRow("", _help_label("Just a label for the project list."))
         form.addRow("Dataset", self.dataset_edit)
@@ -799,14 +792,6 @@ class ProjectWindow(QDialog):
         form.addRow("Max seq len", self.seq_spin)
         form.addRow(
             "", _help_label("Longest example, in tokens. 1024 is the usual.")
-        )
-        form.addRow("MetaMorphAi", self.metamorph_combo)
-        form.addRow(
-            "",
-            _help_label(
-                "Does nothing yet. The modes are not wired to training. "
-                "Leave it alone for now."
-            ),
         )
         layout.addLayout(form)
 
@@ -879,9 +864,6 @@ class ProjectWindow(QDialog):
         self.epochs_spin.setValue(int(settings.get("epochs", 3)))
         self.batch_spin.setValue(int(settings.get("batch_size", 1)))
         self.seq_spin.setValue(int(settings.get("max_seq_len", 1024)))
-        mode = (p.get("metamorph") or {}).get("mode", "morph")
-        idx = self.metamorph_combo.findText(mode)
-        self.metamorph_combo.setCurrentIndex(idx if idx >= 0 else 0)
         self.notes_edit.setPlainText(notes)
 
     def save(self) -> bool:
@@ -908,7 +890,6 @@ class ProjectWindow(QDialog):
                     "batch_size": self.batch_spin.value(),
                     "max_seq_len": self.seq_spin.value(),
                 },
-                metamorph={"mode": self.metamorph_combo.currentText()},
             )
             self._main.store.write_notes(
                 self._profile,
@@ -1854,9 +1835,7 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _project_label(p):
-        label = p.get("display_name") or p["name"]
-        mode = (p.get("metamorph") or {}).get("mode", "morph")
-        return f"{label} ({mode})"
+        return p.get("display_name") or p["name"]
 
     def refresh_tree(self):
         """Sync the tree with the store WITHOUT rebuilding it (U28):

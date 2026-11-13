@@ -14,9 +14,12 @@ import os
 import urllib.error
 import urllib.request
 
+from .model import StellaError
+
 DEFAULT_URL = "http://localhost:11434"
 TIMEOUT_SECONDS = 2.0
 CHAT_TIMEOUT_SECONDS = 120.0
+GENERATE_TIMEOUT_SECONDS = 300.0
 
 
 class OllamaError(Exception):
@@ -44,6 +47,84 @@ def list_models(url: str | None = None, timeout: float = TIMEOUT_SECONDS) -> lis
         if isinstance(entry, dict) and isinstance(entry.get("name"), str):
             names.append(entry["name"])
     return sorted(names)
+
+
+def reachable(url: str | None = None, timeout: float = TIMEOUT_SECONDS) -> bool:
+    """True when the Ollama server answers on localhost."""
+    base = (url or ollama_url()).rstrip("/")
+    try:
+        req = urllib.request.Request(base + "/api/tags", method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status == 200
+    except (urllib.error.URLError, OSError, TimeoutError):
+        return False
+
+
+def generate(
+    model: str,
+    prompt: str,
+    url: str | None = None,
+    timeout: float = GENERATE_TIMEOUT_SECONDS,
+    *,
+    num_predict: int = 1024,
+    temperature: float = 0.7,
+) -> str:
+    """One /api/generate call, no streaming. Returns the reply text.
+
+    Raises StellaError in plain words on any failure: Ollama down,
+    the model not installed, or a reply with no text. The default
+    timeout is generous on purpose: a local CPU model answers slowly.
+    """
+    base = (url or ollama_url()).rstrip("/")
+    payload = json.dumps(
+        {
+            "model": model,
+            "prompt": prompt,
+            "stream": False,
+            "options": {
+                "temperature": temperature,
+                "num_predict": num_predict,
+            },
+        }
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        base + "/api/generate",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", "replace")
+        except OSError:
+            pass
+        if "not found" in detail.lower() or "does not exist" in detail.lower():
+            raise StellaError(
+                f"Ollama does not have a model called {model!r}. "
+                "Check the tag, or pull the model first."
+            ) from exc
+        raise StellaError(
+            f"Ollama could not answer (HTTP {exc.code}). "
+            "Is the model still loading? Try again in a minute."
+        ) from exc
+    except (urllib.error.URLError, OSError, TimeoutError) as exc:
+        raise StellaError(
+            "Ollama did not answer. Is Ollama running on this PC? "
+            f"({exc})"
+        ) from exc
+    except ValueError as exc:
+        raise StellaError(
+            "Ollama answered with something Stella could not read. "
+            "Try again."
+        ) from exc
+    text = body.get("response") if isinstance(body, dict) else None
+    if not isinstance(text, str):
+        raise StellaError("Ollama answered but gave no text. Try again.")
+    return text
 
 
 def chat(

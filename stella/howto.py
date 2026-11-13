@@ -1,6 +1,6 @@
 """STELLA How to Use index: the built-in guide.
 
-Eleven topics, plain words, no jargon left unexplained. Every claim
+Thirteen topics, plain words, no jargon left unexplained. Every claim
 here is checked against what Stella actually does: things that do
 not work yet say so in plain words. No em-dashes in this text
 (Stella rule U33) and no bare ampersands (U11).
@@ -142,10 +142,7 @@ Max seq len 1024. Longest example, in tokens.
 
 Method is always lora. Full fine-tuning would retrain the whole
 model, which does not run on this PC, so that option is switched
-off.
-
-MetaMorphAi does nothing yet. The modes are stored but training
-ignores them. Leave that setting alone for now.""",
+off.""",
     ),
     (
         "Training",
@@ -259,6 +256,64 @@ The tuned model keeps the base model's name with the project
 name added, so you can tell it apart in Ollama.""",
     ),
     (
+        "Making a model smaller",
+        """A model you already have in Ollama can be made smaller
+and faster. This is called re-quantizing: the same weights,
+packed tighter. A Q8_0 model at 2.7 GB becomes a Q4_K_M model
+around 1.8 GB, and it runs faster because there is less to read
+from memory.
+
+Ask the Chat to do it for you, or run it in a terminal inside the
+Stella folder:
+
+  bash stella-cli requant qwen3.5:4b
+
+That makes a new model called qwen3.5:4b-q4-k-m. Pick your own
+name with --as, and another size with --quant. The original
+model is never touched: the smaller one is a separate copy.
+
+Honest limits: re-quantizing a model that is already quantized
+loses a little quality, because the weights get rounded twice.
+The smaller model is a touch less sharp than the original. That
+is the trade for the size and speed. And it does not remove
+anything the model knows: it is the same model, smaller, not a
+model with skills taken out. To make a model that only does
+certain jobs, teach a small one instead (see Teaching a small
+model).
+
+You need llama.cpp installed for this step, the same tool the
+GGUF export uses. Stella checks for it first and tells you if
+it is missing.""",
+    ),
+    (
+        "Teaching a small model",
+        """Distillation is how you make a small model that only
+does the jobs you want. A big teacher model answers a list of
+prompts, and its answers become the training examples for a
+small student model. The student learns only what it was taught.
+
+Ask the Chat to do it for you, or run it in a terminal inside the
+Stella folder. First, make a plain text file with one prompt per
+line, the jobs you want the small model to learn. Then:
+
+  bash stella-cli distill lfm3-tool tool-calls --teacher qwen3.5:4b --prompts prompts.txt
+
+Stella asks the teacher each prompt and saves the answers as
+the project's dataset. Empty answers are skipped. If you stop
+part way and run it again, it skips the prompts already
+answered, so no teacher time is wasted.
+
+Then train the student the usual way: stella train lfm3-tool
+tool-calls, or press Start training in the window.
+
+Honest limits: the student is only as good as the teacher's
+answers. A teacher that answers badly teaches badly, so look
+at the dataset before you train. Distillation does not take
+skills out of the teacher: the teacher is untouched. It makes
+a new small model that knows the jobs you picked, and nothing
+else.""",
+    ),
+    (
         "Troubleshooting",
         """Stella is not answering, or a model is missing from the
 list. Ollama may not be running. Start Ollama, then reopen the
@@ -290,7 +345,7 @@ is safe to share.""",
 
 
 def topic_titles() -> list[str]:
-    """The eleven topic titles, in order."""
+    """The thirteen topic titles, in order."""
     return [title for title, _ in TOPICS]
 
 

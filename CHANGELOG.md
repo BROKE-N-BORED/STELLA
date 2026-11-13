@@ -1,5 +1,43 @@
 # Changelog
 
+## v0.8.0 — 2026-11-13
+
+This completes the stopped v0.5 scope (re-quantize + distill),
+shipping as v0.8.0 because v0.6 and v0.7 shipped in between. The
+new work is engine, command line, and Chat tools, plus one window
+change: the MetaMorphAi control is gone from the Project window.
+It did nothing (training ignored it), so it gets no control. The
+stored mode stays in project files for compatibility, and saving
+a project leaves it untouched.
+
+- Re-quantize (new `stella/requant.py`, `stella-cli requant <tag>`):
+  take an installed Ollama model and make a smaller copy at a
+  smaller quant (default Q4_K_M). Stella finds the model's GGUF
+  file from Ollama's own manifests (with `ollama show --modelfile`
+  as the fallback), checks llama-quantize and Ollama exist, checks
+  free disk before writing, quantizes, and registers the copy as a
+  new tag with `ollama create`. The original model is never
+  touched, and the new tag must not already exist. Bogus quant
+  names are rejected up front, never passed to the tool.
+- Distillation (new `stella/distill.py`, `stella-cli distill
+  <profile> <project> --teacher <tag> --prompts <file>`): a teacher
+  model in Ollama answers a list of prompts, one per line, and its
+  answers become the project's dataset (distilled.jsonl, prompt /
+  completion rows, validated like any dataset). Empty answers are
+  skipped and counted, identical pairs are kept once, and a re-run
+  skips prompts already answered. Training is not started: the
+  user looks at the dataset first, then runs `stella train`.
+- Ollama client gains `generate()` (one /api/generate call, plain
+  words on failure) and `reachable()`; distill uses both.
+- Chat gains two tools: `distill` and `requant`, so the Chat can
+  run both jobs for you. The training template is unchanged: the
+  full template rework is a later version.
+- How to Use gains two topics: "Making a model smaller" and
+  "Teaching a small model", honest about the limits: re-quantizing
+  an already-quantized model loses a little quality, and neither
+  feature removes capabilities from the original model. They make
+  a new smaller one.
+
 ## v0.7.0 — 2026-11-13
 
 Provider connections: the chat can talk to Groq, Gemini, or any

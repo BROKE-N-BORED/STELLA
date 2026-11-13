@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import re
 
+from .distill import distill_dataset
 from .gguf import export_gguf
 from .howto import topic_text, topic_titles
 from .model import StellaError, Store, slug_from_model
@@ -41,6 +42,7 @@ from .provision import (
     run_download,
     weights_status,
 )
+from .requant import requant_model
 from .sleep import sleep_project, sleep_status
 from .train import (
     TrainController,
@@ -162,6 +164,18 @@ TOOL_HELP = {
         'download_weights {"profile": "lfm3-tool"}: download the base '
         "model weights from Hugging Face."
     ),
+    "distill": (
+        'distill {"profile": "lfm3-tool", "project": "tool-calls", '
+        '"teacher": "qwen3.5:4b", "prompts": "/home/user/prompts.txt"}: '
+        "ask a teacher model each prompt in a file and save the "
+        "answers as the project's dataset."
+    ),
+    "requant": (
+        'requant {"tag": "qwen3.5:4b", "quant": "Q4_K_M", "new_tag": '
+        '"qwen3.5:4b-small"}: make a smaller copy of an installed '
+        "model. Leave quant out for Q4_K_M, leave new_tag out and "
+        "one is picked for you."
+    ),
     "get_help": (
         'get_help {"topic": "Training"}: read one How to Use topic. '
         "Leave topic out to list the topics."
@@ -186,6 +200,8 @@ TOOL_NARRATION = {
     "run_sleep": "Running a sleep cycle...",
     "sleep_status": "Checking the sleep cycles...",
     "download_weights": "Downloading the model weights...",
+    "distill": "Asking the teacher your prompts...",
+    "requant": "Making the smaller copy...",
     "get_help": "Looking that up in the guide...",
 }
 
@@ -884,6 +900,85 @@ class ChatAgent:
                 "say download again: it picks up where it left off."
             )
         return f"Weights for {profile!r} downloaded and ready."
+
+    def _tool_distill(self, args: dict) -> str:
+        session = self._need_session(args)
+        if isinstance(session, str):
+            return session
+        profile, project = session
+        teacher = (args.get("teacher") or "").strip()
+        if not teacher:
+            return "Tell me which teacher model to learn from."
+        prompts = (args.get("prompts") or "").strip()
+        if not prompts:
+            return (
+                "Tell me the prompts file: a plain text file with "
+                "one prompt per line."
+            )
+
+        def on_event(event: dict):
+            if self._cancelled:
+                # The loop's post-tool check turns this into the
+                # plain "Stopped." reply; nothing is half-written,
+                # the prompt event fires before the teacher is asked.
+                raise StellaError("stopped by the user")
+            if event.get("type") == "prompt":
+                index = event.get("index", 0)
+                total = event.get("total", 0)
+                if total and (index == 1 or index % 10 == 0 or index == total):
+                    self._progress(f"Prompt {index} of {total}.")
+
+        report = distill_dataset(
+            self.store, profile, project, teacher, prompts,
+            on_event=on_event,
+        )
+        parts = [
+            f"Asked the teacher {report['asked']} prompt(s) and kept "
+            f"{report['rows']} answer(s) as the dataset for {project!r}."
+        ]
+        if report["skipped_empty"]:
+            parts.append(
+                f"{report['skipped_empty']} empty answer(s) were skipped."
+            )
+        if report["skipped_resumed"]:
+            parts.append(
+                f"{report['skipped_resumed']} prompt(s) were already "
+                "answered in an earlier run."
+            )
+        parts.append("Look at the dataset, then say train to start.")
+        return " ".join(parts)
+
+    def _tool_requant(self, args: dict) -> str:
+        tag = (args.get("tag") or "").strip()
+        if not tag:
+            return "Tell me which installed model to make smaller."
+        quant = (args.get("quant") or "Q4_K_M").strip()
+        new_tag = (args.get("new_tag") or "").strip() or None
+
+        def on_event(event: dict):
+            kind = event.get("type")
+            if kind == "found":
+                self._progress(
+                    f"Found {event['source_tag']} "
+                    f"({format_size(event['source_bytes'])}). "
+                    f"Shrinking to {event['quant']}..."
+                )
+            elif kind == "quantized":
+                self._progress(
+                    f"Shrunk: {format_size(event['source_bytes'])} -> "
+                    f"{format_size(event['output_bytes'])}."
+                )
+
+        report = requant_model(
+            tag, quant=quant, new_tag=new_tag, on_event=on_event
+        )
+        return (
+            f"Done. {report['new_tag']} is "
+            f"{format_size(report['output_bytes'])} "
+            f"(was {format_size(report['source_bytes'])}). "
+            f"The original {report['source_tag']} is untouched. "
+            f"Run it with: {report['ollama_run']}"
+        )
 
     def _tool_get_help(self, args: dict) -> str:
         topic = (args.get("topic") or "").strip()

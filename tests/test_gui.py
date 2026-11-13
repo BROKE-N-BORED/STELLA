@@ -79,7 +79,8 @@ def test_tree_shows_role_and_tag(window):
     assert "lfm3:1.7b" in text
     child = window.tree.topLevelItem(0).child(0).text(0)
     assert "tool-calls" in child
-    assert "(both)" in child
+    # The tree label is just the project name: no dead mode suffix.
+    assert child == "tool-calls"
 
 
 def test_empty_store_window(qapp, store, settings):
@@ -162,7 +163,7 @@ def test_menu_howto_opens_howto_window(window):
     window._menu_action_howto.trigger()
     assert window._howto_window is not None
     assert window._howto_window.isVisible()
-    assert window._howto_window.topic_list.count() == 11
+    assert window._howto_window.topic_list.count() == 13
 
 
 # -- session --------------------------------------------------------
@@ -296,7 +297,8 @@ def test_project_window_save_writes_through(window, seeded):
     win = window.open_project_window("lfm3-tool", "tool-calls")
     assert win.display_edit.text() == "tool-calls"
     assert win.dataset_edit.text() == "forge-traces.jsonl"
-    assert win.metamorph_combo.currentText() == "both"
+    # No metamorph control: it did nothing, so it gets no control.
+    assert not hasattr(win, "metamorph_combo")
     assert win.rank_spin.value() == 8
     win.display_edit.setText("Tool Calls v2")
     win.rank_spin.setValue(16)
@@ -305,6 +307,8 @@ def test_project_window_save_writes_through(window, seeded):
     data = seeded.get_project("lfm3-tool", "tool-calls")
     assert data["display_name"] == "Tool Calls v2"
     assert data["settings"]["rank"] == 16
+    # Saving leaves the stored metamorph mode untouched.
+    assert data["metamorph"]["mode"] == "both"
     assert seeded.read_notes("lfm3-tool", "tool-calls") == (
         "raised rank after first look"
     )
@@ -349,7 +353,7 @@ def test_settings_window_shows_home_and_defaults(window, seeded):
 
 def test_howto_window_lists_topics_and_shows_content(window):
     win = window.open_howto_window()
-    assert win.topic_list.count() == 11
+    assert win.topic_list.count() == 13
     assert win.topic_list.item(0).text() == "Getting started"
     win.topic_list.setCurrentRow(0)
     assert "Stella" in win.content.toPlainText()

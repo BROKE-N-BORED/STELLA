@@ -42,6 +42,13 @@ job, export it as a usable package.
   key. Add keys in Settings under AI providers; they stay on this
   PC in a private file. `stella-cli chat --provider groq --model
   <name>` is the terminal form.
+- v0.8.0 smaller models (2026-11-13, completes the v0.5 scope): make
+  an installed model smaller with `bash stella-cli requant <tag>`
+  (a new, smaller copy; the original is untouched), and teach a
+  small model from a big one with `bash stella-cli distill
+  <profile> <project> --teacher <tag> --prompts <file>` (the
+  teacher's answers become the project's dataset). The Chat can
+  run both jobs too: just ask it.
 
 ## Install
 
@@ -203,7 +210,7 @@ proof is LFM3 1.7B on your machine, in this order:
    (the Train panel's "Use sample dataset" button).
    Or from a terminal in the Stella folder:
    `bash stella-cli create-profile lfm3-tool --tag lfm3:1.7b --role fast --base LiquidAI/LFM3-1.7B`
-   `bash stella-cli create-project lfm3-tool tool-calls --dataset sample-tool-calls.jsonl --metamorph both`
+   `bash stella-cli create-project lfm3-tool tool-calls --dataset sample-tool-calls.jsonl`
 4. Pull the base weights (about 3.5 GB) — the first training run
    downloads them on its own if they are not there yet.
 5. `bash stella-cli train lfm3-tool tool-calls`
