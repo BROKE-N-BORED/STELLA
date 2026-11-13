@@ -80,7 +80,7 @@ def test_cli_export_missing_project(home, tmp_path):
 def test_cli_version(home):
     res = run_cli(home, "--version")
     assert res.returncode == 0
-    assert "0.1" in res.stdout
+    assert "0.2" in res.stdout
 
 
 def test_cli_through_symlink(home, tmp_path):
@@ -96,3 +96,65 @@ def test_cli_through_symlink(home, tmp_path):
     )
     assert res.returncode == 0
     assert "No profiles yet" in res.stdout
+
+
+def test_cli_create_profile_with_base(home):
+    res = run_cli(home, "create-profile", "lfm3",
+                  "--tag", "lfm3:1.7b", "--base", "LiquidAI/LFM3-1.7B")
+    assert res.returncode == 0
+    manifest = json.loads(
+        (Path(home) / "profiles" / "lfm3" / "profile.json").read_text()
+    )
+    assert manifest["base_ref"] == "LiquidAI/LFM3-1.7B"
+
+
+def test_cli_train_no_base_ref(home):
+    run_cli(home, "create-profile", "p1", "--tag", "x:1b")
+    run_cli(home, "create-project", "p1", "proj")
+    res = run_cli(home, "train", "p1", "proj")
+    assert res.returncode == 1
+    # Either the deps gate or the base_ref check fires first — both
+    # name the fix. The profile has no HF base, so one of them must.
+    assert ("base_ref" in res.stderr
+            or "install-training.sh" in res.stderr)
+
+
+def test_cli_export_gguf_no_adapter(home):
+    run_cli(home, "create-profile", "p1", "--base", "test/tiny-model")
+    run_cli(home, "create-project", "p1", "proj")
+    res = run_cli(home, "export-gguf", "p1", "proj", str(home / "out"))
+    assert res.returncode == 1
+    assert "no trained adapter" in res.stderr
+
+
+def test_cli_probe_no_adapter(home):
+    run_cli(home, "create-profile", "p1", "--base", "test/tiny-model")
+    run_cli(home, "create-project", "p1", "proj")
+    res = run_cli(home, "probe", "p1", "proj")
+    assert res.returncode == 1
+    assert "no trained adapter" in res.stderr
+
+
+def test_cli_train_help(home):
+    res = run_cli(home, "train", "--help")
+    assert res.returncode == 0
+    assert "--resume" in res.stdout
+    assert "--steps" in res.stdout
+
+
+def test_cli_train_missing_deps_in_process(home, monkeypatch, capsys):
+    # In-process so the deps gate can be faked without uninstalling.
+    import os
+
+    import stella.cli as cli_mod
+    import stella.train as train_mod
+
+    monkeypatch.setenv("STELLA_HOME", str(home))
+    monkeypatch.setattr(
+        train_mod, "training_deps_missing", lambda: ["torch"]
+    )
+    run_cli(home, "create-profile", "p1", "--base", "test/tiny-model")
+    run_cli(home, "create-project", "p1", "proj")
+    code = cli_mod.main(["train", "p1", "proj"])
+    assert code == 1
+    assert "install-training.sh" in capsys.readouterr().err

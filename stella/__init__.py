@@ -1,4 +1,4 @@
-"""STELLA — fine-tune models on your own PC. v0.1 skeleton."""
+"""STELLA — fine-tune models on your own PC. v0.2: training engine."""
 
 from .model import STELLA_VERSION
 

@@ -95,3 +95,43 @@ def test_status_bar_is_the_only_status(window):
     assert window.statusBar().currentMessage() == (
         "Profile: lfm3-tool — project: tool-calls"
     )
+
+
+def test_train_panel_widgets_exist(window):
+    assert window.train_start_btn is not None
+    assert window.train_pause_btn is not None
+    assert window.train_resume_btn is not None
+    assert window.train_progress is not None
+    assert window.train_loss is not None
+    assert window.train_checkpoints is not None
+    assert window.train_export_gguf_btn is not None
+    assert window.train_probe_btn is not None
+    assert window.train_log is not None
+    assert window.train_log.isReadOnly()
+    assert window.train_pause_btn.isEnabled() is False
+
+
+def test_start_training_without_deps_logs_hint(window, monkeypatch):
+    import stella.train as train_mod
+
+    monkeypatch.setattr(
+        train_mod, "training_deps_missing", lambda: ["torch", "peft"]
+    )
+    window.start_training()
+    assert "install-training.sh" in window.train_log.toPlainText()
+    assert window._train_worker is None
+
+
+def test_use_sample_dataset_sets_ref(window, seeded):
+    window.use_sample_dataset()
+    assert window.proj_dataset.text() == "sample-tool-calls.jsonl"
+    data = seeded.get_project("lfm3-tool", "tool-calls")
+    assert data["dataset_ref"] == "sample-tool-calls.jsonl"
+
+
+def test_train_progress_updates(window):
+    window._on_train_progress(5, 20, 2.5)
+    assert window.train_progress.maximum() == 20
+    assert window.train_progress.value() == 5
+    assert "Step 5 / 20" in window.train_loss.text()
+    assert "2.5000" in window.train_loss.text()

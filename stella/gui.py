@@ -2,10 +2,15 @@
 
 Left: profiles (friendly role names, Ollama tag stays the identifier).
 Middle: the selected profile's projects.
-Right: detail — profile settings on top, project settings + notes below.
+Right: detail — profile settings on top, project settings + notes
+below, then the Train panel (dataset, Start / Pause / Resume,
+progress, checkpoints, GGUF export, refusal probe, log).
 
 No web UI, no network beyond localhost Ollama. No "&" in any visible
 label — Qt eats a bare & as a mnemonic marker.
+
+Training runs in a worker thread so the window stays responsive; the
+worker only talks to the window through Qt signals.
 """
 
 from __future__ import annotations
@@ -13,7 +18,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -28,6 +33,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSpinBox,
@@ -39,6 +45,7 @@ from PySide6.QtWidgets import (
 from . import export as export_mod
 from .model import METAMORPH_MODES, STELLA_VERSION, StellaError, Store
 from .ollama import list_models
+from .train import TrainController
 
 ROLE_SUGGESTIONS = [
     "driver",
@@ -94,6 +101,97 @@ class NewProfileDialog(QWidget):
         layout.addRow("", buttons)
 
 
+class TrainWorker(QThread):
+    """Runs train_project off the GUI thread. Only talks to the
+    window through signals — never touches a widget directly."""
+
+    progress = Signal(int, int, float)  # step, total, loss
+    log = Signal(str)
+    finished = Signal(bool, str)  # ok, message
+
+    def __init__(self, store, profile, project, resume=False, parent=None):
+        super().__init__(parent)
+        self._store = store
+        self._profile = profile
+        self._project = project
+        self._resume = resume
+        self._controller = TrainController()
+
+    def request_stop(self):
+        self._controller.request_stop()
+
+    def _event(self, event: dict):
+        kind = event.get("type")
+        if kind == "started":
+            self.progress.emit(0, event["total_steps"], 0.0)
+            self.log.emit(
+                f"Training: {event['total_steps']} steps, "
+                f"LoRA rank {event['rank']}."
+            )
+        elif kind == "step":
+            self.progress.emit(
+                event["step"], event["total_steps"], float(event["loss"])
+            )
+            self.log.emit(
+                f"step {event['step']}/{event['total_steps']} "
+                f"loss {event['loss']:.4f}"
+            )
+        elif kind == "checkpoint":
+            self.log.emit(f"checkpoint saved: step {event['step']}")
+        elif kind == "val":
+            self.log.emit(
+                f"epoch {event['epoch']} validation loss "
+                f"{event['loss']:.4f}"
+            )
+        elif kind == "paused":
+            self.log.emit(f"Paused at step {event['step']}.")
+        elif kind == "done":
+            self.log.emit(f"Done — adapter saved to {event['adapter']}")
+
+    def run(self):
+        from .train import train_project
+
+        try:
+            summary = train_project(
+                self._store,
+                self._profile,
+                self._project,
+                resume=self._resume,
+                on_event=self._event,
+                controller=self._controller,
+            )
+        except StellaError as exc:
+            self.finished.emit(False, str(exc))
+            return
+        except Exception as exc:  # keep the window alive on a crash
+            self.finished.emit(False, f"Training failed: {exc}")
+            return
+        self.finished.emit(True, f"Trained {summary['steps']} steps.")
+
+
+class JobWorker(QThread):
+    """Generic off-thread job (GGUF export, refusal probe). The job
+    function takes a log callable and returns its finish message."""
+
+    log = Signal(str)
+    finished = Signal(bool, str)
+
+    def __init__(self, fn, parent=None):
+        super().__init__(parent)
+        self._fn = fn
+
+    def run(self):
+        try:
+            message = self._fn(self.log.emit)
+        except StellaError as exc:
+            self.finished.emit(False, str(exc))
+            return
+        except Exception as exc:
+            self.finished.emit(False, f"Failed: {exc}")
+            return
+        self.finished.emit(True, message)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, store: Store | None = None):
         super().__init__()
@@ -104,6 +202,8 @@ class MainWindow(QMainWindow):
         self._current_profile: str | None = None
         self._current_project: str | None = None
         self._building = False
+        self._train_worker: TrainWorker | None = None
+        self._job_worker: JobWorker | None = None
         self._build_ui()
         self.refresh_profiles()
 
@@ -240,6 +340,56 @@ class MainWindow(QMainWindow):
         self.proj_notes = QPlainTextEdit()
         self.proj_notes.setMinimumHeight(120)
         self.detail_layout.addWidget(self.proj_notes)
+
+        # Train panel (Item 3): dataset, Start / Pause / Resume,
+        # progress, checkpoints, GGUF export, refusal probe, log.
+        self.detail_layout.addWidget(QLabel("Train"))
+        dataset_btns = QHBoxLayout()
+        self.train_pick_dataset_btn = QPushButton("Pick dataset file")
+        self.train_pick_dataset_btn.clicked.connect(self.pick_dataset)
+        self.train_sample_btn = QPushButton("Use sample dataset")
+        self.train_sample_btn.clicked.connect(self.use_sample_dataset)
+        dataset_btns.addWidget(self.train_pick_dataset_btn)
+        dataset_btns.addWidget(self.train_sample_btn)
+        self.detail_layout.addLayout(dataset_btns)
+        train_btns = QHBoxLayout()
+        self.train_start_btn = QPushButton("Start training")
+        self.train_start_btn.clicked.connect(
+            lambda: self.start_training(resume=False)
+        )
+        self.train_pause_btn = QPushButton("Pause")
+        self.train_pause_btn.clicked.connect(self.pause_training)
+        self.train_pause_btn.setEnabled(False)
+        self.train_resume_btn = QPushButton("Resume")
+        self.train_resume_btn.clicked.connect(
+            lambda: self.start_training(resume=True)
+        )
+        train_btns.addWidget(self.train_start_btn)
+        train_btns.addWidget(self.train_pause_btn)
+        train_btns.addWidget(self.train_resume_btn)
+        self.detail_layout.addLayout(train_btns)
+        self.train_progress = QProgressBar()
+        self.train_progress.setValue(0)
+        self.detail_layout.addWidget(self.train_progress)
+        self.train_loss = QLabel("Not started.")
+        self.detail_layout.addWidget(self.train_loss)
+        self.detail_layout.addWidget(QLabel("Checkpoints"))
+        self.train_checkpoints = QListWidget()
+        self.train_checkpoints.setMaximumHeight(90)
+        self.detail_layout.addWidget(self.train_checkpoints)
+        export_btns = QHBoxLayout()
+        self.train_export_gguf_btn = QPushButton("Export GGUF")
+        self.train_export_gguf_btn.clicked.connect(self.export_gguf_gui)
+        self.train_probe_btn = QPushButton("Run refusal probe")
+        self.train_probe_btn.clicked.connect(self.run_probe_gui)
+        export_btns.addWidget(self.train_export_gguf_btn)
+        export_btns.addWidget(self.train_probe_btn)
+        self.detail_layout.addLayout(export_btns)
+        self.detail_layout.addWidget(QLabel("Training log"))
+        self.train_log = QPlainTextEdit()
+        self.train_log.setReadOnly(True)
+        self.train_log.setMinimumHeight(120)
+        self.detail_layout.addWidget(self.train_log)
         self.detail_layout.addStretch(1)
 
     # -- helpers ----------------------------------------------------
@@ -362,6 +512,7 @@ class MainWindow(QMainWindow):
                 self._say(f"Profile: {self._current_profile} — no project yet.")
             else:
                 self._say("Pick a profile to begin.")
+            self.refresh_train_panel()
             return
         try:
             p = self.store.get_project(self._current_profile, self._current_project)
@@ -385,6 +536,7 @@ class MainWindow(QMainWindow):
         self.proj_metamorph.setCurrentIndex(idx if idx >= 0 else 0)
         self.proj_notes.setPlainText(notes)
         self._say(f"Profile: {self._current_profile} — project: {self._current_project}.")
+        self.refresh_train_panel()
 
     # -- save -------------------------------------------------------
     def save_profile(self):
@@ -594,6 +746,178 @@ class MainWindow(QMainWindow):
         self._current_project = result["project"]
         self._say(f"Imported {result['project']} into {result['profile']}.")
         self.refresh_profiles()
+
+    # -- training ---------------------------------------------------
+    def _train_log_line(self, text: str):
+        self.train_log.appendPlainText(text)
+
+    def _training_running(self) -> bool:
+        return (
+            self._train_worker is not None and self._train_worker.isRunning()
+        )
+
+    def refresh_train_panel(self):
+        """Checkpoints list + log tail for the selected project."""
+        self.train_checkpoints.clear()
+        if not self._current_profile or not self._current_project:
+            self.train_loss.setText("Pick a project to train.")
+            return
+        from .train import list_checkpoints
+
+        for ck in list_checkpoints(
+            self.store, self._current_profile, self._current_project
+        ):
+            loss = ck.get("loss")
+            label = f"step {ck['step']}"
+            if loss is not None:
+                label += f"  loss {loss:.4f}"
+            self.train_checkpoints.addItem(label)
+        if self._training_running():
+            return  # never wipe the live log mid-run
+        log_path = (
+            self.store.project_dir(self._current_profile, self._current_project)
+            / "train_log.jsonl"
+        )
+        if log_path.is_file():
+            lines = log_path.read_text(encoding="utf-8").splitlines()[-30:]
+            self.train_log.setPlainText("\n".join(lines))
+        else:
+            self.train_log.setPlainText("")
+
+    def pick_dataset(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Pick a dataset file", str(Path.home()),
+            "JSONL datasets (*.jsonl);;All files (*)",
+        )
+        if path:
+            self.proj_dataset.setText(path)
+
+    def use_sample_dataset(self):
+        self.proj_dataset.setText("sample-tool-calls.jsonl")
+        self.save_project()
+        self._train_log_line(
+            "Dataset set to the bundled sample (20 synthetic tool-call "
+            "examples). Save is done — Start training when ready."
+        )
+
+    def start_training(self, resume: bool = False):
+        profile = self._selected_profile()
+        project = self._selected_project()
+        if not profile or not project:
+            self._warn("Pick a project to train.")
+            return
+        if self._training_running():
+            self._say("Training is already running.")
+            return
+        from .train import training_deps_missing
+
+        missing = training_deps_missing()
+        if missing:
+            hint = (
+                "Training packages missing: " + ", ".join(missing) + ". "
+                "Run this once in the Stella folder: bash install-training.sh"
+            )
+            self._train_log_line(hint)
+            self._say("Training packages missing — see the Train log.")
+            return
+        self.save_project()  # persist the dataset + settings from the form
+        self._train_worker = TrainWorker(
+            self.store, profile, project, resume=resume
+        )
+        self._train_worker.progress.connect(self._on_train_progress)
+        self._train_worker.log.connect(self._train_log_line)
+        self._train_worker.finished.connect(self._on_train_finished)
+        self.train_start_btn.setEnabled(False)
+        self.train_resume_btn.setEnabled(False)
+        self.train_pause_btn.setEnabled(True)
+        self._train_log_line(
+            "Resuming training..." if resume else "Starting training..."
+        )
+        self._train_worker.start()
+
+    def pause_training(self):
+        if self._train_worker is not None:
+            self._train_worker.request_stop()
+            self._train_log_line(
+                "Pausing after this step (checkpoint will save)..."
+            )
+
+    def _on_train_progress(self, step: int, total: int, loss: float):
+        self.train_progress.setMaximum(max(1, total))
+        self.train_progress.setValue(step)
+        self.train_loss.setText(f"Step {step} / {total} — loss {loss:.4f}")
+
+    def _on_train_finished(self, ok: bool, message: str):
+        self.train_start_btn.setEnabled(True)
+        self.train_resume_btn.setEnabled(True)
+        self.train_pause_btn.setEnabled(False)
+        self._train_log_line(message)
+        self._say(message.splitlines()[0] if message else "Training done.")
+        self.refresh_train_panel()
+        self.refresh_projects()
+
+    def _on_job_finished(self, ok: bool, message: str):
+        self._train_log_line(message)
+        self._say(message.splitlines()[0] if message else "Done.")
+        self.refresh_train_panel()
+
+    def export_gguf_gui(self):
+        profile = self._selected_profile()
+        project = self._selected_project()
+        if not profile or not project:
+            self._warn("Pick a project to export.")
+            return
+        dest = QFileDialog.getExistingDirectory(
+            self, "Export GGUF to folder", str(Path.home())
+        )
+        if not dest:
+            return
+        from .gguf import export_gguf
+
+        def job(log):
+            result = export_gguf(self.store, profile, project, dest)
+            return (
+                f"GGUF ready: {result['gguf']} "
+                f"({result['gguf_bytes']:,} bytes).\n"
+                f"Run: {result['ollama_create']}"
+            )
+
+        self._job_worker = JobWorker(job)
+        self._job_worker.log.connect(self._train_log_line)
+        self._job_worker.finished.connect(self._on_job_finished)
+        self._train_log_line("Exporting GGUF (merge, convert, quantize)...")
+        self._job_worker.start()
+
+    def run_probe_gui(self):
+        profile = self._selected_profile()
+        project = self._selected_project()
+        if not profile or not project:
+            self._warn("Pick a project to probe.")
+            return
+        from .probe import probe_gate, probe_project
+
+        def job(log):
+            result = probe_project(self.store, profile, project)
+            _passed, verdict = probe_gate(result)
+            before = result["before"]
+            after = result["after"]
+            return (
+                f"Refusal probe: {before['refusals']}/{before['total']} "
+                f"refusals before, {after['refusals']}/{after['total']} "
+                f"after.\n{verdict}"
+            )
+
+        self._job_worker = JobWorker(job)
+        self._job_worker.log.connect(self._train_log_line)
+        self._job_worker.finished.connect(self._on_job_finished)
+        self._train_log_line("Running refusal probe (before vs after)...")
+        self._job_worker.start()
+
+    def closeEvent(self, event):
+        if self._training_running():
+            self._train_worker.request_stop()
+            self._train_worker.wait(15000)
+        super().closeEvent(event)
 
 
 def main(argv: list[str] | None = None) -> int:

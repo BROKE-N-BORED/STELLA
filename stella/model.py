@@ -9,7 +9,7 @@ Home layout (default ~/.stella, overridable with STELLA_HOME):
           projects/
             <project-slug>/
               project.json    # manifest: dataset, settings, metamorph block
-              checkpoints/    # training checkpoints land here (Item 3)
+              checkpoints/    # training checkpoints (step-N folders)
               notes.md        # free-form notes
 
 Everything is plain JSON + Markdown so a user can read or fix it by hand.
@@ -26,7 +26,7 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
-STELLA_VERSION = "0.1"
+STELLA_VERSION = "0.2"
 
 # Slug: lowercase letters, digits, dash, underscore. Must start alnum.
 # No dots, no slashes — a slug can never climb out of its directory.
@@ -36,15 +36,22 @@ MAX_SLUG_LEN = 64
 # MetaMorphAi modes (structure only in v0.1 — no codec yet).
 METAMORPH_MODES = ("morph", "compress", "both")
 
-# Default training settings for a new project (v0.1: structure only,
-# no training engine yet — these are the knobs Item 3 will drive).
+# Default training settings for a new project — the knobs the Item 3
+# training engine drives (stella/train.py). Micro-LoRA defaults for a
+# CPU-only 8 GB machine: rank 8, batch 1, grad accumulation 8, short
+# sequences, frequent checkpoints.
 DEFAULT_SETTINGS = {
     "method": "lora",
     "rank": 8,
     "learning_rate": 0.0002,
     "epochs": 3,
     "batch_size": 1,
+    "grad_accum": 8,
     "max_seq_len": 1024,
+    "checkpoint_steps": 50,
+    "val_fraction": 0.1,
+    "warmup_steps": 5,
+    "seed": 42,
     "notes": "",
 }
 

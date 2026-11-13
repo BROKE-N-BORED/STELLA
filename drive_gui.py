@@ -47,3 +47,15 @@ print("profiles:", win.profile_list.count(), "projects:", win.project_list.count
 print("profile0:", win.profile_list.item(0).text())
 print("project0:", win.project_list.item(0).text())
 print("role field:", win.prof_role.text(), "| tag:", win.prof_tag.currentText())
+# Second grab: scroll the detail pane to the Train panel (v0.2).
+win.detail_scroll.verticalScrollBar().setValue(
+    win.detail_scroll.verticalScrollBar().maximum()
+)
+app.processEvents()
+out2 = Path("/tmp/stella-train-panel.png")
+pixmap2 = win.grab()
+pixmap2.save(str(out2))
+print(f"saved {out2} {pixmap2.width()}x{pixmap2.height()} ({out2.stat().st_size} bytes)")
+print("train widgets:", win.train_start_btn.text(), "|",
+      win.train_pause_btn.text(), "|", win.train_resume_btn.text(), "|",
+      win.train_export_gguf_btn.text(), "|", win.train_probe_btn.text())

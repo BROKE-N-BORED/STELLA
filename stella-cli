@@ -4,6 +4,9 @@
 #   bash stella projects <profile>
 #   bash stella export <profile> <project> <dir>
 #   bash stella import <export-dir>
+#   bash stella train <profile> <project>
+#   bash stella export-gguf <profile> <project> <dir>
+#   bash stella probe <profile> <project>
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"

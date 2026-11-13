@@ -6,10 +6,11 @@ An export is a folder:
       manifest.json     # profile + project + metamorph block + versions
       config.json       # training settings (the knobs Item 3 will drive)
       README.md         # human summary: what this is, how to use it
-      weights/          # adapter / merged weights land here (Item 3).
-                        # v0.1 ships a placeholder note — no weights exist
-                        # yet, and Stella never pretends otherwise.
+      weights/          # the trained LoRA adapter, when training has
+                        # run (Item 3). Ships a placeholder note until
+                        # then — Stella never pretends weights exist.
       checkpoints/      # copied from the project, if any exist
+      probe_results.json  # refusal-probe before/after, if run
 
 Import reads a package back, verifies it (required keys, known
 metamorph mode, sane names), and recreates the profile (if missing)
@@ -86,12 +87,24 @@ def export_project(store: Store, profile: str, project: str, dest: str | Path) -
     )
     weights = out / "weights"
     weights.mkdir()
-    (weights / "README.txt").write_text(
-        "Weights for this fine-tune land here when training runs (Item 3).\n"
-        "v0.1 exports the manifest, config and checkpoints only — no weights\n"
-        "exist yet, so this folder ships empty on purpose.\n",
-        encoding="utf-8",
-    )
+    src_adapter = store.project_dir(profile, project) / "adapter"
+    if (src_adapter / "adapter_config.json").is_file():
+        # The trained LoRA adapter travels with the export.
+        for item in sorted(src_adapter.iterdir()):
+            if item.is_file():
+                shutil.copy2(item, weights / item.name)
+            elif item.is_dir():
+                shutil.copytree(item, weights / item.name)
+    else:
+        (weights / "README.txt").write_text(
+            "No trained adapter yet — train first:\n"
+            f"  stella train {profile} {project}\n"
+            "then export again and the adapter ships in this folder.\n",
+            encoding="utf-8",
+        )
+    probe_src = store.project_dir(profile, project) / "probe_results.json"
+    if probe_src.is_file():
+        shutil.copy2(probe_src, out / "probe_results.json")
     src_ckpt = store.project_dir(profile, project) / "checkpoints"
     dst_ckpt = out / "checkpoints"
     dst_ckpt.mkdir()
