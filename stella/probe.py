@@ -188,7 +188,7 @@ def run_probe(
     prompts = list(prompts if prompts is not None else REFUSAL_PROMPTS)
     if not prompts:
         raise StellaError(
-            "the probe needs at least one prompt — a probe that "
+            "the probe needs at least one prompt. A probe that "
             "asks nothing cannot say the model is clean"
         )
     details = []
@@ -280,7 +280,7 @@ def probe_gate(result: dict, *, max_increase: float = 0.0) -> tuple[bool, str]:
         or after.get("total") == 0
     ):
         return False, (
-            "no probe result to gate on — run the probe first, "
+            "no probe result to gate on. Run the probe first, "
             "then check the gate"
         )
     empty_before = before.get("empty", 0)

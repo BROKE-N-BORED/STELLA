@@ -43,6 +43,8 @@ from PySide6.QtCore import (
     QObject,
     QProcess,
     QProcessEnvironment,
+    QPropertyAnimation,
+    QRect,
     QSettings,
     Qt,
     QThread,
@@ -83,6 +85,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QRadioButton,
     QScrollArea,
     QSplitter,
     QTextBrowser,
@@ -106,9 +109,16 @@ from .model import (
     slug_from_model,
 )
 from .model_info import describe_model, fit_verdict, fits_this_pc
-from .ollama import list_model_sizes, list_models, ollama_url, reachable
+from .ollama import MODEL_CACHE, ollama_url
 from .provision import is_hf_repo_id
-from .style import apply_stella_style, install_press_dips
+from .style import (
+    DISABLED,
+    apply_stella_style,
+    apply_text_size,
+    install_press_dips,
+    reduced_motion,
+    set_reduced_motion,
+)
 from .providers import (
     PROVIDERS,
     get_custom_config,
@@ -192,7 +202,10 @@ def _tag_warnings(store, tag, *, exclude_slug=None):
     warnings = []
     if not tag:
         return warnings
-    installed = list_models()
+    # The cached list (T43): a tag check never fetches. With no
+    # cached list there is nothing to check against, so a tag is
+    # never warned about on a guess.
+    installed = MODEL_CACHE.models()
     if installed and tag not in installed:
         warnings.append(f"{tag!r} is not installed locally")
     for p in store.list_profiles():
@@ -279,40 +292,35 @@ class NewProfileDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("New profile")
-        self.installed_models = list_models()
-        sizes = list_model_sizes()
+        # The model list comes from the cache (T43): no fetch on
+        # this thread, ever. The list fills from the last good
+        # list at once, and a background refresh (started below)
+        # refills it when it lands.
+        self._model_worker: ModelListWorker | None = None
         measurement = measure_pc()
         ram_free = measurement.get("ram_available_gb")
+        self._ram_free = ram_free
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("Pick a model: that is all it takes."))
         self.model_list = QListWidget()
         self.model_list.setMinimumWidth(520)
         self.model_list.setMinimumHeight(180)
-        for tag in self.installed_models:
-            fits = fits_this_pc(tag, ram_free)
-            if fits is True:
-                verdict = "Fits this PC."
-            elif fits is False:
-                verdict = "Too big for this PC."
-            else:
-                verdict = "Fit unknown. Stella will check."
-            item = QListWidgetItem(
-                f"{tag}\n{describe_model(tag)} {verdict}"
-            )
-            item.setData(Qt.UserRole, tag)
-            self.model_list.addItem(item)
         self.model_list.setCurrentRow(-1)
         layout.addWidget(self.model_list)
-        self._sizes = sizes
-        self._ram_free = ram_free
         self.details_label = QLabel("")
         self.details_label.setWordWrap(True)
         self.details_label.setVisible(False)
         layout.addWidget(self.details_label)
-        if not self.installed_models:
-            layout.addWidget(
-                QLabel("Ollama is not answering. Type the model by hand.")
-            )
+        self.offline_label = QLabel(
+            "Ollama is not answering. Type the model by hand."
+        )
+        self.offline_label.setWordWrap(True)
+        self.offline_label.setVisible(False)
+        layout.addWidget(self.offline_label)
+        self.refresh_btn = QPushButton("Refresh list")
+        self.refresh_btn.clicked.connect(self._refresh_models)
+        layout.addWidget(self.refresh_btn)
+        self._fill_model_list()
         self.type_edit = QLineEdit()
         self.type_edit.setPlaceholderText(
             "Or type a model name or Hugging Face repo, "
@@ -338,6 +346,93 @@ class NewProfileDialog(QDialog):
             self.model_list, self.type_edit,
             self.create_btn, self.cancel_btn,
         ])
+        # The dialog-open refresh (T43): the list already shows the
+        # last good list; the refresh runs behind it and refills
+        # when it lands, so the dialog never waits on Ollama.
+        self._refresh_models()
+
+    def _fill_model_list(self):
+        """Fill the list from the cached model list (T43): no
+        fetch, so this is instant. A pick the user already made
+        survives a refill; the stored tag stays visible even when
+        Ollama does not list it. While the first refresh is still
+        in flight the list holds three muted skeleton rows shaped
+        like real rows (T146), so it never looks dead — the real
+        rows replace them when the refresh lands."""
+        models, sizes, loaded, _up, _at = MODEL_CACHE.snapshot()
+        self.installed_models = models
+        self._sizes = sizes
+        # The row pick survives a refill (the typed text is in its
+        # own field and is untouched). Read the row directly: this
+        # also runs from __init__, before the type field exists.
+        current = self.model_list.currentItem()
+        picked = (
+            str(current.data(Qt.UserRole) or "")
+            if current is not None else ""
+        )
+        self.model_list.clear()
+        self.details_label.setText("")
+        self.details_label.setVisible(False)
+        if not loaded:
+            # Skeleton rows (T146): the first says what is
+            # happening, the other two hold the shape of the rows
+            # to come. All muted and unpickable.
+            first = QListWidgetItem("Looking for models...\nOne moment.")
+            first.setFlags(Qt.NoItemFlags)
+            first.setForeground(QColor(DISABLED))
+            self.model_list.addItem(first)
+            for _ in range(2):
+                item = QListWidgetItem("\u2026\n\u2026")
+                item.setFlags(Qt.NoItemFlags)
+                item.setForeground(QColor(DISABLED))
+                self.model_list.addItem(item)
+            self.offline_label.setVisible(False)
+            return
+        for tag in models:
+            fits = fits_this_pc(tag, self._ram_free)
+            if fits is True:
+                verdict = "Fits this PC."
+            elif fits is False:
+                verdict = "Too big for this PC."
+            else:
+                verdict = "Fit unknown. Stella will check."
+            item = QListWidgetItem(
+                f"{tag}\n{describe_model(tag)} {verdict}"
+            )
+            item.setData(Qt.UserRole, tag)
+            self.model_list.addItem(item)
+        self.model_list.setCurrentRow(-1)
+        if picked:
+            for row in range(self.model_list.count()):
+                row_item = self.model_list.item(row)
+                if str(row_item.data(Qt.UserRole) or "") == picked:
+                    self.model_list.setCurrentRow(row)
+                    break
+        self.offline_label.setVisible(not models)
+
+    def _refresh_models(self):
+        """A background refresh of the cached list (T43): the list
+        refills when it lands; nothing blocks meanwhile. A refresh
+        already in flight is enough — the cache makes one fetch of
+        overlapping refreshes anyway."""
+        if self._model_worker is not None and self._model_worker.isRunning():
+            return
+        worker = ModelListWorker(self)
+        worker.refreshed.connect(lambda *_a: self._fill_model_list())
+        worker.finished.connect(self._on_model_worker_finished)
+        self._model_worker = worker
+        worker.start()
+
+    def _on_model_worker_finished(self):
+        if self._model_worker is self.sender():
+            self._model_worker = None
+
+    def closeEvent(self, event):
+        # A refresh still running when the dialog closes must finish
+        # first: a QThread destroyed while running aborts the app.
+        if self._model_worker is not None and self._model_worker.isRunning():
+            self._model_worker.wait(5000)
+        super().closeEvent(event)
 
     def picked_model(self) -> str:
         """The picked model: the tapped row, or the typed text."""
@@ -392,6 +487,29 @@ class NewProfileDialog(QDialog):
             )
         else:
             self.name_note.setText("")
+
+
+class ModelListWorker(QThread):
+    """Fetch the installed-model list off the UI thread (T43).
+
+    One refresh() call on the shared cache; the result arrives on
+    the refreshed signal, on the UI thread. The cache dedupes
+    simultaneous refreshes, so overlapping workers make one fetch
+    between them. The Ollama URL is captured at construction: a
+    worker that starts late still fetches the URL that was
+    current when the refresh was triggered."""
+
+    refreshed = Signal(list, dict, bool)  # models, sizes, ollama_up
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._url = ollama_url()
+
+    def run(self):
+        models, sizes, _loaded, ollama_up, _at = MODEL_CACHE.refresh(
+            self._url
+        )
+        self.refreshed.emit(models, sizes, ollama_up)
 
 
 class TrainWorker(QThread):
@@ -903,9 +1021,31 @@ class JobCard(QFrame):
         self.progress.setValue(0)
         layout.addWidget(self.progress)
         self.setVisible(False)
+        # The finish-moment timer (T145): a real timer, not a
+        # singleShot, so start()/finish() can cancel a moment that
+        # is still showing when a new job starts.
+        self._moment_timer = QTimer(self)
+        self._moment_timer.setSingleShot(True)
+        self._moment_timer.timeout.connect(self._end_finish_moment)
+        self._morph_animation = None
 
-    def start(self, title: str, determinate: bool) -> None:
-        """Show the card for a new job, with fresh state."""
+    def start(
+        self, title: str, determinate: bool,
+        from_rect: QRect | None = None,
+        reduced_motion: bool = False,
+    ) -> None:
+        """Show the card for a new job, with fresh state.
+
+        With `from_rect` (T149) the card morphs out of the picked
+        job button: a 350 ms geometry animation from the button's
+        rect to the card's final layout rect. The layout must
+        settle first, or the final rect is wrong — show, pump,
+        record, then animate. Reduced motion (or no start rect)
+        is an instant swap, as before. Any morph still running is
+        stopped: a new start always wins."""
+        self._stop_morph()
+        self._moment_timer.stop()
+        self.setStyleSheet("")
         self.title_label.setText(title)
         self.status_label.setText("Starting...")
         self.cancel_btn.setEnabled(True)
@@ -916,6 +1056,31 @@ class JobCard(QFrame):
             # No count to show: a busy bar, not a lying 0%.
             self.progress.setMaximum(0)
         self.setVisible(True)
+        if from_rect is None or reduced_motion:
+            return
+        QApplication.processEvents()
+        final = self.geometry()
+        if final.isEmpty() or final == from_rect:
+            return
+        self.setGeometry(from_rect)
+        animation = QPropertyAnimation(self, b"geometry")
+        animation.setDuration(350)
+        animation.setStartValue(from_rect)
+        animation.setEndValue(final)
+        animation.finished.connect(self._on_morph_finished)
+        self._morph_animation = animation
+        animation.start()
+
+    def _stop_morph(self) -> None:
+        """Stop a morph still running (T149): finish(),
+        finish_moment(), and a new start all cancel it, so the
+        card never keeps animating after the job is gone."""
+        if self._morph_animation is not None:
+            self._morph_animation.stop()
+            self._morph_animation = None
+
+    def _on_morph_finished(self) -> None:
+        self._morph_animation = None
 
     def set_status(self, text: str) -> None:
         self.status_label.setText(text)
@@ -929,6 +1094,34 @@ class JobCard(QFrame):
             self.progress.setMaximum(0)
 
     def finish(self) -> None:
+        self._stop_morph()
+        self._moment_timer.stop()
+        self.setStyleSheet("")
+        self.setVisible(False)
+
+    def finish_moment(self, summary: str, reduced_motion: bool = False) -> None:
+        """The finish moment (T145): the card shows the summary in
+        a gold glow for a beat, then hides — the job's end is a
+        moment, not a vanishing. With reduced motion the card just
+        hides: the summary is already in the log and the status
+        bar, so nothing is lost. A morph still running stops first
+        (T149)."""
+        self._stop_morph()
+        if reduced_motion:
+            self.finish()
+            return
+        self._moment_timer.stop()
+        self.cancel_btn.setEnabled(False)
+        self.status_label.setText(summary)
+        self.setStyleSheet(
+            "QFrame#card { border: 2px solid #ffc93c; "
+            "background-color: #3a3016; }"
+        )
+        self.setVisible(True)
+        self._moment_timer.start(250)
+
+    def _end_finish_moment(self) -> None:
+        self.setStyleSheet("")
         self.setVisible(False)
 
 
@@ -1160,12 +1353,43 @@ class ProfileWindow(QDialog):
             self._loading = False
             self._capture_snapshot()
             self._update_title()
+        # A combo filled from an unloaded cache fills for real when
+        # the refresh lands: the main window refills open profile
+        # windows from its refreshed handler (T43).
+        if not MODEL_CACHE.loaded:
+            self._main.refresh_model_list()
+
+    def _fill_tag_combo(self, prefer_current: bool = False):
+        """Fill the tag combo from the cached model list (T43): no
+        fetch, so this is instant and the stored tag never flickers
+        away while Ollama answers. The stored tag is always listed,
+        even when Ollama does not have it. A refresh refill keeps
+        what the user typed (prefer_current); a load shows the
+        stored tag."""
+        models = MODEL_CACHE.models()
+        current = self.tag_combo.currentText()
+        try:
+            stored = self._main.store.get_profile(self._slug).get(
+                "ollama_tag", ""
+            )
+        except StellaError:
+            stored = ""
+        self.tag_combo.blockSignals(True)
+        try:
+            self.tag_combo.clear()
+            if models:
+                self.tag_combo.addItems(models)
+            if stored and stored not in models:
+                self.tag_combo.addItem(stored)
+            if prefer_current and current:
+                self.tag_combo.setCurrentText(current)
+            else:
+                self.tag_combo.setCurrentText(stored)
+        finally:
+            self.tag_combo.blockSignals(False)
 
     def _load_inner(self):
-        self.tag_combo.clear()
-        models = list_models()
-        if models:
-            self.tag_combo.addItems(models)
+        self._fill_tag_combo()
         try:
             p = self._main.store.get_profile(self._slug)
         except StellaError:
@@ -1175,10 +1399,6 @@ class ProfileWindow(QDialog):
             return
         self.display_edit.setText(p.get("display_name", ""))
         self.role_edit.setText(p.get("role", ""))
-        tag = p.get("ollama_tag", "")
-        if tag and tag not in models:
-            self.tag_combo.addItem(tag)
-        self.tag_combo.setCurrentText(tag)
         # The Base ref field shows a repo, never a tag as if it
         # were one (T79): a stored value that is not a Hugging
         # Face repo id (no slash) shows blank, with the placeholder
@@ -1276,9 +1496,16 @@ class ProjectWindow(QDialog):
         self.display_edit = QLineEdit()
         self.dataset_edit = QLineEdit()
         self.dataset_edit.setPlaceholderText("path or name of the training data")
+        self.dataset_browse_btn = QPushButton("Browse...")
+        self.dataset_browse_btn.clicked.connect(self._browse_dataset)
+        dataset_row = QWidget()
+        dataset_layout = QHBoxLayout(dataset_row)
+        dataset_layout.setContentsMargins(0, 0, 0, 0)
+        dataset_layout.addWidget(self.dataset_edit, 1)
+        dataset_layout.addWidget(self.dataset_browse_btn)
         form.addRow("Display name", self.display_edit)
         form.addRow("", _help_label("Just a label for the project list."))
-        form.addRow("Dataset", self.dataset_edit)
+        form.addRow("Dataset", dataset_row)
         form.addRow(
             "",
             _help_label(
@@ -1286,6 +1513,13 @@ class ProjectWindow(QDialog):
                 "The main screen has a sample to try."
             ),
         )
+        # What the dataset holds (T45): count, train/check split,
+        # and a 3-example preview when it is valid; a warning when
+        # it is missing or malformed. Hidden until there is a ref.
+        self.dataset_info = QLabel("")
+        self.dataset_info.setWordWrap(True)
+        self.dataset_info.setVisible(False)
+        form.addRow("", self.dataset_info)
         # Status (T53): read-only — training moves it on its own
         # (training, paused, done, failed), GGUF export sets
         # exported, and Mark ready is the one move the user makes
@@ -1360,11 +1594,18 @@ class ProjectWindow(QDialog):
             self.notes_edit.textChanged,
         ):
             signal.connect(self._on_edited)
+        # The dataset check runs when the field is left (T45) —
+        # never per keystroke: a big file parses once per edit,
+        # not once per letter.
+        self.dataset_edit.editingFinished.connect(
+            self._check_dataset_display
+        )
         self._load()
         # Ctrl+S saves here (T82); Tab walks the form in visual order.
         QShortcut(QKeySequence("Ctrl+S"), self, self.save)
         _chain_tab_order([
-            self.display_edit, self.dataset_edit, self.mark_ready_btn,
+            self.display_edit, self.dataset_edit, self.dataset_browse_btn,
+            self.mark_ready_btn,
             self.notes_edit,
             self.save_notes_btn, self.save_btn, rename_btn, delete_btn,
             close_btn,
@@ -1522,6 +1763,56 @@ class ProjectWindow(QDialog):
         else:
             self._load_note.setText("")
             self._load_note.setVisible(False)
+        self._check_dataset_display()
+
+    def _browse_dataset(self):
+        """Pick a dataset file (T45): the picker fills the field,
+        and the check below says what the file holds."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Pick a dataset file", str(Path.home()),
+            "JSONL datasets (*.jsonl);;All files (*)",
+        )
+        if not path:
+            return
+        self.dataset_edit.setText(path)
+        self._check_dataset_display()
+
+    def _check_dataset_display(self):
+        """Validate the Dataset field and say what it holds (T45):
+        a valid file shows its example count, the train/check
+        split, and a 3-example preview; a missing file warns
+        without blocking; a malformed file names the bad line.
+        Runs on load, on browse, when the field is left, and on
+        save."""
+        from .train import check_dataset
+
+        check = check_dataset(
+            self._main.store, self._profile, self._project,
+            self.dataset_edit.text(),
+        )
+        status = check["status"]
+        if status == "unset":
+            self.dataset_info.setText("")
+            self.dataset_info.setVisible(False)
+        elif status == "ok":
+            lines = [
+                f"{check['count']} examples: {check['train']} to train, "
+                f"{check['val']} to check.",
+            ]
+            for i, line in enumerate(check["preview"], 1):
+                lines.append(f"{i}. {line}")
+            self.dataset_info.setText("\n".join(lines))
+            self.dataset_info.setVisible(True)
+        elif status == "missing":
+            self.dataset_info.setText(
+                "Dataset not found. Is the path right?"
+            )
+            self.dataset_info.setVisible(True)
+        else:  # invalid
+            self.dataset_info.setText(
+                check["error"] or "Not a valid dataset."
+            )
+            self.dataset_info.setVisible(True)
 
     def mark_ready(self):
         """Draft -> ready (T53): the only user-driven transition.
@@ -1544,7 +1835,11 @@ class ProjectWindow(QDialog):
     def save(self) -> bool:
         """Save the project form. Returns True on success, False when
         nothing was saved (store error). The stored training
-        settings are untouched: the backend owns them (T16)."""
+        settings are untouched: the backend owns them (T16). A
+        missing or malformed dataset warns in the info line (T45)
+        but never blocks the save — the file may be created or
+        pulled later."""
+        self._check_dataset_display()
         try:
             self._main.store.update_project(
                 self._profile,
@@ -1690,9 +1985,9 @@ class TrashDialog(QDialog):
 class SettingsWindow(QDialog):
     """Settings, in its own window. Only settings that exist are
     shown: where Stella keeps its files, whether Ollama is answering,
-    the chat model, and the AI providers. Training settings are not
-    here (T16): the backend measures the PC and picks them, so the
-    user never sees them."""
+    the chat model, the AI providers, and ease of use (less motion,
+    larger text). Training settings are not here (T16): the backend
+    measures the PC and picks them, so the user never sees them."""
 
     def __init__(self, main, parent=None):
         super().__init__(parent)
@@ -1776,6 +2071,35 @@ class SettingsWindow(QDialog):
                 "in a debug report."
             )
         )
+
+        # Ease of use (T147): less motion, larger text. Plain words,
+        # saved in QSettings, applied at once.
+        ease = section("Ease of use")
+        self.reduced_motion_check = QCheckBox(
+            "Less motion: buttons and cards change at once, "
+            "with no animation."
+        )
+        self.reduced_motion_check.setChecked(
+            self._main.settings.value(
+                "accessibility/reduced_motion", False, type=bool
+            )
+        )
+        self.reduced_motion_check.toggled.connect(
+            self._on_reduced_motion_toggled
+        )
+        ease.addWidget(self.reduced_motion_check)
+        self.larger_text_check = QCheckBox(
+            "Larger text: bigger words everywhere."
+        )
+        self.larger_text_check.setChecked(
+            self._main.settings.value(
+                "accessibility/larger_text", False, type=bool
+            )
+        )
+        self.larger_text_check.toggled.connect(
+            self._on_larger_text_toggled
+        )
+        ease.addWidget(self.larger_text_check)
         layout.addStretch(1)
 
         action_row = QHBoxLayout()
@@ -1807,11 +2131,26 @@ class SettingsWindow(QDialog):
         custom_buttons = self._provider_buttons["custom"]
         chain += [
             custom_buttons["save"], custom_buttons["test"],
-            custom_buttons["remove"], self.debug_btn, close_btn,
+            custom_buttons["remove"],
+            self.reduced_motion_check, self.larger_text_check,
+            self.debug_btn, close_btn,
         ]
         _chain_tab_order(chain)
 
         self.refresh_ollama_status()
+
+    def _on_reduced_motion_toggled(self, checked: bool):
+        """The Less motion preset (T147): writes the setting and
+        applies it at once — the dip, the morph, and the finish
+        moment all read the flag live."""
+        self._main.settings.setValue("accessibility/reduced_motion", checked)
+        set_reduced_motion(checked)
+
+    def _on_larger_text_toggled(self, checked: bool):
+        """The Larger text preset (T147): writes the setting and
+        applies it at once."""
+        self._main.settings.setValue("accessibility/larger_text", checked)
+        apply_text_size(QApplication.instance(), checked)
 
     def _build_provider_rows(self, layout):
         """One row per keyed provider: a password-style key field,
@@ -1922,7 +2261,32 @@ class SettingsWindow(QDialog):
         self._load_chat_models()
 
     def refresh_ollama_status(self):
-        self.ollama_status.setText(f"Status: {check_ollama(ollama_url())}")
+        """Refresh the Ollama status, without blocking (T146):
+        the label says Checking... at once, and the background
+        refresh updates it from the cache when it lands. The old
+        version called check_ollama here, on the UI thread — a
+        hung Ollama froze Settings for the whole timeout."""
+        self.ollama_status.setText("Status: Checking...")
+        self._main.refresh_model_list()
+        self._load_chat_models()
+
+    def _on_models_refreshed(self):
+        """A background model-list refresh landed (T43/T146): the
+        status line and the chat list re-read it from the cache.
+        The status words match check_ollama's, so the line reads
+        the same as it did when it was a blocking call."""
+        models, _sizes, _loaded, ollama_up, _at = MODEL_CACHE.snapshot()
+        if ollama_up:
+            if models:
+                status = (
+                    f"running ({len(models)} model(s): "
+                    f"{', '.join(models)})"
+                )
+            else:
+                status = "running (no models loaded)"
+        else:
+            status = f"not reachable at {ollama_url()}"
+        self.ollama_status.setText(f"Status: {status}")
         self._load_chat_models()
 
     def _load_chat_models(self):
@@ -1930,7 +2294,9 @@ class SettingsWindow(QDialog):
         this PC (Ollama) first, then Groq, Gemini, and Custom. A
         provider with no key saved shows its models greyed out.
         Nothing is selected by default: the saved pick is restored,
-        or the box stays blank until the user picks one."""
+        or the box stays blank until the user picks one. The Ollama
+        rows come from the cache (T43): no fetch, so opening
+        Settings never waits on Ollama."""
         saved_provider = self._main.chat_provider or "ollama"
         saved_model = self._main.chat_model
         home = self._main.store.home
@@ -1953,7 +2319,7 @@ class SettingsWindow(QDialog):
                 item.setEnabled(enabled)
 
             add_header("On this PC (Ollama)")
-            for name in list_models():
+            for name in MODEL_CACHE.models():
                 add_model("ollama", name)
             for pid in ("groq", "gemini"):
                 add_header(PROVIDERS[pid]["display"])
@@ -2208,7 +2574,16 @@ class ChatWindow(QDialog):
 
     # -- chat model -------------------------------------------------
     def _ask_for_model(self):
-        models = list_models()
+        models, _sizes, loaded, _up, _at = MODEL_CACHE.snapshot()
+        if not loaded:
+            # The first refresh is still in flight: say so, and the
+            # buttons arrive when it lands (T43/T146).
+            self._awaiting_model = True
+            self._append(
+                "Stella", "Looking for the models on this PC..."
+            )
+            self._main.refresh_model_list()
+            return
         if not models:
             self._append(
                 "Stella",
@@ -2225,9 +2600,20 @@ class ChatWindow(QDialog):
             "You can also pick a Groq or Gemini model in "
             "Settings, under AI providers.",
         )
-        # One button per installed model (T76): click to pick, no
-        # typing a tag by hand. Any old buttons go first, so asking
-        # twice never doubles the list.
+        self._show_model_buttons(models)
+
+    def _on_models_refreshed(self):
+        """A background model-list refresh landed (T43): if the chat
+        was still looking for models, show them now (or say Ollama
+        is not answering). A refresh landing after the buttons are
+        already up changes nothing."""
+        if self._awaiting_model and not self.model_buttons:
+            self._ask_for_model()
+
+    def _show_model_buttons(self, models):
+        """One button per installed model (T76): click to pick, no
+        typing a tag by hand. Any old buttons go first, so asking
+        twice never doubles the list."""
         for btn in self.model_buttons:
             self.model_pick_layout.removeWidget(btn)
             btn.deleteLater()
@@ -2262,7 +2648,8 @@ class ChatWindow(QDialog):
         use: installed Ollama models first, then cloud models with a
         saved key. Returns (provider, model), or None."""
         cleaned = text.strip().lower()
-        models = list_models()
+        # The cached list (T43): matching typed text never fetches.
+        models = MODEL_CACHE.models()
         for name in models:
             if cleaned == name.lower():
                 return ("ollama", name)
@@ -2426,9 +2813,8 @@ class DistillDialog(QDialog):
         layout.addWidget(QLabel("Teacher"))
         self.teacher_combo = QComboBox()
         self.teacher_combo.setPlaceholderText("Pick a teacher model")
-        models = list_models()
-        if models:
-            self.teacher_combo.addItems(models)
+        self._model_worker: ModelListWorker | None = None
+        self._fill_teacher_combo()
         self.teacher_combo.setCurrentIndex(-1)
         self.teacher_combo.currentIndexChanged.connect(self._refresh_start)
         layout.addWidget(self.teacher_combo)
@@ -2468,6 +2854,46 @@ class DistillDialog(QDialog):
             self.start_btn, self.cancel_btn,
         ])
 
+    def _fill_teacher_combo(self):
+        """Fill the teacher combo from the cached model list (T43):
+        no fetch. When the cache has not loaded yet, a background
+        refresh fills it when it lands."""
+        models = MODEL_CACHE.models()
+        current = self.teacher_combo.currentText()
+        self.teacher_combo.blockSignals(True)
+        try:
+            self.teacher_combo.clear()
+            if models:
+                self.teacher_combo.addItems(models)
+            if current:
+                self.teacher_combo.setCurrentText(current)
+        finally:
+            self.teacher_combo.blockSignals(False)
+        if not MODEL_CACHE.loaded:
+            self._refresh_models()
+
+    def _refresh_models(self):
+        """A background refresh of the cached list (T43): the combo
+        refills when it lands; nothing blocks meanwhile."""
+        if self._model_worker is not None and self._model_worker.isRunning():
+            return
+        worker = ModelListWorker(self)
+        worker.refreshed.connect(lambda *_a: self._fill_teacher_combo())
+        worker.finished.connect(self._on_model_worker_finished)
+        self._model_worker = worker
+        worker.start()
+
+    def _on_model_worker_finished(self):
+        if self._model_worker is self.sender():
+            self._model_worker = None
+
+    def closeEvent(self, event):
+        # A refresh still running when the dialog closes must finish
+        # first: a QThread destroyed while running aborts the app.
+        if self._model_worker is not None and self._model_worker.isRunning():
+            self._model_worker.wait(5000)
+        super().closeEvent(event)
+
     def teacher(self) -> str:
         return self.teacher_combo.currentText().strip()
 
@@ -2491,6 +2917,52 @@ class DistillDialog(QDialog):
             self._refresh_start()
 
 
+class ImportPreviewDialog(QDialog):
+    """The import preview (T58): what the package is, what it
+    carries, and what would change here — before anything is
+    imported. Import goes ahead; Cancel imports nothing. When the
+    profile already exists and differs, the merge choice is here
+    too: neither radio is checked by default, and not picking
+    keeps yours."""
+
+    def __init__(self, parent, summary: dict):
+        super().__init__(parent)
+        self.setWindowTitle("Import this package?")
+        self._summary = summary
+        layout = QVBoxLayout(self)
+        summary_label = QLabel(export_mod.format_preview(summary))
+        summary_label.setWordWrap(True)
+        layout.addWidget(summary_label)
+        self._keep_radio = None
+        self._take_radio = None
+        if summary.get("profile_diff"):
+            layout.addWidget(QLabel("Keep yours, or use the package's?"))
+            self._keep_radio = QRadioButton("Keep mine")
+            self._take_radio = QRadioButton("Use the package's")
+            layout.addWidget(self._keep_radio)
+            layout.addWidget(self._take_radio)
+            layout.addWidget(QLabel("If you do not pick, yours is kept."))
+        row = QHBoxLayout()
+        self.confirm_btn = QPushButton("Import")
+        self.confirm_btn.clicked.connect(self.accept)
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.clicked.connect(self.reject)
+        row.addStretch(1)
+        row.addWidget(self.confirm_btn)
+        row.addWidget(self.cancel_btn)
+        layout.addLayout(row)
+
+    def profile_choice(self):
+        """The merge choice: "take" only when the take radio is
+        checked; "keep" when the radios were shown and take was
+        not picked; None when there was no diff to choose over —
+        so the import's own conflict callback still stands as the
+        backstop."""
+        if self._take_radio is None:
+            return None
+        return "take" if self._take_radio.isChecked() else "keep"
+
+
 class MainWindow(QMainWindow):
     def __init__(self, store: Store | None = None, settings=None):
         super().__init__()
@@ -2498,6 +2970,20 @@ class MainWindow(QMainWindow):
         # Tests pass a QSettings on a temp file; the real app uses
         # the shared BrokeNBored/Stella settings.
         self.settings = settings or QSettings("BrokeNBored", "Stella")
+        # Accessibility presets (T147): applied from the saved
+        # settings before anything shows, so a returning user gets
+        # their less-motion / larger-text window at once.
+        set_reduced_motion(
+            self.settings.value(
+                "accessibility/reduced_motion", False, type=bool
+            )
+        )
+        apply_text_size(
+            QApplication.instance(),
+            self.settings.value(
+                "accessibility/larger_text", False, type=bool
+            ),
+        )
         self.setWindowTitle(
             f"STELLA {STELLA_VERSION}: fine-tune models on your PC"
         )
@@ -2509,6 +2995,10 @@ class MainWindow(QMainWindow):
         self._current_profile: str | None = None
         self._current_project: str | None = None
         self._train_panel_project: tuple | None = None
+        # The project a train/sleep run belongs to (T47): while a
+        # run is live, the Train panel stays pinned to it even when
+        # the session moves on. (profile, project), or None.
+        self._running_job_key: tuple | None = None
         self._building = False
         # Live-run stats for the glanceable card (T20): when the
         # current run's first live point arrived, and which step it
@@ -2535,11 +3025,10 @@ class MainWindow(QMainWindow):
         self._tree_profiles: dict[str, QTreeWidgetItem] = {}
         self._tree_projects: dict[tuple, QTreeWidgetItem] = {}
         self._download_profile: str | None = None
-        # The Ollama check for the tree health badges (T78), cached
-        # briefly: refresh_tree runs in bursts, and one localhost
-        # round-trip per burst is enough.
-        self._ollama_up: bool | None = None
-        self._ollama_checked_at = 0.0
+        # The model-list refresh worker (T43): one fetch at startup,
+        # then on demand only. The worker is tracked so close waits
+        # for it (a QThread destroyed while running aborts the app).
+        self._model_list_worker: ModelListWorker | None = None
 
         # Debug log layer (U12): rotating log under the Stella home,
         # ring buffer, scrubbed report on demand from Settings.
@@ -2570,6 +3059,10 @@ class MainWindow(QMainWindow):
         splitter_state = self.settings.value("splitter")
         if splitter_state is not None:
             self.splitter.restoreState(splitter_state)
+        # The one startup fetch (T43): the model list loads in the
+        # background before the first refresh_tree, so the health
+        # badges read the cache instead of making their own fetch.
+        self.refresh_model_list()
         self.refresh_tree()
         # Restore the last session (the user's own pick, not a
         # default) and the tree expansion, if they still exist.
@@ -2931,6 +3424,13 @@ class MainWindow(QMainWindow):
         card_layout.addLayout(stats_row)
         self.train_progress = QProgressBar()
         self.train_progress.setValue(0)
+        # The pin note (T47): while a run is live on another
+        # project, the panel says so instead of following the
+        # session. Hidden whenever the panel is not pinned.
+        self.train_pin_label = QLabel("")
+        self.train_pin_label.setWordWrap(True)
+        self.train_pin_label.setVisible(False)
+        card_layout.addWidget(self.train_pin_label)
         card_layout.addWidget(self.train_progress)
         self.train_loss = QLabel("Not started.")
         card_layout.addWidget(self.train_loss)
@@ -3126,15 +3626,57 @@ class MainWindow(QMainWindow):
         else:
             item.setForeground(0, QBrush())
 
+    def refresh_model_list(self):
+        """Start a background model-list refresh (T43), unless one
+        is already running — one in-flight worker is enough, and
+        the cache makes one fetch of overlapping refreshes anyway.
+        Every surface that shows the list refills from the
+        refreshed handler when it lands."""
+        if (
+            self._model_list_worker is not None
+            and self._model_list_worker.isRunning()
+        ):
+            return
+        worker = ModelListWorker(self)
+        worker.refreshed.connect(self._on_model_list_refreshed)
+        worker.finished.connect(self._on_model_list_worker_finished)
+        self._model_list_worker = worker
+        worker.start()
+
+    def _on_model_list_worker_finished(self):
+        if self._model_list_worker is self.sender():
+            self._model_list_worker = None
+
+    def _on_model_list_refreshed(self, _models, _sizes, _ollama_up):
+        """A background model-list refresh landed (T43): every
+        surface that shows the list re-reads it from the cache —
+        the tree badges, open profile windows, Settings, and the
+        chat model buttons."""
+        self._refresh_tree_badges()
+        for win in list(self._profile_windows.values()):
+            win._fill_tag_combo(prefer_current=True)
+        if self._settings_window is not None:
+            self._settings_window._on_models_refreshed()
+        if self._chat_window is not None:
+            self._chat_window._on_models_refreshed()
+
     def _ollama_up_cached(self) -> bool:
-        """Is Ollama answering? Checked at most once every 10 s
-        (T78): refresh_tree runs in bursts, and the health badge
-        does not need a fresh round-trip per burst."""
-        now = time.monotonic()
-        if self._ollama_up is None or now - self._ollama_checked_at > 10:
-            self._ollama_up = reachable()
-            self._ollama_checked_at = now
-        return self._ollama_up
+        """Is Ollama answering? From the model-list cache (T43):
+        the cache's last refresh already answered that question,
+        so the badges never make their own fetch. When the cache
+        has never loaded, assume up (the startup refresh corrects
+        the badges when it lands); when the last refresh is older
+        than 10 s, kick off a background refresh and keep the last
+        known answer until it lands."""
+        _models, _sizes, loaded, ollama_up, fetched_at = (
+            MODEL_CACHE.snapshot()
+        )
+        if not loaded:
+            self.refresh_model_list()
+            return True
+        if time.monotonic() - fetched_at > 10:
+            self.refresh_model_list()
+        return ollama_up
 
     def _refresh_tree_badges(self):
         """The health badge on each profile row (T78): a green dot
@@ -3698,7 +4240,8 @@ class MainWindow(QMainWindow):
                 f"Run it with: {report['ollama_run']}"
             )
 
-        self._start_job_worker(job, "Making a smaller copy", False)
+        self._start_job_worker(job, "Making a smaller copy", False,
+                               from_job="requant")
         self._train_log_line(f"Making a smaller copy of {tag}...")
 
     def _start_distill(self):
@@ -3737,16 +4280,33 @@ class MainWindow(QMainWindow):
                 "then train when ready."
             )
 
-        self._start_job_worker(job, "Teaching a small model", True)
+        self._start_job_worker(job, "Teaching a small model", True,
+                               from_job="distill")
         self._train_log_line(f"Asking {teacher} the prompts...")
 
-    def _start_job_worker(self, job, title: str, determinate: bool) -> bool:
+    def _job_button_rect(self, job: str) -> QRect | None:
+        """The picked job button's rect, in the job card's parent
+        coordinates (T149): the morph's start rect. None when the
+        button or the card's parent is missing."""
+        btn = self.job_buttons.get(job)
+        parent = self.job_card.parentWidget()
+        if btn is None or parent is None:
+            return None
+        top_left = btn.mapTo(parent, btn.rect().topLeft())
+        return QRect(top_left, btn.rect().size())
+
+    def _start_job_worker(
+        self, job, title: str, determinate: bool,
+        from_job: str | None = None,
+    ) -> bool:
         """Start a JobWorker job as a job card (T74): the card shows
         the title, the job's log lines become its live status, and
         its progress reports move the bar. One job at a time (T29):
         a second job is refused here too, so no caller can ever
         overwrite a running worker and orphan it. Returns False
-        when refused."""
+        when refused. `from_job` names the picker tile the job came
+        from (T149): the card morphs out of it. GGUF export and the
+        probe are not picker tiles, so they pass none."""
         if self._job_already_running():
             return False
         self._job_worker = JobWorker(job)
@@ -3756,7 +4316,13 @@ class MainWindow(QMainWindow):
         self._job_worker.progress.connect(self.job_card.set_progress)
         self._job_worker.finished.connect(self._on_job_finished)
         self._set_activity("job", f"Working: {title.lower()}...")
-        self.job_card.start(title, determinate)
+        self.job_card.start(
+            title, determinate,
+            from_rect=(
+                self._job_button_rect(from_job) if from_job else None
+            ),
+            reduced_motion=reduced_motion(),
+        )
         self._job_worker.start()
         self._refresh_go()
         self._refresh_checklist()
@@ -4446,11 +5012,16 @@ class MainWindow(QMainWindow):
         self._say(f"Moved project {project} to the trash.")
 
     # -- export / import --------------------------------------------
-    def _export_project_to_folder(self, profile, project):
+    def _export_project_to_folder(
+        self, profile, project, bundle_dataset: bool = False
+    ):
         """Pick a folder and export one project into it (T23: the
         project delete dialog's "Export first" shares this).
         Returns the export dir, or None when the user cancelled or
-        the export failed (a warning was already shown)."""
+        the export failed (a warning was already shown).
+        `bundle_dataset` copies the dataset into the package (T59);
+        the delete path leaves it off — deleting a project does not
+        delete the dataset file, so the reference still works."""
         dest = QFileDialog.getExistingDirectory(
             self, "Export project to folder", str(Path.home())
         )
@@ -4458,7 +5029,8 @@ class MainWindow(QMainWindow):
             return None
         try:
             out = export_mod.export_project(
-                self.store, profile, project, dest
+                self.store, profile, project, dest,
+                bundle_dataset=bundle_dataset,
             )
         except StellaError as exc:
             self._warn(str(exc))
@@ -4509,11 +5081,59 @@ class MainWindow(QMainWindow):
         if not profile or not project:
             self._warn("Pick a project to export.")
             return
-        out = self._export_project_to_folder(profile, project)
+        bundle = self._ask_bundle_dataset(profile, project)
+        out = self._export_project_to_folder(
+            profile, project, bundle_dataset=bundle
+        )
         if out is None:
             return
         self._say(f"Exported to {out}.")
         QMessageBox.information(self, "Stella", f"Exported project to:\n{out}")
+
+    def _ask_bundle_dataset(self, profile, project) -> bool:
+        """The dataset offer (T59): when the project has a dataset
+        that resolves on this PC, ask whether to copy it into the
+        package, showing its size. No dataset, or one that does
+        not resolve, means no question — the package references
+        the dataset as usual. Returns True to bundle. A dialog
+        that closes without a click (or a stubbed exec in a test)
+        means reference only — the safe answer."""
+        from .train import resolve_dataset_ref
+
+        try:
+            proj = self.store.get_project(profile, project)
+        except StellaError:
+            return False
+        ref = proj.get("dataset_ref") or ""
+        if not ref:
+            return False
+        try:
+            path = resolve_dataset_ref(self.store, profile, project, ref)
+        except StellaError:
+            return False
+        box = QMessageBox(self)
+        box.setWindowTitle("Copy the dataset in?")
+        box.setText(
+            "Copy the dataset into the package? It is "
+            f"{provision.format_size(path.stat().st_size)}."
+        )
+        box.setInformativeText(
+            "Copied in, the package trains anywhere. Left out, the "
+            "package only names the dataset, and the other PC needs "
+            "its own copy."
+        )
+        copy_btn = box.addButton(
+            "Copy it in", QMessageBox.ButtonRole.AcceptRole
+        )
+        ref_btn = box.addButton(
+            "Reference only", QMessageBox.ButtonRole.RejectRole
+        )
+        box.setDefaultButton(ref_btn)
+        box.setEscapeButton(ref_btn)
+        box._stella_copy_button = copy_btn
+        box._stella_reference_button = ref_btn
+        box.exec()
+        return box.clickedButton() is copy_btn
 
     # -- T57: the profile already exists, and the package disagrees --
     def _profile_merge_box(self, slug, diff):
@@ -4566,16 +5186,48 @@ class MainWindow(QMainWindow):
             return "take"
         return "keep"
 
+    def _confirm_import_preview(self, path, summary):
+        """Show the import preview dialog (T58). Returns
+        (confirmed, profile_choice): confirmed is False when the
+        user cancels (nothing is imported); profile_choice is the
+        preview's merge choice, or None when there was no diff to
+        choose over. Factored out so tests can stub the dialog
+        and still exercise the import."""
+        dialog = ImportPreviewDialog(self, summary)
+        if dialog.exec() != QDialog.Accepted:
+            return False, None
+        return True, dialog.profile_choice()
+
     def import_package(self):
         path = QFileDialog.getExistingDirectory(
             self, "Pick an export package folder", str(Path.home())
         )
         if not path:
             return
+        # The preview (T58): what the package is, before anything
+        # is imported. A bad package warns and refreshes, exactly
+        # as before — no preview for a package that cannot import.
+        try:
+            summary = export_mod.preview_export(
+                self.store, path,
+                installed_models=MODEL_CACHE.models(),
+            )
+        except StellaError as exc:
+            self._warn(str(exc))
+            self.refresh_tree()
+            self.refresh_session()
+            return
+        confirmed, choice = self._confirm_import_preview(path, summary)
+        if not confirmed:
+            return
         try:
             result = export_mod.import_export(
                 self.store, path,
+                profile_choice=choice,
                 on_profile_conflict=self._ask_profile_merge,
+                # The base-health check (T61) reads the cached
+                # model list: an uninstalled tag warns, never blocks.
+                installed_models=MODEL_CACHE.models(),
             )
         except StellaError as exc:
             self._warn(str(exc))
@@ -4617,6 +5269,64 @@ class MainWindow(QMainWindow):
         # claimed it was.
         for warning in result.get("warnings", []):
             self._warn(warning)
+        # A missing dataset (T59): offer to find the file now, so
+        # the imported project trains without a trip to its window.
+        if result.get("dataset_missing"):
+            self._offer_locate_dataset(
+                result["profile"], result["project"],
+                result.get("dataset_ref", ""),
+            )
+
+    def _dataset_locate_box(self, ref):
+        """The missing-dataset repair dialog (T59): one question,
+        two plain-word buttons. Factored out so tests can read the
+        box without showing it, like _profile_merge_box."""
+        box = QMessageBox(self)
+        box.setWindowTitle("Dataset not on this PC")
+        box.setText(
+            f"The dataset {ref!r} is not on this PC. Find it now?"
+        )
+        box.setInformativeText(
+            "Pick the file and the project uses it. Or leave it for "
+            "later. The project still opens."
+        )
+        locate = box.addButton(
+            "Locate the file", QMessageBox.ButtonRole.AcceptRole
+        )
+        later = box.addButton(
+            "Not now", QMessageBox.ButtonRole.RejectRole
+        )
+        box.setDefaultButton(later)
+        box.setEscapeButton(later)
+        box._stella_locate_button = locate
+        box._stella_later_button = later
+        return box
+
+    def _offer_locate_dataset(self, profile, project, ref):
+        """The missing-dataset repair (T59): after an import whose
+        dataset is not on this PC, offer to pick the file now. A
+        pick stores it as the project's dataset; "Not now" (or a
+        dialog that closes without a click) leaves the ref as
+        imported."""
+        box = self._dataset_locate_box(ref)
+        box.exec()
+        if box.clickedButton() is not box._stella_locate_button:
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Find the dataset file", str(Path.home()),
+            "JSONL datasets (*.jsonl);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            self.store.update_project(
+                profile, project, dataset_ref=path
+            )
+        except StellaError as exc:
+            self._warn(str(exc))
+            return
+        self.refresh_session()
+        self._say(f"Dataset set to {path}.")
 
     # -- training ---------------------------------------------------
     def _train_log_line(self, text: str):
@@ -4634,7 +5344,30 @@ class MainWindow(QMainWindow):
 
     def refresh_train_panel(self):
         """Checkpoints list + log tail + last run's curve for the
-        selected project."""
+        selected project.
+
+        While a run is live on a project, the panel stays pinned
+        to that project (T47): switching the session away leaves
+        the checkpoints, curve, log, and progress untouched, and
+        the pin note names the running project. The pin clears
+        when the run finishes.
+        """
+        # Pinned (T47): a live run's project is not the session's.
+        running = self._running_job_key
+        session = (
+            (self._current_profile, self._current_project)
+            if self._current_profile and self._current_project
+            else None
+        )
+        if running is not None and running != session:
+            job = "Training" if self._training_running() else "Sleep"
+            self.train_pin_label.setText(
+                f"{job} is running on {running[1]}. This panel stays "
+                "with it until it finishes."
+            )
+            self.train_pin_label.setVisible(True)
+            return
+        self.train_pin_label.setVisible(False)
         self.train_checkpoints.clear()
         self.sleep_cycles.clear()
         if not self._current_profile or not self._current_project:
@@ -4642,6 +5375,8 @@ class MainWindow(QMainWindow):
             self._train_panel_project = None
             self.loss_curve.clear()
             self._reset_run_stats()
+            self.train_progress.setMaximum(1)
+            self.train_progress.setValue(0)
             return
         # A new project gets a fresh loss line; the same project
         # keeps its last progress (a finished run's final step/loss
@@ -4652,6 +5387,8 @@ class MainWindow(QMainWindow):
             self._train_panel_project = key
             if not self._training_running() and not self._sleep_running():
                 self.train_loss.setText("Not started.")
+                self.train_progress.setMaximum(1)
+                self.train_progress.setValue(0)
             # The last run's curve comes back with the project
             # (T20): rebuilt from its own run log.
             points, total = self._last_run_curve(*key)
@@ -4724,7 +5461,28 @@ class MainWindow(QMainWindow):
             self._warn(str(exc))
             return
         self.refresh_session()
-        self._say(f"Dataset set to {path}.")
+        # The pick is validated like the project window's (T45):
+        # a valid file reports its example count, a malformed one
+        # warns with the bad line. A picked file always exists, so
+        # "missing" cannot happen here.
+        from .train import check_dataset
+
+        check = check_dataset(
+            self.store, self._current_profile, self._current_project,
+            path,
+        )
+        if check["status"] == "ok":
+            self._say(
+                f"Dataset set to {path} "
+                f"({check['count']} examples)."
+            )
+        elif check["status"] == "invalid":
+            self._warn(
+                f"Dataset set to {path}, but the file has a problem: "
+                f"{check['error']}"
+            )
+        else:
+            self._say(f"Dataset set to {path}.")
 
     def use_sample_dataset(self):
         if not self._current_profile or not self._current_project:
@@ -4788,16 +5546,20 @@ class MainWindow(QMainWindow):
                     self._say("Training not started.")
                     return
                 force = True
-        from .train import training_deps_missing
+        from .train import TRAINING_INSTALL_HINT, training_deps_missing
 
         missing = training_deps_missing()
         if missing:
+            # The hint shows as a dialog now (T49): a log line is
+            # only visible when the user scrolls to the Train log.
+            # The log line stays too — the hint is worth keeping.
             hint = (
                 "Training packages missing: " + ", ".join(missing) + ". "
-                "Run this once in the Stella folder: bash install-training.sh"
+                + TRAINING_INSTALL_HINT
             )
             self._train_log_line(hint)
-            self._say("Training packages missing. See the Train log.")
+            self._warn(hint)
+            self._say("Training packages missing.")
             return
         # Settings live in the store now (the project window saves
         # them); there is no form left to save from here. But the
@@ -4819,7 +5581,10 @@ class MainWindow(QMainWindow):
             "training", "Resuming training..." if resume else "Training..."
         )
         self.job_card.start(
-            "Resuming training" if resume else "Training", True
+            "Resuming training" if resume else "Training", True,
+            # The card morphs out of the Train tile (T149).
+            from_rect=self._job_button_rect("train"),
+            reduced_motion=reduced_motion(),
         )
         self._train_log_line(
             "Resuming training..." if resume else "Starting training..."
@@ -4827,6 +5592,9 @@ class MainWindow(QMainWindow):
         self.debug_log.action(
             f"training started: {profile}/{project} (resume={resume})"
         )
+        # The Train panel pins to this project until the run ends
+        # (T47): the session may move on, the panel does not.
+        self._running_job_key = (profile, project)
         self._train_worker.start()
         self._refresh_checklist()
 
@@ -4858,12 +5626,18 @@ class MainWindow(QMainWindow):
             self._set_activity("training", f"Training: step {step} / {total}")
 
     def _on_train_finished(self, ok: bool, message: str):
+        self._running_job_key = None  # unpins the Train panel (T47)
         self.train_pause_btn.setEnabled(False)
         self._set_activity("idle", "Idle")
         self._train_log_line(message)
         self.debug_log.action(f"training finished: ok={ok}: {message}")
-        self._say(message.splitlines()[0] if message else "Training done.")
-        self.job_card.finish()
+        # The finish moment (T145): the card glows with the summary
+        # for a beat, then hides. The summary is the same first
+        # line the status bar gets below.
+        self.job_card.finish_moment(
+            message.splitlines()[0] if message else "Training done.",
+            reduced_motion(),
+        )
         # The finished run's curve and summary stay visible (T20):
         # the curve keeps its points, the loss line keeps its final
         # step, and the card says done. refresh_session re-enables
@@ -4872,16 +5646,25 @@ class MainWindow(QMainWindow):
         self.stat_time_left.setText("Time left: done")
         self.refresh_tree()
         self.refresh_session()
+        # The confirmation goes last (T50): refresh_session reports
+        # the session in the status bar, and a _say before it would
+        # be overwritten before the user ever sees it.
+        self._say(message.splitlines()[0] if message else "Training done.")
 
     def _on_job_finished(self, ok: bool, message: str):
         self._job_title = None
         self._set_activity("idle", "Idle")
         self._train_log_line(message)
-        self._say(message.splitlines()[0] if message else "Done.")
-        self.job_card.finish()
+        # The finish moment (T145), same as the run finishes.
+        self.job_card.finish_moment(
+            message.splitlines()[0] if message else "Done.",
+            reduced_motion(),
+        )
         self._refresh_go()
         self.refresh_train_panel()
         self._refresh_checklist()
+        # The confirmation goes last (T50), same as the run finishes.
+        self._say(message.splitlines()[0] if message else "Done.")
 
     # -- sleep ------------------------------------------------------
     def start_sleep(self):
@@ -4894,16 +5677,20 @@ class MainWindow(QMainWindow):
         # any job-card job runs, same as training does.
         if self._job_already_running():
             return
-        from .train import training_deps_missing
+        from .train import TRAINING_INSTALL_HINT, training_deps_missing
 
         missing = training_deps_missing()
         if missing:
+            # The hint shows as a dialog now (T49): a log line is
+            # only visible when the user scrolls to the Train log.
+            # The log line stays too — the hint is worth keeping.
             hint = (
                 "Training packages missing: " + ", ".join(missing) + ". "
-                "Run this once in the Stella folder: bash install-training.sh"
+                + TRAINING_INSTALL_HINT
             )
             self._train_log_line(hint)
-            self._say("Training packages missing. See the Train log.")
+            self._warn(hint)
+            self._say("Training packages missing.")
             return
         if not self._weights_offer(profile):
             return
@@ -4918,23 +5705,40 @@ class MainWindow(QMainWindow):
         self._run_started_at = None
         self.go_btn.setEnabled(False)
         self._set_activity("sleep", "Sleep: starting...")
-        self.job_card.start("Sleep", True)
+        self.job_card.start(
+            "Sleep", True,
+            # The card morphs out of the Sleep tile (T149).
+            from_rect=self._job_button_rect("sleep"),
+            reduced_motion=reduced_motion(),
+        )
         self._train_log_line("Starting sleep cycle...")
         self.debug_log.action(f"sleep started: {profile}/{project}")
+        # The Train panel pins to this project until the run ends
+        # (T47): the session may move on, the panel does not.
+        self._running_job_key = (profile, project)
         self._sleep_worker.start()
         self._refresh_checklist()
 
     def _on_sleep_finished(self, ok: bool, message: str):
+        self._running_job_key = None  # unpins the Train panel (T47)
         self._set_activity("idle", "Idle")
         self._train_log_line(message)
         self.debug_log.action(f"sleep finished: ok={ok}: {message}")
-        self._say(message.splitlines()[0] if message else "Sleep done.")
-        self.job_card.finish()
+        # The finish moment (T145): the card glows with the summary
+        # for a beat, then hides.
+        self.job_card.finish_moment(
+            message.splitlines()[0] if message else "Sleep done.",
+            reduced_motion(),
+        )
         # The finished cycle's curve and summary stay visible (T20),
         # like a finished training run.
         self.stat_time_left.setText("Time left: done")
         self.refresh_tree()
         self.refresh_session()
+        # The confirmation goes last (T50): refresh_session reports
+        # the session in the status bar, and a _say before it would
+        # be overwritten before the user ever sees it.
+        self._say(message.splitlines()[0] if message else "Sleep done.")
 
     def _on_sleep_cycle_clicked(self, item):
         cycle = item.data(Qt.UserRole)
@@ -5105,6 +5909,15 @@ class MainWindow(QMainWindow):
         if self.download_manager.is_running():
             self.download_manager.cancel()
             self.download_manager.wait_for_finished(5000)
+        # A model-list refresh still running when the window closes
+        # must finish first (T43): a QThread destroyed while running
+        # aborts the app. The fetch times out in 2 s, so the wait
+        # is short.
+        if (
+            self._model_list_worker is not None
+            and self._model_list_worker.isRunning()
+        ):
+            self._model_list_worker.wait(5000)
         super().closeEvent(event)
 
     def _finish_closing(self):

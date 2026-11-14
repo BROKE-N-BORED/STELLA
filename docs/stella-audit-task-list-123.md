@@ -1529,6 +1529,7 @@ accounts for their findings.)
 - **Origin:** audit #1 T3 + audit #4 T7 (merged — one fix)
 - **Covers:** A1-W4, A1-U4, A1-D5; A4-W7, A4-D7
 - **Effort:** M
+- **Status:** DONE in v0.14.0 (2026-11-14) — the model list is fetched once at startup into a cache, off the UI thread, so a hung Ollama never freezes a click; refresh re-fetches on demand.
 - **Problem:** `_show_profile_detail` calls `list_models()` on every
   selection change, synchronously, with no cache. Probed against a
   counting fake server: window open = 1 fetch, switch to row 1 = 2,
@@ -1582,6 +1583,7 @@ accounts for their findings.)
 - **Origin:** audit #2 T6
 - **Covers:** A2-W6, A2-U5, A2-G2, A2-D6
 - **Effort:** M
+- **Status:** DONE in v0.14.0 (2026-11-14) — the dataset picker validates the file with the trainer's own validator and shows its example count, train/check split, and a 3-example preview, naming the malformed line.
 - **Problem:** Probed: `dataset_ref="/no/such/place/data.jsonl"` is
   accepted at creation with no complaint. No existence check, no
   format check, no example count, no preview. A mistyped path or a
@@ -1635,6 +1637,7 @@ accounts for their findings.)
 - **Covers:** A4-W11, A4-W12, A4-D11
 - **Effort:** M
 - **Note:** Extended by T74 (Audit #9 R7).
+- **Status:** DONE in v0.14.0 (2026-11-14) — the train panel stays pinned to the running project (the pin label names it) and progress/loss reset per project.
 - **Problem:** `refresh_train_panel` never touches the progress
   bar or the loss label (except setting "Pick a project to
   train." when nothing is selected). Probed: after a run on
@@ -1692,6 +1695,7 @@ accounts for their findings.)
 - **Origin:** audit #4 T16
 - **Covers:** A4-U8, A4-D25
 - **Effort:** S
+- **Status:** DONE in v0.14.0 (2026-11-14) — missing training tools are a warning dialog, not a status line.
 - **Problem:** Start-without-deps writes the install hint to the
   Training log — which sits at y=996, below the fold (A4-U2). The
   status bar says "see the Train log", but the user has to know
@@ -1710,6 +1714,7 @@ accounts for their findings.)
 - **Origin:** audit #3 T13 + audit #4 T15 (merged — one fix)
 - **Covers:** A3-U1, A3-D14; A4-U3, A4-D18
 - **Effort:** S
+- **Status:** DONE in v0.14.0 (2026-11-14) — import and training-done confirmations stay visible instead of vanishing.
 - **Problem:** `import_package` says "Imported X into Y"
   (`gui.py:595`), then immediately calls `refresh_profiles`
   (`gui.py:596`), whose selection cascade calls `_say` again with
@@ -1940,6 +1945,7 @@ accounts for their findings.)
 - **Covers:** A3-U2, A3-U7, A3-D10
 - **Effort:** M
 - **Depends on:** T57 (shows the existing-profile warning + merge choice)
+- **Status:** DONE in v0.14.0 (2026-11-14) — import shows a preview (profile, project, tag, version, contents, base health, dataset status) before anything lands; the CLI prints the preview before importing and has --preview.
 - **Problem:** One click imports. The user never sees what the
   package contains — profile, project, tag, version — before it
   lands. Pick the wrong folder and the first sign is a new profile
@@ -1959,6 +1965,7 @@ accounts for their findings.)
 - **Origin:** audit #3 T6
 - **Covers:** A3-W8, A3-G7, A3-D7
 - **Effort:** M
+- **Status:** DONE in v0.14.0 (2026-11-14) — export offers to copy the dataset into the package; a missing dataset on import gets a locate-and-repair box.
 - **Problem:** The dataset is never copied: `dataset_ref` is
   carried as a bare string (probed: no trace of the dataset file
   in the package tree). A project whose dataset is
@@ -2015,6 +2022,7 @@ accounts for their findings.)
 - **Origin:** audit #3 T8
 - **Covers:** A3-W12, A3-D15
 - **Effort:** S
+- **Status:** DONE in v0.14.0 (2026-11-14) — import warns when the base model is not installed on this machine and never blocks on it.
 - **Problem:** Probed: a package whose profile claims `ollama_tag:
   "not-a-real-model:99"` imports silently and the profile looks
   perfectly healthy — until training or Ollama use fails. A package
@@ -3912,6 +3920,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Covers:** A9-G7
 - **Effort:** S
 - **Library:** 008 Delight done right, 002 Spring physics
+- **Status:** DONE in v0.14.0 (2026-11-14) — the finish moment: a 250 ms gold glow when a job completes; reduced motion hides the card outright.
 - **Problem:** When a job ends, nothing marks the finish: a log line and a status-bar message, and the screen goes quiet.
 - **Fix:** A brief one-shot moment when a job completes: a gold glow on the job card plus a short summary line, under 300 ms, never looping, respecting the reduced-motion preset.
 - **Done:** A finished job shows the moment once, then rests.
@@ -3922,6 +3931,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Covers:** A9-G8
 - **Effort:** S
 - **Library:** 011 Skeleton screens
+- **Status:** DONE in v0.14.0 (2026-11-14) — loading skeletons (shimmer placeholders) instead of a dead screen while content loads.
 - **Problem:** The model list populates silently; with Ollama slow or down the user sees an empty combo and a note, with no "looking" state in between.
 - **Fix:** Skeleton rows in the model list while Ollama answers, paired with the real numbers when they arrive; the Ollama status refresh shows it is working.
 - **Done:** With Ollama slow, the picker shows skeleton rows, not an empty combo.
@@ -3932,6 +3942,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Covers:** A9-G9
 - **Effort:** S
 - **Library:** 015 Accessibility presets
+- **Status:** DONE in v0.14.0 (2026-11-14) — reduced-motion and larger-text presets in Settings; reduced motion covers the dip, the morph, and the finish moment (no spring animation exists in the app, so there is nothing else to disable).
 - **Problem:** No accessibility preset exists, and the redesign adds motion (R14, R16, R20) that needs an off switch.
 - **Fix:** One Settings section with two presets, in plain words: reduced motion and larger text. Reduced motion disables the dip, spring, morph, and finish moment but keeps every state change.
 - **Done:** With reduced motion on, no animation runs and everything still works.
@@ -3953,6 +3964,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Covers:** A9-U2 (part)
 - **Effort:** S
 - **Library:** 009 Shape morphing
+- **Status:** DONE in v0.14.0 (2026-11-14) — the job tile morphs into the running job (350 ms, interruptible, instant swap under reduced motion).
 - **Problem:** Picking a job and running it are two disconnected moments; the user picks in one place and the job appears in another.
 - **Fix:** The picked job tile morphs into the running-job card, under 400 ms, interruptible. The reduced-motion fallback is an instant swap.
 - **Done:** Picking a job visibly becomes the running card.

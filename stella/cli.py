@@ -126,7 +126,10 @@ def cmd_pc_info(args) -> int:
 
 def cmd_export(args) -> int:
     store = _store()
-    out = export_mod.export_project(store, args.profile, args.project, args.dir)
+    out = export_mod.export_project(
+        store, args.profile, args.project, args.dir,
+        bundle_dataset=getattr(args, "bundle_dataset", False),
+    )
     print(f"Exported to {out}")
     return 0
 
@@ -165,9 +168,25 @@ def cmd_import(args) -> int:
     on_conflict = None
     if choice is None and sys.stdin.isatty():
         on_conflict = _prompt_profile_merge
+    # The base-health check (T61): a direct list_models() is fine
+    # here — import is user-initiated, not a click — and an empty
+    # list (Ollama down) means "unknown", so no warning fires.
+    from .ollama import list_models
+
+    models = list_models()
+    # The preview (T58): the same summary the window shows,
+    # printed before anything is imported. --preview prints it
+    # and stops — nothing is imported.
+    summary = export_mod.preview_export(
+        store, args.dir, installed_models=models
+    )
+    print(export_mod.format_preview(summary))
+    if getattr(args, "preview", False):
+        return 0
     result = export_mod.import_export(
         store, args.dir,
         profile_choice=choice, on_profile_conflict=on_conflict,
+        installed_models=models,
     )
     print(f"Imported project {result['project']!r} into profile {result['profile']!r}")
     if result.get("profile_existed"):
@@ -711,10 +730,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_projects)
 
     p = _cmd("export", "export a project package",
-             "examples:\n  stella export lfm3-tool tool-calls ~/exports")
+             "examples:\n  stella export lfm3-tool tool-calls ~/exports\n"
+             "  stella export lfm3-tool tool-calls ~/exports "
+             "--bundle-dataset")
     p.add_argument("profile", help="profile name, e.g. lfm3-tool")
     p.add_argument("project", help="project name, e.g. tool-calls")
     p.add_argument("dir", help="folder to write the package into")
+    p.add_argument(
+        "--bundle-dataset", action="store_true",
+        help="copy the project's dataset file into the package, so "
+        "it trains on a PC that does not have the dataset.",
+    )
     p.set_defaults(func=cmd_export)
 
     p = _cmd("import", "import an export package",
@@ -728,6 +754,11 @@ def build_parser() -> argparse.ArgumentParser:
         "role or base differ: keep uses this profile's values, take "
         "uses the package's. Without this flag Stella asks, or keeps "
         "yours when it cannot ask.",
+    )
+    p.add_argument(
+        "--preview", action="store_true",
+        help="show what the package is and what it carries, and "
+        "import nothing.",
     )
     p.set_defaults(func=cmd_import)
 

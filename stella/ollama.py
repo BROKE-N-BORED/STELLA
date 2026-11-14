@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
 import urllib.error
 import urllib.request
 
@@ -30,18 +32,30 @@ def ollama_url() -> str:
     return os.environ.get("STELLA_OLLAMA_URL", DEFAULT_URL).rstrip("/")
 
 
-def list_models(url: str | None = None, timeout: float = TIMEOUT_SECONDS) -> list[str]:
-    """Return installed Ollama model tags, or [] if unreachable."""
+def _fetch_tags(url: str | None = None,
+                timeout: float = TIMEOUT_SECONDS) -> tuple[list, bool]:
+    """One /api/tags call. Returns (models, ok): models is the raw
+    list of model dicts (possibly empty), ok is True when the
+    server answered with a readable payload. A server that is up
+    with no models installed answers ([], True) — that is
+    different from down ([], False), and the cache needs the
+    difference. Never raises."""
     base = (url or ollama_url()).rstrip("/")
     try:
         req = urllib.request.Request(base + "/api/tags", method="GET")
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, OSError, ValueError, TimeoutError):
-        return []
+        return [], False
     models = payload.get("models") if isinstance(payload, dict) else None
     if not isinstance(models, list):
-        return []
+        return [], False
+    return models, True
+
+
+def list_models(url: str | None = None, timeout: float = TIMEOUT_SECONDS) -> list[str]:
+    """Return installed Ollama model tags, or [] if unreachable."""
+    models, _ok = _fetch_tags(url, timeout)
     names = []
     for entry in models:
         if isinstance(entry, dict) and isinstance(entry.get("name"), str):
@@ -54,16 +68,7 @@ def list_model_sizes(url: str | None = None,
     """Installed Ollama model tags with their size in bytes, or {}
     if unreachable. Same /api/tags call as list_models — the size
     is what the model picker shows in its fit verdict (T18)."""
-    base = (url or ollama_url()).rstrip("/")
-    try:
-        req = urllib.request.Request(base + "/api/tags", method="GET")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, OSError, ValueError, TimeoutError):
-        return {}
-    models = payload.get("models") if isinstance(payload, dict) else None
-    if not isinstance(models, list):
-        return {}
+    models, _ok = _fetch_tags(url, timeout)
     sizes = {}
     for entry in models:
         if not isinstance(entry, dict):
@@ -73,6 +78,156 @@ def list_model_sizes(url: str | None = None,
         if isinstance(name, str) and isinstance(size, int):
             sizes[name] = size
     return sizes
+
+
+class ModelListCache:
+    """The installed-model list, cached (T43).
+
+    One fetch feeds every combo fill and every tag check in the
+    window: reads never touch the network, refreshes happen only
+    on demand (startup, the Refresh button, the New Profile
+    dialog opening). A refresh is one /api/tags call that yields
+    both the names and the sizes. Thread-safe: refresh() runs on
+    a worker thread while the UI thread reads the snapshot.
+
+    Two races are closed here, not left to callers. Refreshes to
+    the same URL racing each other make one fetch between them
+    (the second waits for the first and takes its result);
+    refreshes to different URLs fetch concurrently. And a stale
+    refresh never overwrites a fresher one: each refresh takes a
+    ticket when it starts, and only a refresh whose ticket is at
+    least the newest completed one writes — so a slow fetch that
+    lands after a fast one is discarded, not stored.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._models: list[str] = []
+        self._sizes: dict[str, int] = {}
+        self._loaded = False
+        self._ollama_up = False
+        self._fetched_at = 0.0
+        self._in_flight: dict[str, threading.Event] = {}
+        self._ticket = 0
+        self._completed_ticket = 0
+
+    def snapshot(self) -> tuple[list[str], dict[str, int], bool, bool, float]:
+        """(models, sizes, loaded, ollama_up, fetched_at): the last
+        good list, or the empty list when nothing was ever fetched.
+        Never touches the network."""
+        with self._lock:
+            return (
+                list(self._models),
+                dict(self._sizes),
+                self._loaded,
+                self._ollama_up,
+                self._fetched_at,
+            )
+
+    def models(self) -> list[str]:
+        """The cached model tags, or [] when nothing was fetched."""
+        with self._lock:
+            return list(self._models)
+
+    def sizes(self) -> dict[str, int]:
+        """The cached model sizes, or {} when nothing was fetched."""
+        with self._lock:
+            return dict(self._sizes)
+
+    @property
+    def loaded(self) -> bool:
+        """True once any refresh (or seed) has landed."""
+        with self._lock:
+            return self._loaded
+
+    @property
+    def ollama_up(self) -> bool:
+        """True when the last refresh reached Ollama."""
+        with self._lock:
+            return self._ollama_up
+
+    def refresh(self, url: str | None = None,
+                timeout: float = TIMEOUT_SECONDS) -> tuple:
+        """Fetch the list now and store it. Returns the snapshot.
+        Always fetches (a refresh is a refresh) — except when
+        another thread is already refreshing the same URL, in
+        which case this waits for that fetch and returns its
+        result. A refresh that lands after a newer one started is
+        discarded (the ticket guard), never stored over it."""
+        url = (url or ollama_url()).rstrip("/")
+        with self._lock:
+            self._ticket += 1
+            ticket = self._ticket
+            event = self._in_flight.get(url)
+            if event is not None:
+                in_flight = True
+            else:
+                event = threading.Event()
+                self._in_flight[url] = event
+                in_flight = False
+        if in_flight:
+            # Bounded wait: the in-flight fetch cannot outlast its
+            # own timeout by much; a stale snapshot beats a hang.
+            event.wait(timeout + 5)
+            return self.snapshot()
+        try:
+            models, ok = _fetch_tags(url, timeout)
+            names = sorted(
+                entry["name"]
+                for entry in models
+                if isinstance(entry, dict)
+                and isinstance(entry.get("name"), str)
+            )
+            sizes = {
+                entry["name"]: entry["size"]
+                for entry in models
+                if isinstance(entry, dict)
+                and isinstance(entry.get("name"), str)
+                and isinstance(entry.get("size"), int)
+            }
+            with self._lock:
+                if ticket >= self._completed_ticket:
+                    self._models = names
+                    self._sizes = sizes
+                    self._loaded = True
+                    self._ollama_up = ok
+                    self._fetched_at = time.monotonic()
+                    self._completed_ticket = ticket
+        finally:
+            with self._lock:
+                if self._in_flight.get(url) is event:
+                    del self._in_flight[url]
+            event.set()
+        return self.snapshot()
+
+    def set_snapshot(self, models, sizes=None, ollama_up: bool = True):
+        """Set the cached list outright. Tests seed the cache this
+        way; refresh() sets it from a real fetch. The seed counts
+        as the newest write, so a refresh that started before it
+        cannot overwrite it when it lands."""
+        with self._lock:
+            self._models = list(models)
+            self._sizes = dict(sizes or {})
+            self._loaded = True
+            self._ollama_up = ollama_up
+            self._fetched_at = time.monotonic()
+            self._completed_ticket = self._ticket
+
+    def reset(self):
+        """Drop the cached list (tests). A refresh that started
+        before the reset cannot refill it when it lands."""
+        with self._lock:
+            self._models = []
+            self._sizes = {}
+            self._loaded = False
+            self._ollama_up = False
+            self._fetched_at = 0.0
+            self._completed_ticket = self._ticket
+
+
+# The one cache the window reads (T43): every combo fill and tag
+# check serves from here, and only a refresh ever fetches.
+MODEL_CACHE = ModelListCache()
 
 
 def reachable(url: str | None = None, timeout: float = TIMEOUT_SECONDS) -> bool:

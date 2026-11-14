@@ -217,6 +217,49 @@ def apply_stella_style(app) -> None:
     app.setStyleSheet(STELLA_STYLESHEET)
 
 
+# The reduced-motion flag (T145/T149): when set, the finish
+# moment and the job-picker morph are plain instant swaps, and
+# the press dip does not run. T147 wires this flag to the
+# Settings "Ease of use" preset; until then it defaults off.
+_REDUCED_MOTION = False
+
+
+def set_reduced_motion(value: bool) -> None:
+    """Set the reduced-motion flag (T147's preset writes it)."""
+    global _REDUCED_MOTION
+    _REDUCED_MOTION = bool(value)
+
+
+def reduced_motion() -> bool:
+    """True when reduced motion is on."""
+    return _REDUCED_MOTION
+
+
+# The app font before any text-size preset (T147): captured on
+# the first apply_text_size call, so the preset is idempotent —
+# turning larger text on twice never grows the font twice.
+_BASE_FONT = None
+
+
+def apply_text_size(app, larger: bool) -> None:
+    """Larger text (T147): the app font grows by 3 points, or
+    returns to the default. The default family is kept; widgets
+    with explicit px sizes stay as they are (they are already
+    large)."""
+    global _BASE_FONT
+    if _BASE_FONT is None:
+        _BASE_FONT = app.font()
+    from PySide6.QtGui import QFont
+
+    font = QFont(_BASE_FONT)
+    if larger:
+        if _BASE_FONT.pointSize() > 0:
+            font.setPointSize(_BASE_FONT.pointSize() + 3)
+        else:
+            font.setPixelSize(_BASE_FONT.pixelSize() + 4)
+    app.setFont(font)
+
+
 class PressDipFilter:
     """Button press dip (entry 001): scale to 0.97 over 150 ms.
 
@@ -259,6 +302,8 @@ class PressDipFilter:
         return _Filter()
 
     def _dip(self, button):
+        if reduced_motion():
+            return  # the Less motion preset (T147): no dip
         if button in self._animations:
             return  # already dipping; one dip per press
         rect = button.geometry()

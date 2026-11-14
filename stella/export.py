@@ -12,6 +12,9 @@ An export is a folder:
       probe_results.json  # refusal-probe before/after, if run
       sleep/            # sleep cycles (adapters, manifest, replay
                         # reports), if any were run (Item 4)
+      dataset/          # the training data file, when the export
+                        # bundled it in (T59) — otherwise the
+                        # package only names the dataset ref
 
 The manifest is the one source of truth for the settings (T60):
 v0.1–v0.12 exports also carried a config.json copy of the settings,
@@ -90,13 +93,25 @@ def _metamorph_block(proj: dict) -> dict:
     return {"mode": metamorph_mode(proj), "notes": notes}
 
 
-def export_project(store: Store, profile: str, project: str, dest: str | Path) -> Path:
+def export_project(
+    store: Store, profile: str, project: str, dest: str | Path,
+    bundle_dataset: bool = False,
+) -> Path:
     """Export a project to <dest>/<project>-stella-export/. Returns the dir.
 
     The package is built in a staging dir next to the target and
     moved into place only when every file is written (T38): a
     failure anywhere leaves no partial package behind, and a retry
     never trips over "export folder already exists".
+
+    With `bundle_dataset` (T59), the project's dataset file is
+    copied into the package as `dataset/<filename>` and the
+    manifest records it — the package trains anywhere, without
+    the other PC needing its own copy. A dataset ref that does
+    not resolve on this PC fails the export outright: a bundle
+    that silently shipped reference-only would be a lie. With no
+    dataset ref there is nothing to bundle, and the flag is a
+    no-op.
     """
     prof = store.get_profile(profile)
     proj = store.get_project(profile, project)
@@ -111,7 +126,10 @@ def export_project(store: Store, profile: str, project: str, dest: str | Path) -
         tempfile.mkdtemp(prefix=out.name + ".staging-", dir=str(dest))
     )
     try:
-        _build_package(store, profile, project, prof, proj, staging)
+        _build_package(
+            store, profile, project, prof, proj, staging,
+            bundle_dataset=bundle_dataset,
+        )
         staging.replace(out)
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
@@ -119,8 +137,32 @@ def export_project(store: Store, profile: str, project: str, dest: str | Path) -
     return out
 
 
-def _build_package(store, profile, project, prof, proj, out: Path) -> None:
+def _build_package(
+    store, profile, project, prof, proj, out: Path,
+    bundle_dataset: bool = False,
+) -> None:
     """Write every package file into `out` (the staging dir)."""
+    # The bundled dataset (T59): resolve the ref and copy the file
+    # in before the manifest is written, so the manifest can
+    # record the bundled filename.
+    dataset_bundled = ""
+    if bundle_dataset:
+        ref = proj.get("dataset_ref", "")
+        if ref:
+            from .train import resolve_dataset_ref
+
+            try:
+                dataset_path = resolve_dataset_ref(
+                    store, profile, project, ref
+                )
+            except StellaError as exc:
+                raise StellaError(
+                    f"cannot bundle the dataset: {exc}"
+                ) from exc
+            dataset_dir = out / "dataset"
+            dataset_dir.mkdir()
+            shutil.copy2(dataset_path, dataset_dir / dataset_path.name)
+            dataset_bundled = dataset_path.name
     manifest = {
         "stella_version": STELLA_VERSION,
         "format": FORMAT_VERSION,
@@ -144,6 +186,8 @@ def _build_package(store, profile, project, prof, proj, out: Path) -> None:
             "status": proj.get("status", "draft"),
         },
     }
+    if dataset_bundled:
+        manifest["project"]["dataset_bundled"] = dataset_bundled
     (out / "manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
@@ -151,12 +195,18 @@ def _build_package(store, profile, project, prof, proj, out: Path) -> None:
     # and nothing ever read the copy. Never require a file you
     # never read.
     role = prof.get("role") or "no role set"
+    dataset_line = f"Dataset: {proj.get('dataset_ref') or 'not set'}.\n"
+    if dataset_bundled:
+        dataset_line += (
+            f"Dataset bundled: {dataset_bundled} (copied into this "
+            "package, in the dataset folder).\n"
+        )
     (out / "README.md").write_text(
         f"# {proj.get('display_name', proj['name'])}: Stella export\n\n"
         f"Fine-tune of profile **{prof.get('display_name', prof['name'])}** "
         f"(role: {role}, base: {prof.get('ollama_tag') or prof.get('base_ref') or 'not set'}).\n\n"
         f"MetaMorphAi mode: **{manifest['project']['metamorph'].get('mode', 'morph')}**.\n"
-        f"Dataset: {proj.get('dataset_ref') or 'not set'}.\n"
+        f"{dataset_line}"
         f"Status: {proj.get('status', 'draft')}.\n\n"
         "## Contents\n\n"
         "- `manifest.json`: the full profile + project record, "
@@ -166,7 +216,14 @@ def _build_package(store, profile, project, prof, proj, out: Path) -> None:
         "- `probe_results.json`: the refusal-probe result, if the "
         "probe ran.\n"
         "- `sleep/`: sleep cycles (adapters, manifest, replay "
-        "reports), if any were run.\n\n"
+        "reports), if any were run.\n"
+        + (
+            "- `dataset/`: the training data, copied in with the "
+            "package.\n"
+            if dataset_bundled
+            else ""
+        )
+        + "\n"
         "Import back into Stella with: `stella import <this folder>`\n"
         "or the Import button in the Stella window.\n",
         encoding="utf-8",
@@ -303,7 +360,7 @@ def verify_export(path: str | Path) -> dict:
         _check_field(prof, key, "str", "profile")
     _check_field(prof, "config", "dict", "profile")
     _check_field(prof, "dependencies", "str-list", "profile")
-    for key in ("display_name", "dataset_ref"):
+    for key in ("display_name", "dataset_ref", "dataset_bundled"):
         _check_field(proj, key, "str", "project")
     _check_field(proj, "settings", "dict", "project")
     metamorph = proj.get("metamorph")
@@ -415,11 +472,182 @@ def describe_profile_diff(diff: dict) -> str:
     return f"{words[0]}, {words[1]} and {words[2]}"
 
 
+def preview_export(
+    store: Store, path: str | Path,
+    installed_models: list[str] | None = None,
+) -> dict:
+    """Summarize an export package WITHOUT importing it (T58):
+    what it is, what it carries, and what would change here.
+    Raises StellaError on a bad package, like verify_export.
+    Returns a dict:
+
+      profile, project: the slugs (normalized, as import stores)
+      profile_display, project_display: the display names
+      tag, role, base: the profile block from the manifest
+      stella_version: the Stella that wrote the package
+      status: the project status in the manifest
+      weights: True when the package carries real weights
+      checkpoints: how many checkpoint entries it carries
+      probe, sleep: True when probe results / sleep cycles are in
+      dataset_ref, dataset_bundled: the manifest's dataset fields
+      dataset_status: "bundled" (the file travels with the
+        package), "present" (the ref resolves on this PC),
+        "missing" (the ref is set and not here), "none" (no ref)
+      profile_existed: the profile is already in this home
+      profile_diff: the T57 diff shape, {} when the blocks agree
+      base_installed: True/False when the caller passed an
+        installed list and the tag is (not) on it; None when
+        unknown (no list, or no tag to check)
+    """
+    path = Path(path).expanduser()
+    manifest = verify_export(path)
+    prof = manifest["profile"]
+    proj = manifest["project"]
+    slug = validate_slug(prof["name"], "profile name in export")
+    project_slug = validate_slug(proj["name"], "project name in export")
+    ckpt_dir = path / "checkpoints"
+    checkpoints = (
+        len(list(ckpt_dir.iterdir())) if ckpt_dir.is_dir() else 0
+    )
+    try:
+        local_block = store.get_profile(slug)
+        profile_existed = True
+    except StellaError:
+        local_block = None
+        profile_existed = False
+    profile_diff = (
+        compare_profile_block(local_block, prof)
+        if profile_existed
+        else {}
+    )
+    # The dataset status (T59): bundled beats present beats
+    # missing — a bundled file travels with the package, so the
+    # ref never needs resolving.
+    dataset_ref = proj.get("dataset_ref", "")
+    dataset_bundled = proj.get("dataset_bundled", "")
+    bundled_present = bool(
+        dataset_bundled
+        and dataset_bundled == Path(dataset_bundled).name
+        and (path / "dataset" / dataset_bundled).is_file()
+    )
+    if bundled_present:
+        dataset_status = "bundled"
+    elif not dataset_ref:
+        dataset_status = "none"
+    else:
+        from .train import resolve_dataset_ref
+
+        try:
+            resolve_dataset_ref(store, slug, project_slug, dataset_ref)
+        except StellaError:
+            dataset_status = "missing"
+        else:
+            dataset_status = "present"
+    # The base health (T61): an empty list means "unknown", like
+    # import — no warning fires on a guess.
+    tag = prof.get("ollama_tag", "")
+    base_installed = None
+    if tag and installed_models:
+        base_installed = tag in installed_models
+    return {
+        "profile": slug,
+        "project": project_slug,
+        "profile_display": prof.get("display_name", slug),
+        "project_display": proj.get("display_name", project_slug),
+        "tag": tag,
+        "role": prof.get("role", ""),
+        "base": prof.get("base_ref", ""),
+        "stella_version": manifest.get("stella_version", ""),
+        "status": proj.get("status", "draft"),
+        "weights": bool(_package_weights(path)),
+        "checkpoints": checkpoints,
+        "probe": (path / "probe_results.json").is_file(),
+        "sleep": (path / "sleep").is_dir(),
+        "dataset_ref": dataset_ref,
+        "dataset_bundled": dataset_bundled,
+        "dataset_status": dataset_status,
+        "profile_existed": profile_existed,
+        "profile_diff": profile_diff,
+        "base_installed": base_installed,
+    }
+
+
+def format_preview(summary: dict) -> str:
+    """The preview summary in plain words (T58), one line per
+    fact — shared by the import dialog and the CLI, so both show
+    the same thing."""
+    lines = [
+        f"Profile {summary['profile']}, project {summary['project']}.",
+    ]
+    tag = summary.get("tag") or summary.get("base") or ""
+    if tag:
+        lines.append(f"Base model: {tag}.")
+    version = summary.get("stella_version")
+    if version:
+        lines.append(f"Made with Stella {version}.")
+    lines.append(f"Status: {summary.get('status', 'draft')}.")
+    parts = []
+    if summary["weights"]:
+        parts.append("the trained weights")
+    if summary["checkpoints"]:
+        n = summary["checkpoints"]
+        parts.append(f"{n} checkpoint{'s' if n != 1 else ''}")
+    if summary["probe"]:
+        parts.append("probe results")
+    if summary["sleep"]:
+        parts.append("sleep cycles")
+    if parts:
+        lines.append("Inside: " + ", ".join(parts) + ".")
+    else:
+        lines.append("Inside: the project record only.")
+    status = summary.get("dataset_status", "none")
+    if status == "bundled":
+        lines.append(
+            f"Dataset: {summary['dataset_bundled']} (copied in with "
+            "the package)."
+        )
+    elif status == "present":
+        lines.append(f"Dataset: {summary['dataset_ref']} (on this PC).")
+    elif status == "missing":
+        lines.append(
+            f"Dataset: {summary['dataset_ref']} (not on this PC)."
+        )
+    if summary.get("profile_existed"):
+        diff = summary.get("profile_diff") or {}
+        if diff:
+            lines.append(
+                f"The profile {summary['profile']!r} is already here, "
+                f"but the package's {describe_profile_diff(diff)} "
+                f"{'differs' if len(diff) == 1 else 'differ'}:"
+            )
+            for field in PROFILE_BLOCK_FIELDS:
+                if field not in diff:
+                    continue
+                word = PROFILE_FIELD_WORDS[field]
+                local = diff[field]["local"] or "(blank)"
+                package = diff[field]["package"] or "(blank)"
+                lines.append(
+                    f"  {word}: yours is {local!r}, the package has "
+                    f"{package!r}."
+                )
+        else:
+            lines.append(
+                f"The profile {summary['profile']!r} is already here."
+            )
+    if summary.get("base_installed") is False:
+        lines.append(
+            f"The base model {summary.get('tag')!r} is not installed "
+            "on this PC. Pull it before training."
+        )
+    return "\n".join(lines)
+
+
 def import_export(
     store: Store,
     path: str | Path,
     profile_choice: str | None = None,
     on_profile_conflict=None,
+    installed_models: list[str] | None = None,
 ) -> dict:
     """Import a verified export package into this home.
 
@@ -453,6 +681,23 @@ def import_export(
     validated before anything is created; and if any step still
     fails, the profile/project just created are removed again — a
     failed import leaves the home exactly as it was.
+
+    The base health check (T61): when the caller passes the
+    installed-model list (`installed_models`), a profile tag that
+    is not on it warns, naming the tag — a package arriving from
+    another machine is exactly when the base is most likely to be
+    missing. The warning never blocks the import. An empty list
+    (or none) means "unknown" — Ollama down, or no list given —
+    so no warning fires on a guess.
+
+    The dataset (T59): a bundled dataset is copied into the new
+    project dir and the ref becomes its filename, so the imported
+    project trains as-is. An unbundled ref that does not resolve
+    on this PC warns and sets `dataset_missing` in the result, so
+    the caller can offer to find the file. The result always
+    carries `dataset_ref` (the ref as imported) and
+    `dataset_missing` (False when the dataset is present or
+    bundled, or when the project has no dataset).
     """
     if profile_choice is not None and profile_choice not in ("keep", "take"):
         raise StellaError(
@@ -485,6 +730,18 @@ def import_export(
             "Train it first, then export again."
         )
         status = "draft"
+    # Base health (T61): the tag is checked against the installed
+    # list the caller passed (the cached list in the window, a
+    # direct list_models() on the CLI). A missing tag warns and
+    # never blocks; an empty list means "unknown", so no warning
+    # fires on a guess.
+    if installed_models:
+        tag = prof.get("ollama_tag", "")
+        if tag and tag not in installed_models:
+            warnings.append(
+                f"the base model {tag!r} is not installed on this "
+                "PC. Pull it before training."
+            )
     try:
         store.get_profile(slug)
         profile_existed = True
@@ -561,6 +818,44 @@ def import_export(
         if status != "draft":
             store.update_project(slug, project_slug, status=status)
             created = store.get_project(slug, project_slug)
+        # The dataset (T59): a bundled dataset lands in the project
+        # dir and the ref becomes its filename — it resolves via the
+        # project dir, so the imported project trains as-is. The
+        # bundled name is trusted only as a plain filename: a
+        # hand-edited manifest claiming "../x" is ignored, never
+        # copied outside the project dir. An unbundled ref that is
+        # not on this PC warns and is reported, so the caller can
+        # offer to find the file.
+        dataset_ref = proj.get("dataset_ref", "")
+        dataset_missing = False
+        bundled = proj.get("dataset_bundled", "")
+        bundled_src = None
+        if (
+            bundled
+            and bundled == Path(bundled).name
+            and bundled not in (".", "..")
+        ):
+            candidate = path / "dataset" / bundled
+            if candidate.is_file():
+                bundled_src = candidate
+        if bundled_src is not None:
+            shutil.copy2(
+                bundled_src,
+                store.project_dir(slug, project_slug) / bundled,
+            )
+            dataset_ref = bundled
+            store.update_project(slug, project_slug, dataset_ref=bundled)
+        elif dataset_ref:
+            from .train import resolve_dataset_ref
+
+            try:
+                resolve_dataset_ref(store, slug, project_slug, dataset_ref)
+            except StellaError:
+                dataset_missing = True
+                warnings.append(
+                    f"the dataset {dataset_ref!r} is not on this PC. "
+                    "Find the file before training."
+                )
         # The trained adapter comes back (T41): the package's
         # weights/ land in the project's adapter/ dir, minus the
         # placeholder note — the payload the program exists to
@@ -629,5 +924,7 @@ def import_export(
         "profile_diff": profile_diff,
         "profile_choice": choice,
         "project": created["name"],
+        "dataset_ref": dataset_ref,
+        "dataset_missing": dataset_missing,
         "warnings": warnings,
     }

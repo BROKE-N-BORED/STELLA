@@ -13,6 +13,7 @@ import pytest
 from stella.model import StellaError
 from stella.train import (
     TrainController,
+    check_dataset,
     check_ram_fit,
     detect_target_modules,
     estimate_training_bytes,
@@ -163,6 +164,57 @@ def test_load_dataset_too_small(tmp_path):
 def test_load_dataset_missing_file(tmp_path):
     with pytest.raises(StellaError, match="not found"):
         load_dataset(tmp_path / "nope.jsonl")
+
+
+# -- T45: the dataset check for display -----------------------------
+
+
+def test_check_dataset_ok_counts_split_and_previews(seeded, tmp_path):
+    path = write_dataset(tmp_path / "d.jsonl", message_rows(10))
+    check = check_dataset(seeded, "lfm3-tool", "tool-calls", str(path))
+    assert check["status"] == "ok"
+    assert check["count"] == 10
+    assert check["train"] == 9
+    assert check["val"] == 1
+    assert check["format"] == "messages"
+    assert check["preview"] == ["Question 0?", "Question 1?", "Question 2?"]
+    assert check["error"] is None
+    assert check["path"] == str(path)
+
+
+def test_check_dataset_missing_names_the_ref(seeded):
+    check = check_dataset(
+        seeded, "lfm3-tool", "tool-calls", "/no/such/place/data.jsonl"
+    )
+    assert check["status"] == "missing"
+    assert "not found" in check["error"]
+    assert check["count"] == 0
+
+
+def test_check_dataset_malformed_names_the_line(seeded, tmp_path):
+    path = tmp_path / "d.jsonl"
+    path.write_text(
+        '{"prompt": "a", "completion": "b"}\nnot json\n',
+        encoding="utf-8",
+    )
+    check = check_dataset(seeded, "lfm3-tool", "tool-calls", str(path))
+    assert check["status"] == "invalid"
+    assert "line 2" in check["error"]
+
+
+def test_check_dataset_unset_and_sample(seeded):
+    assert check_dataset(
+        seeded, "lfm3-tool", "tool-calls", ""
+    )["status"] == "unset"
+    assert check_dataset(
+        seeded, "lfm3-tool", "tool-calls", "  "
+    )["status"] == "unset"
+    # The bundled sample resolves and validates.
+    check = check_dataset(
+        seeded, "lfm3-tool", "tool-calls", "sample-tool-calls.jsonl"
+    )
+    assert check["status"] == "ok"
+    assert check["count"] == 20
 
 
 def test_sample_dataset_validates():

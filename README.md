@@ -102,6 +102,14 @@ job, export it as a usable package.
   exported). The CLI explains every flag with a worked
   example, and training reports cheap mistakes before the
   dependency gate.
+- v0.14.0 models + UI polish (2026-11-14): the model list is
+  cached and fetched off the UI thread, so clicks never wait
+  on Ollama; imports show a preview first and warn when the
+  base model is not installed; datasets are validated where
+  they are picked; export offers to bundle the dataset; the
+  Train panel resets per project and stays with the running
+  one; and the window gets a finish moment, loading states,
+  a job morph, and reduced-motion and larger-text presets.
 
 ## Install
 

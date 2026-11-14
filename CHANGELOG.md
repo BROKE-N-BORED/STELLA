@@ -1,5 +1,70 @@
 # Changelog
 
+## v0.14.0 — 2026-11-14
+
+The models + UI-polish slice (audit tasks T43, T45, T47, T49, T50,
+T58, T59, T61, T145, T146, T147, T149): the model list is cached
+and fetched off the UI thread, imports show a preview first and
+check the base model, datasets are validated where they are
+picked, and the window gets a finish moment, loading states, a
+job morph, and accessibility presets.
+
+- T43 — the Ollama model list is cached and fetched off the UI
+  thread: one fetch at startup, none on any click, and a Refresh
+  button (plus a refresh when the New Profile dialog opens) for
+  the rest. The window keeps showing the last good list while a
+  refresh is in flight, and a hung Ollama never blocks a click.
+- T61 — base-health check on import: a package whose profile
+  tag is not installed on this PC warns (naming the tag) instead
+  of importing silently and failing later. The check uses the
+  cached model list (T43); it never blocks the import.
+- T45 — dataset picker + validation: the Project window has a
+  Browse button next to the Dataset field, and the field now
+  explains itself: a valid file shows its example count, the
+  train/check split, and a 3-example preview; a missing file
+  warns ("Dataset not found. Is the path right?") without
+  blocking the save; a malformed file names the bad line. The
+  Train panel's dataset pick reports the same check.
+- T47 — the Train panel resets per project and stays pinned to
+  the running project: switching projects resets the progress
+  bar as well as the loss line, the no-selection state shows an
+  empty bar, and switching mid-run leaves the panel on the
+  running project (naming it) instead of mixing panels.
+- T49 — the missing-training-packages hint is a warning dialog
+  now, not a line in the below-fold Train log: on a first run
+  without the training stack, the fix is visible without hunting.
+- T50 — confirmations survive their refresh: the training-done
+  and sleep-done messages are said after the refresh that used
+  to overwrite them, so "Trained N steps." is still in the
+  status bar after the lists settle (import already did this).
+- T59 — the dataset is part of the package decision: export
+  offers to copy the dataset in (with its size shown) or keep
+  the reference; a bundled dataset is used on import; an
+  unbundled reference that is missing on this PC warns and
+  offers to locate the file here.
+- T58 — import preview dialog: before anything lands, the
+  window shows the package's profile, project, tag, version,
+  and contents, with the existing-profile warning (T57's
+  compare) and the base-health and dataset status, and the
+  user confirms or cancels. Cancel imports nothing. The CLI
+  prints the same summary before importing, and --preview
+  prints it without importing.
+- T145 — the finish moment: when a job completes, the job card
+  glows gold once with a short summary line, under 300 ms,
+  never looping. The reduced-motion preset skips the glow.
+- T146 — loading states, never a dead screen: the model list
+  shows skeleton rows while Ollama answers, replaced by the
+  real rows (with fit verdicts) when they arrive; the Ollama
+  status refresh shows it is working.
+- T149 — the job picker becomes the job: the picked job tile
+  morphs into the running-job card, under 400 ms, and the
+  morph stops cleanly if the job is cancelled. Reduced motion
+  swaps instantly instead.
+- T147 — accessibility presets in Settings: reduced motion
+  (turns off the press dip, the job morph, and the finish
+  moment, and keeps every state change) and larger text (bigger
+  words everywhere), both in plain words and remembered.
+
 ## v0.13.0 — 2026-11-14
 
 The export/import + projects slice (audit #3/#8 tasks T23, T29,

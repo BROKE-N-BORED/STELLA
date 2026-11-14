@@ -750,3 +750,107 @@ def test_cli_prompt_profile_merge(monkeypatch, capsys):
     assert cli_mod._prompt_profile_merge("p1", diff) == "keep"
     out = capsys.readouterr().out
     assert "yours is 'y:2b'" in out
+
+
+# -- T61: base-health check on import --------------------------------
+
+
+def test_cli_import_warns_on_uninstalled_base_tag(
+    tmp_path, monkeypatch, capsys
+):
+    """T61: the CLI import warns (naming the tag) when the
+    package's tag is not installed on this PC."""
+    import argparse
+
+    from stella import cli as cli_mod
+    from stella import export as export_mod
+    from stella.model import Store
+
+    src = Store(tmp_path / "src-home")
+    src.create_profile("p1", ollama_tag="x:1b", role="fast")
+    src.create_project("p1", "proj")
+    pkg = export_mod.export_project(src, "p1", "proj", tmp_path)
+    home2 = tmp_path / "home2"
+    monkeypatch.setenv("STELLA_HOME", str(home2))
+    monkeypatch.setattr(
+        "stella.ollama.list_models", lambda: ["other:2b"]
+    )
+    args = argparse.Namespace(dir=str(pkg), profile_merge=None)
+    assert cli_mod.cmd_import(args) == 0
+    out = capsys.readouterr().out
+    assert "Warning:" in out
+    assert "x:1b" in out
+    assert "not installed" in out
+
+
+# -- T59: the dataset is part of the package decision ----------------
+
+
+def test_cli_export_bundle_dataset(tmp_path):
+    """T59: --bundle-dataset copies the dataset into the package."""
+    from stella.model import Store
+
+    home = tmp_path / "home"
+    store = Store(home)
+    store.create_profile("p1", ollama_tag="x:1b", role="fast")
+    store.create_project("p1", "proj")
+    data = tmp_path / "data.jsonl"
+    data.write_text(
+        '{"prompt": "a", "completion": "b"}\n', encoding="utf-8"
+    )
+    store.update_project("p1", "proj", dataset_ref=str(data))
+    res = run_cli(
+        home, "export", "p1", "proj", str(tmp_path / "exports"),
+        "--bundle-dataset",
+    )
+    assert res.returncode == 0
+    pkg = tmp_path / "exports" / "proj-stella-export"
+    assert (pkg / "dataset" / "data.jsonl").is_file()
+
+
+def test_cli_import_warns_on_missing_dataset(tmp_path):
+    """T59: the CLI import prints the missing-dataset warning."""
+    from stella import export as export_mod
+    from stella.model import Store
+
+    src = Store(tmp_path / "src-home")
+    src.create_profile("p1", ollama_tag="x:1b", role="fast")
+    src.create_project("p1", "proj", dataset_ref="gone.jsonl")
+    pkg = export_mod.export_project(src, "p1", "proj", tmp_path)
+    res = run_cli(tmp_path / "home2", "import", str(pkg))
+    assert res.returncode == 0
+    assert "Warning:" in res.stdout
+    assert "gone.jsonl" in res.stdout
+    assert "not on this PC" in res.stdout
+
+
+# -- T58: the import preview ------------------------------------------
+
+
+def test_cli_import_preview_prints_and_imports_nothing(tmp_path):
+    """T58: --preview prints the summary and imports nothing."""
+    from stella.model import Store
+
+    pkg = _cli_package(tmp_path / "home1", tmp_path)
+    home2 = tmp_path / "home2"
+    res = run_cli(home2, "import", str(pkg), "--preview")
+    assert res.returncode == 0
+    assert "Profile p1, project proj." in res.stdout
+    assert "Base model: x:1b." in res.stdout
+    assert "Made with Stella" in res.stdout
+    assert "Imported project" not in res.stdout
+    store2 = Store(home2)
+    with pytest.raises(Exception):
+        store2.get_project("p1", "proj")
+
+
+def test_cli_import_prints_summary_before_importing(tmp_path):
+    """T58: a plain CLI import prints the preview summary first."""
+    pkg = _cli_package(tmp_path / "home1", tmp_path)
+    home2 = tmp_path / "home2"
+    res = run_cli(home2, "import", str(pkg))
+    assert res.returncode == 0
+    assert "Profile p1, project proj." in res.stdout
+    assert "Imported project 'proj'" in res.stdout
+    # The summary comes before the import confirmation.
+    assert res.stdout.index("Profile p1") < res.stdout.index("Imported")

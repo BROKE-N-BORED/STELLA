@@ -7,6 +7,17 @@ from stella import export as export_mod
 from stella.model import StellaError, Store
 
 
+def _only_dataset_warning(result):
+    """The seeded project's dataset (forge-traces.jsonl) is not on
+    the fresh machine, so every import of it warns once (T59).
+    Tests about other things assert that warning is the only one."""
+    assert len(result["warnings"]) == 1
+    assert "forge-traces.jsonl" in result["warnings"][0]
+    assert "not on this PC" in result["warnings"][0]
+    assert result["dataset_missing"] is True
+    assert result["dataset_ref"] == "forge-traces.jsonl"
+
+
 def test_export_structure(seeded, tmp_path):
     out = export_mod.export_project(seeded, "lfm3-tool", "tool-calls", tmp_path)
     assert out.name == "tool-calls-stella-export"
@@ -75,9 +86,16 @@ def test_round_trip_into_fresh_home(seeded, tmp_path):
     out = export_mod.export_project(seeded, "lfm3-tool", "tool-calls", tmp_path)
     fresh = Store(tmp_path / "fresh-home")
     result = export_mod.import_export(fresh, out)
+    # T59: the seeded project's dataset is not on the fresh
+    # machine, so the import warns about it and reports it.
     assert result == {"profile": "lfm3-tool", "profile_existed": False,
                       "profile_diff": {}, "profile_choice": None,
-                      "project": "tool-calls", "warnings": []}
+                      "project": "tool-calls",
+                      "dataset_ref": "forge-traces.jsonl",
+                      "dataset_missing": True,
+                      "warnings": ["the dataset 'forge-traces.jsonl' "
+                                   "is not on this PC. Find the file "
+                                   "before training."]}
     prof = fresh.get_profile("lfm3-tool")
     assert prof["ollama_tag"] == "lfm3:1.7b"
     assert prof["role"] == "fast"
@@ -323,7 +341,10 @@ def test_import_normalizes_uppercase_names(seeded, tmp_path):
         "profile_diff": {},
         "profile_choice": None,
         "project": "zebra-proj",
-        "warnings": [],
+        "dataset_ref": "forge-traces.jsonl",
+        "dataset_missing": True,
+        "warnings": ["the dataset 'forge-traces.jsonl' is not on "
+                     "this PC. Find the file before training."],
     }
     assert fresh.get_profile("zebra-prof")["name"] == "zebra-prof"
     assert fresh.get_project("zebra-prof", "zebra-proj")["name"] == "zebra-proj"
@@ -447,7 +468,7 @@ def test_weights_round_trip_byte_identical(seeded, tmp_path):
     assert (out / "weights" / "adapter_model.safetensors").is_file()
     fresh = Store(tmp_path / "fresh-home")
     result = export_mod.import_export(fresh, out)
-    assert result["warnings"] == []
+    _only_dataset_warning(result)
     adapter = fresh.project_dir("lfm3-tool", "tool-calls") / "adapter"
     assert (adapter / "adapter_model.safetensors").read_bytes() == (
         b"fake-adapter-bytes"
@@ -492,9 +513,10 @@ def test_weightless_done_package_imports_as_draft(seeded, tmp_path):
     fresh = Store(tmp_path / "fresh-home")
     result = export_mod.import_export(fresh, out)
     assert fresh.get_project("lfm3-tool", "tool-calls")["status"] == "draft"
-    assert len(result["warnings"]) == 1
+    assert len(result["warnings"]) == 2
     assert "no trained weights" in result["warnings"][0]
     assert "draft" in result["warnings"][0]
+    assert "forge-traces.jsonl" in result["warnings"][1]
 
 
 def test_weightless_exported_package_imports_as_draft(seeded, tmp_path):
@@ -512,7 +534,7 @@ def test_placeholder_note_is_not_copied_as_a_weight(seeded, tmp_path):
     out = export_mod.export_project(seeded, "lfm3-tool", "tool-calls", tmp_path)
     fresh = Store(tmp_path / "fresh-home")
     result = export_mod.import_export(fresh, out)
-    assert result["warnings"] == []
+    _only_dataset_warning(result)
     pdir = fresh.project_dir("lfm3-tool", "tool-calls")
     assert not (pdir / "adapter").exists()
     assert fresh.get_project("lfm3-tool", "tool-calls")["status"] == "draft"
@@ -552,7 +574,9 @@ def test_import_identical_profile_block_is_silent(seeded, tmp_path):
     assert result["profile_existed"] is True
     assert result["profile_diff"] == {}
     assert result["profile_choice"] is None
-    assert result["warnings"] == []
+    # The profile merge was silent; the only warning is the
+    # dataset's (T59).
+    _only_dataset_warning(result)
     prof = home.get_profile("lfm3-tool")
     assert (prof["ollama_tag"], prof["role"]) == ("lfm3:1.7b", "fast")
 
@@ -574,9 +598,10 @@ def test_import_differing_profile_keeps_local_by_default(
         "base_ref": {"local": "other:9b", "package": "lfm3:1.7b"},
     }
     assert result["profile_choice"] == "keep"
-    assert len(result["warnings"]) == 1
+    assert len(result["warnings"]) == 2
     assert "tag, role and base" in result["warnings"][0]
     assert "kept" in result["warnings"][0]
+    assert "forge-traces.jsonl" in result["warnings"][1]
     prof = home.get_profile("lfm3-tool")
     assert (prof["ollama_tag"], prof["role"]) == ("other:9b", "driver")
 
@@ -589,7 +614,7 @@ def test_import_differing_profile_takes_package_when_chosen(
                               base="other/weights")
     result = export_mod.import_export(home, out, profile_choice="take")
     assert result["profile_choice"] == "take"
-    assert result["warnings"] == []
+    _only_dataset_warning(result)
     prof = home.get_profile("lfm3-tool")
     # The package's block exactly: its base follows its own tag.
     assert (prof["ollama_tag"], prof["role"], prof["base_ref"]) == (
@@ -603,8 +628,9 @@ def test_import_differing_profile_keeps_local_when_chosen(
     home = _home_with_profile(tmp_path, "keep", "other:9b", "driver")
     result = export_mod.import_export(home, out, profile_choice="keep")
     assert result["profile_choice"] == "keep"
-    # An explicit choice needs no warning — the user chose.
-    assert result["warnings"] == []
+    # An explicit choice needs no warning — the user chose. The
+    # only warning is the dataset's (T59).
+    _only_dataset_warning(result)
     prof = home.get_profile("lfm3-tool")
     assert (prof["ollama_tag"], prof["role"]) == ("other:9b", "driver")
 
@@ -648,3 +674,296 @@ def test_import_rejects_bad_profile_choice(seeded, tmp_path):
     fresh = Store(tmp_path / "fresh-home")
     with pytest.raises(StellaError, match="profile_choice"):
         export_mod.import_export(fresh, out, profile_choice="merge")
+
+
+# -- T61: base-health check on import --------------------------------
+
+
+def test_import_warns_on_uninstalled_base_tag(seeded, tmp_path):
+    """T61 Done: a package whose tag is not installed warns, naming
+    the tag — and still imports (the warning never blocks)."""
+    out = export_mod.export_project(seeded, "lfm3-tool", "tool-calls",
+                                    tmp_path)
+    fresh = Store(tmp_path / "fresh-home")
+    result = export_mod.import_export(
+        fresh, out, installed_models=["qwen3.5:2b"]
+    )
+    assert result["project"] == "tool-calls"
+    assert len(result["warnings"]) == 2
+    assert "lfm3:1.7b" in result["warnings"][0]
+    assert "not installed" in result["warnings"][0]
+    assert "forge-traces.jsonl" in result["warnings"][1]
+
+
+def test_import_silent_on_installed_base_tag(seeded, tmp_path):
+    """T61 Done: an installed tag imports silently."""
+    out = export_mod.export_project(seeded, "lfm3-tool", "tool-calls",
+                                    tmp_path)
+    fresh = Store(tmp_path / "fresh-home")
+    result = export_mod.import_export(
+        fresh, out, installed_models=["lfm3:1.7b", "qwen3.5:2b"]
+    )
+    # No base warning; the only warning is the dataset's (T59).
+    _only_dataset_warning(result)
+
+
+def test_import_no_base_warning_without_a_list(seeded, tmp_path):
+    """T61: with no installed list (or an empty one — Ollama down),
+    no warning fires on a guess."""
+    out = export_mod.export_project(seeded, "lfm3-tool", "tool-calls",
+                                    tmp_path)
+    fresh = Store(tmp_path / "fresh-home")
+    # No base warning either way; the only warning is the
+    # dataset's (T59).
+    _only_dataset_warning(export_mod.import_export(fresh, out))
+    fresh2 = Store(tmp_path / "fresh-home-2")
+    result = export_mod.import_export(fresh2, out, installed_models=[])
+    _only_dataset_warning(result)
+
+
+# -- T59: the dataset is part of the package decision ----------------
+
+
+def test_bundled_dataset_round_trip(seeded, tmp_path):
+    """T59 Done: a bundled dataset travels in the package and lands
+    in the imported project, with the ref as its filename."""
+    pdir = seeded.project_dir("lfm3-tool", "tool-calls")
+    data = pdir / "my-data.jsonl"
+    data.write_text(
+        '{"prompt": "a", "completion": "b"}\n'
+        '{"prompt": "c", "completion": "d"}\n',
+        encoding="utf-8",
+    )
+    seeded.update_project(
+        "lfm3-tool", "tool-calls", dataset_ref="my-data.jsonl"
+    )
+    out = export_mod.export_project(
+        seeded, "lfm3-tool", "tool-calls", tmp_path,
+        bundle_dataset=True,
+    )
+    assert (out / "dataset" / "my-data.jsonl").is_file()
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert manifest["project"]["dataset_bundled"] == "my-data.jsonl"
+    assert "Dataset bundled: my-data.jsonl" in (
+        out / "README.md"
+    ).read_text()
+    fresh = Store(tmp_path / "fresh-home")
+    result = export_mod.import_export(fresh, out)
+    assert result["dataset_missing"] is False
+    assert result["dataset_ref"] == "my-data.jsonl"
+    assert result["warnings"] == []
+    new_dir = fresh.project_dir("lfm3-tool", "tool-calls")
+    assert (new_dir / "my-data.jsonl").read_text(encoding="utf-8") == (
+        data.read_text(encoding="utf-8")
+    )
+    assert fresh.get_project("lfm3-tool", "tool-calls")["dataset_ref"] == (
+        "my-data.jsonl"
+    )
+
+
+def test_bundle_dataset_missing_ref_fails_export(seeded, tmp_path):
+    """T59: bundling a dataset that is not here fails the export —
+    a bundle that silently shipped reference-only would be a lie."""
+    with pytest.raises(StellaError, match="cannot bundle the dataset"):
+        export_mod.export_project(
+            seeded, "lfm3-tool", "tool-calls", tmp_path,
+            bundle_dataset=True,
+        )
+    # No partial package left behind (T38 staging).
+    assert not (tmp_path / "tool-calls-stella-export").exists()
+
+
+def test_bundle_dataset_without_a_ref_is_a_noop(seeded, tmp_path):
+    """T59: with no dataset ref there is nothing to bundle."""
+    seeded.update_project("lfm3-tool", "tool-calls", dataset_ref="")
+    out = export_mod.export_project(
+        seeded, "lfm3-tool", "tool-calls", tmp_path,
+        bundle_dataset=True,
+    )
+    assert not (out / "dataset").exists()
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert "dataset_bundled" not in manifest["project"]
+
+
+def test_import_missing_dataset_warns_and_reports(seeded, tmp_path):
+    """T59 Done: an unbundled ref that is not on this PC warns and
+    sets dataset_missing, so the caller can offer to find it."""
+    out = export_mod.export_project(seeded, "lfm3-tool", "tool-calls", tmp_path)
+    fresh = Store(tmp_path / "fresh-home")
+    result = export_mod.import_export(fresh, out)
+    assert result["dataset_missing"] is True
+    assert result["dataset_ref"] == "forge-traces.jsonl"
+    assert any("forge-traces.jsonl" in w for w in result["warnings"])
+    # The ref is kept as imported: the repair finds the file later.
+    assert fresh.get_project("lfm3-tool", "tool-calls")["dataset_ref"] == (
+        "forge-traces.jsonl"
+    )
+
+
+def test_import_silent_when_dataset_exists(seeded, tmp_path):
+    """T59: an unbundled ref that resolves on this PC imports
+    silently."""
+    data = tmp_path / "shared-data.jsonl"
+    data.write_text(
+        '{"prompt": "a", "completion": "b"}\n', encoding="utf-8"
+    )
+    seeded.update_project(
+        "lfm3-tool", "tool-calls", dataset_ref=str(data)
+    )
+    out = export_mod.export_project(seeded, "lfm3-tool", "tool-calls", tmp_path)
+    fresh = Store(tmp_path / "fresh-home")
+    result = export_mod.import_export(fresh, out)
+    assert result["dataset_missing"] is False
+    assert result["warnings"] == []
+
+
+def test_import_ignores_bundled_traversal_name(seeded, tmp_path):
+    """T59: a hand-edited manifest claiming a bundled name with a
+    path in it is ignored — nothing is copied outside the
+    project dir."""
+    out = export_mod.export_project(seeded, "lfm3-tool", "tool-calls", tmp_path)
+    manifest = json.loads((out / "manifest.json").read_text())
+    manifest["project"]["dataset_bundled"] = "../manifest.json"
+    (out / "manifest.json").write_text(json.dumps(manifest))
+    fresh = Store(tmp_path / "fresh-home")
+    result = export_mod.import_export(fresh, out)
+    # The traversal was ignored, so the (missing) ref warned.
+    assert result["dataset_missing"] is True
+    assert not (
+        fresh.home / "profiles" / "lfm3-tool" / "projects"
+        / "manifest.json"
+    ).exists()
+
+
+def test_verify_rejects_bad_dataset_bundled_type(seeded, tmp_path):
+    out = export_mod.export_project(seeded, "lfm3-tool", "tool-calls", tmp_path)
+    manifest = json.loads((out / "manifest.json").read_text())
+    manifest["project"]["dataset_bundled"] = 7
+    (out / "manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(StellaError, match="dataset_bundled"):
+        export_mod.verify_export(out)
+
+
+# -- T58: the import preview -----------------------------------------
+
+
+def test_preview_export_contents(seeded, tmp_path):
+    """T58 Done: the preview reports what the package carries —
+    weights, checkpoints, probe, sleep, dataset — without
+    importing anything."""
+    _plant_adapter(seeded)
+    pdir = seeded.project_dir("lfm3-tool", "tool-calls")
+    ckpt = pdir / "checkpoints"
+    (ckpt / "step-1").mkdir(parents=True)
+    (ckpt / "step-1" / "training_state.json").write_text(
+        '{"step": 1}', encoding="utf-8"
+    )
+    (ckpt / "step-2").mkdir()
+    (ckpt / "step-2" / "training_state.json").write_text(
+        '{"step": 2}', encoding="utf-8"
+    )
+    (pdir / "probe_results.json").write_text("{}", encoding="utf-8")
+    sleep = pdir / "sleep"
+    sleep.mkdir()
+    (sleep / "manifest.json").write_text(
+        '{"cycles": []}', encoding="utf-8"
+    )
+    out = export_mod.export_project(seeded, "lfm3-tool", "tool-calls", tmp_path)
+    fresh = Store(tmp_path / "fresh-home")
+    summary = export_mod.preview_export(fresh, out)
+    assert summary["profile"] == "lfm3-tool"
+    assert summary["project"] == "tool-calls"
+    assert summary["tag"] == "lfm3:1.7b"
+    from stella.model import STELLA_VERSION
+
+    assert summary["stella_version"] == STELLA_VERSION
+    assert summary["weights"] is True
+    assert summary["checkpoints"] == 2
+    assert summary["probe"] is True
+    assert summary["sleep"] is True
+    assert summary["dataset_status"] == "missing"
+    assert summary["profile_existed"] is False
+    assert summary["profile_diff"] == {}
+    assert summary["base_installed"] is None  # no list passed
+    # Nothing was imported.
+    with pytest.raises(StellaError):
+        fresh.get_profile("lfm3-tool")
+
+
+def test_preview_export_existing_profile_diff_and_base(seeded, tmp_path):
+    """T58: the preview compares the profile block and the base
+    health against this PC."""
+    out = export_mod.export_project(seeded, "lfm3-tool", "tool-calls", tmp_path)
+    home = _home_with_profile(tmp_path, "prev", "other:9b", "driver")
+    summary = export_mod.preview_export(
+        home, out, installed_models=["other:9b"]
+    )
+    assert summary["profile_existed"] is True
+    assert summary["profile_diff"]["ollama_tag"] == {
+        "local": "other:9b", "package": "lfm3:1.7b"
+    }
+    assert summary["base_installed"] is False
+
+
+def test_preview_export_dataset_statuses(seeded, tmp_path):
+    """T58: the preview says whether the dataset is bundled, on
+    this PC, missing, or not set at all."""
+    # Bundled.
+    pdir = seeded.project_dir("lfm3-tool", "tool-calls")
+    data = pdir / "my-data.jsonl"
+    data.write_text(
+        '{"prompt": "a", "completion": "b"}\n', encoding="utf-8"
+    )
+    seeded.update_project(
+        "lfm3-tool", "tool-calls", dataset_ref="my-data.jsonl"
+    )
+    out = export_mod.export_project(
+        seeded, "lfm3-tool", "tool-calls", tmp_path,
+        bundle_dataset=True,
+    )
+    fresh = Store(tmp_path / "fresh-home")
+    assert export_mod.preview_export(fresh, out)["dataset_status"] == (
+        "bundled"
+    )
+    # Present: an absolute path that exists on this PC.
+    shared = tmp_path / "shared.jsonl"
+    shared.write_text(
+        '{"prompt": "a", "completion": "b"}\n', encoding="utf-8"
+    )
+    seeded.update_project(
+        "lfm3-tool", "tool-calls", dataset_ref=str(shared)
+    )
+    out2 = export_mod.export_project(
+        seeded, "lfm3-tool", "tool-calls", tmp_path / "second"
+    )
+    assert export_mod.preview_export(fresh, out2)["dataset_status"] == (
+        "present"
+    )
+    # None: no ref at all.
+    seeded.update_project("lfm3-tool", "tool-calls", dataset_ref="")
+    out3 = export_mod.export_project(
+        seeded, "lfm3-tool", "tool-calls", tmp_path / "third"
+    )
+    assert export_mod.preview_export(fresh, out3)["dataset_status"] == "none"
+
+
+def test_format_preview_lines(seeded, tmp_path):
+    """T58: the shared summary text names the profile, project,
+    tag, version, contents, and warnings — no em-dashes."""
+    from stella.model import STELLA_VERSION
+
+    out = export_mod.export_project(seeded, "lfm3-tool", "tool-calls", tmp_path)
+    home = _home_with_profile(tmp_path, "fmt", "other:9b", "driver")
+    summary = export_mod.preview_export(
+        home, out, installed_models=["other:9b"]
+    )
+    text = export_mod.format_preview(summary)
+    assert "Profile lfm3-tool, project tool-calls." in text
+    assert "Base model: lfm3:1.7b." in text
+    assert f"Made with Stella {STELLA_VERSION}." in text
+    assert "Inside: the project record only." in text
+    assert "Dataset: forge-traces.jsonl (not on this PC)." in text
+    assert "already here" in text
+    assert "tag: yours is 'other:9b', the package has 'lfm3:1.7b'." in text
+    assert "not installed on this PC" in text
+    assert "\u2014" not in text

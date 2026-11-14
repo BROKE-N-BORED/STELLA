@@ -59,3 +59,26 @@ def qapp():
     if app is None:
         app = QApplication([])
     return app
+
+
+@pytest.fixture()
+def seed_models(monkeypatch):
+    """Seed the T43 model-list cache with fake models and stop real
+    refreshes for the test: the GUI reads the seed, and no
+    background refresh (startup, dialog-open, Refresh button) can
+    overwrite it mid-test. The cache is reset afterwards, so a
+    seed never leaks into the next test."""
+    from stella.ollama import MODEL_CACHE
+
+    def _seed(models, sizes=None, ollama_up=True):
+        MODEL_CACHE.set_snapshot(models, sizes, ollama_up=ollama_up)
+        # refresh() becomes a no-op returning the seed. It is
+        # stored on the instance (not bound), so the replacement
+        # takes no self.
+        monkeypatch.setattr(
+            MODEL_CACHE, "refresh",
+            lambda url=None, timeout=None: MODEL_CACHE.snapshot(),
+        )
+
+    yield _seed
+    MODEL_CACHE.reset()

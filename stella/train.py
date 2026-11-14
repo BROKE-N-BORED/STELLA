@@ -366,6 +366,52 @@ def resolve_dataset_ref(
     raise StellaError(f"dataset not found: {ref!r}\nLooked in:\n  {looked}")
 
 
+def check_dataset(store: Store, profile: str, project: str,
+                  ref: str) -> dict:
+    """Check a dataset ref for display (T45): resolve it, validate
+    the JSONL with the trainer's own validator, count the examples,
+    split train/val, and preview the first 3. Returns a dict; never
+    raises — a bad dataset is a report, not a crash:
+
+      status: "unset" (no ref), "ok", "missing", "invalid"
+      count, train, val: example counts (0 unless ok)
+      format: "messages" or "prompt" (None unless ok)
+      preview: the first message of the first 3 examples, trimmed
+      error: the plain-words problem (None unless missing/invalid)
+      path: the resolved file (None unless found)
+    """
+    ref = (ref or "").strip()
+    empty = {
+        "status": "unset", "count": 0, "train": 0, "val": 0,
+        "format": None, "preview": [], "error": None, "path": None,
+    }
+    if not ref:
+        return empty
+    try:
+        path = resolve_dataset_ref(store, profile, project, ref)
+    except StellaError:
+        return {**empty, "status": "missing",
+                "error": f"dataset not found: {ref!r}"}
+    try:
+        examples, info = load_dataset(path)
+    except StellaError as exc:
+        return {**empty, "status": "invalid", "error": str(exc),
+                "path": str(path)}
+    train, val = split_dataset(examples)
+    preview = []
+    for example in examples[:3]:
+        messages = example.get("messages") or []
+        first = messages[0]["content"] if messages else ""
+        first = " ".join(first.split())
+        preview.append(first[:80] + ("..." if len(first) > 80 else ""))
+    return {
+        "status": "ok", "count": len(examples),
+        "train": len(train), "val": len(val),
+        "format": info["format"], "preview": preview,
+        "error": None, "path": str(path),
+    }
+
+
 # -- RAM guard ------------------------------------------------------
 
 def estimate_training_bytes(
