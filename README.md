@@ -92,6 +92,16 @@ job, export it as a usable package.
   is honest about a missing repo. Sections collapse, Save stays
   visible, and STELLA has its own dark-and-gold look with
   keyboard shortcuts and a visible focus ring.
+- v0.13.0 export/import + projects (2026-11-14): packages carry
+  a format version, weights and probe results round-trip, and
+  the profile block is merged on import (keep yours or take
+  the package's) instead of dropped. Deletes go to a trash
+  you can empty from the File menu. One job runs at a time,
+  closing waits for workers, and projects have one status
+  vocabulary (draft, ready, training, paused, done, failed,
+  exported). The CLI explains every flag with a worked
+  example, and training reports cheap mistakes before the
+  dependency gate.
 
 ## Install
 
@@ -154,6 +164,11 @@ slow on a Ryzen 3 — hours for a real run — and that is expected.
   model learns to write the answer, not to predict the question.
   A bundled sample (`sample-tool-calls.jsonl`, 20 synthetic Forge
   tool-call traces) is in the Train panel for the proof run.
+- **Base model**: training loads the base from the profile's Base
+  ref — a Hugging Face repo like `LiquidAI/LFM3-1.7B`, or a local
+  folder of weights — never from the Ollama tag. The Base ref
+  usually follows the tag when it changes, and only differs when
+  the training weights live somewhere else.
 - **RAM guard**: before loading anything, Stella estimates the run
   from the model's config + weight sizes (never from a loaded
   model): base weights + LoRA gradients + AdamW states +
@@ -299,15 +314,30 @@ After install, `stella` works in a terminal:
 
 `stella import <export-dir>`
 
-`stella train <profile> <project> [--steps N] [--resume]`
+`stella create-profile <name> [--tag <ollama-tag>] [--role <role>] [--display <name>] [--base <hf-repo>]`
 
-`stella export-gguf <profile> <project> <dir> [--quant Q4_K_M]`
+`stella create-project <profile> <name> [--display <name>] [--dataset <file>]`
+
+`stella train <profile> <project> [--steps N] [--resume] [--force] [--dataset FILE] [--base REF] [--target-modules q_proj,k_proj]`
+
+`stella export-gguf <profile> <project> <dir> [--quant Q4_K_M] [--from-checkpoint N] [--force]`
 
 `stella probe <profile> <project>`
 
 `stella sleep <profile> <project> [--dream] [--dream-model TAG] [--rows FILE] [--threshold 0.10]`
 
 `stella sleep-status <profile> <project>`
+
+`stella chat [--provider ollama|groq|gemini|custom] [--model <name>]`
+
+`stella requant <tag> [--quant Q4_K_M] [--as <tag>]`
+
+`stella pc-info`
+
+`stella distill <profile> <project> --teacher <tag> --prompts <file>`
+
+Every command's `--help` shows a worked example, e.g.
+`stella create-profile --help`.
 
 Before install, the same commands run as `bash stella-cli ...` from
 inside the Stella folder.

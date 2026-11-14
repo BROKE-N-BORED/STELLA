@@ -39,6 +39,7 @@ import shutil
 from pathlib import Path
 
 from .autoconfig import compute_settings, measure_pc
+from .job_lock import job_lock
 from .model import STELLA_VERSION, StellaError, Store
 
 # First proof target — confirmed from the live model card, not guessed.
@@ -711,12 +712,18 @@ def _hf_load_message(base_ref: str, exc: Exception) -> str:
     )
 
 
-def detect_target_modules(model) -> list[str]:
+def detect_target_modules(model, override: list[str] | None = None) -> list[str]:
     """Find the LoRA target modules this model actually has.
 
     Scans the model's linear layers and returns the leaf names that
     match known projection suffixes (q_proj, k_proj, ...). Raises if
     none match, naming what the model does have.
+
+    `override` (T34) is a hand-supplied list for architectures the
+    scan does not recognize: every name must exist as a linear
+    layer leaf in the model (else the error names the missing ones
+    and what the model does have), and the override is used as-is.
+    An empty or missing override falls back to auto-detection.
     """
     import torch
 
@@ -740,10 +747,23 @@ def detect_target_modules(model) -> list[str]:
                 all_linear.add(leaf)
                 if leaf in TARGET_SUFFIXES:
                     found.add(leaf)
+    if override:
+        missing = [name for name in override if name not in all_linear]
+        if missing:
+            raise StellaError(
+                "target_modules names layers this model does not have: "
+                f"{', '.join(missing)}. Its linear layers are named: "
+                f"{', '.join(sorted(all_linear)) or 'none'}"
+            )
+        return sorted(set(override))
     if not found:
         raise StellaError(
             "No LoRA target modules found in this model. Its linear "
             f"layers are named: {', '.join(sorted(all_linear)) or 'none'}"
+            ". To train it anyway, name the layers to train with "
+            "--target-modules on the train command (e.g. "
+            "--target-modules q_proj,k_proj), or set target_modules "
+            "in the project settings."
         )
     return sorted(found)
 
@@ -1238,6 +1258,8 @@ def train_project(
     work_dir: str | Path | None = None,
     update_status: bool = True,
     settings_override: dict | None = None,
+    target_modules: list[str] | None = None,
+    _skip_job_lock: bool = False,
 ) -> dict:
     """Train one project end to end. Returns a summary dict.
 
@@ -1251,7 +1273,13 @@ def train_project(
     untouched — sleep is a background consolidation job, not a
     retrain of the project. `settings_override` merges over the
     project settings for this run only (sleep caps the LoRA rank
-    at 8) without touching the stored project.
+    at 8) without touching the stored project. `target_modules`
+    (T34) is a hand-supplied LoRA target list for architectures
+    the auto-detection does not recognize; it wins over the
+    stored setting, and an empty or missing list falls back to
+    auto-detection. `_skip_job_lock` skips the one-job lock (T29):
+    sleep passes it because it already holds the lock for the
+    whole cycle.
     """
     # The step cap is validated first, before the training deps
     # are even required (T56): 0 or a negative number is refused
@@ -1265,7 +1293,12 @@ def train_project(
             ) from None
         if max_steps <= 0:
             raise StellaError("--steps must be at least 1.")
-    require_training_deps()
+    # Cheap checks first (T48): the profile lookup, settings,
+    # trained-refusal, base_ref, and dataset resolution below all
+    # run BEFORE the dependency gate, so a base install reports
+    # the real problem (a wrong profile name, a missing dataset)
+    # instead of the deps message. The gate sits inside the job
+    # lock, after every cheap check.
     prof = store.get_profile(profile)
     proj = store.get_project(profile, project)
     project_dir = store.project_dir(profile, project)
@@ -1288,18 +1321,23 @@ def train_project(
     # anything loads (T6, D6).
     settings.update(validate_run_settings(settings))
 
-    # A trained project is not re-trained by accident (T25): a
+    # A finished project is not re-trained by accident (T25): a
     # fresh run on one refuses unless --force makes the intent
     # explicit. Sleep (update_status=False) is a background
     # consolidation job, not a retrain — it is never blocked.
     if update_status and not resume and not force:
-        if proj.get("status") == "trained":
+        if proj.get("status") == "done":
             raise StellaError(
                 f"project {project!r} is already trained. Use "
                 "--force to re-train it (the current adapter will "
                 "be replaced)."
             )
 
+    # Training trusts base_ref (T54): the Hugging Face repo or
+    # local folder of the weights — never the Ollama tag, which is
+    # how Ollama knows the model, not where the weights live. The
+    # tag and the ref usually match (the store syncs them), and
+    # differ only when the weights live somewhere else.
     ref = base_ref or prof.get("base_ref") or ""
     if not ref:
         raise StellaError(
@@ -1336,149 +1374,186 @@ def train_project(
         int(settings.get("seed", 42)),
     )
 
-    # The RAM guard estimates BEFORE loading anything (T28): the
-    # estimate comes from the model's config + weight sizes, never
-    # from a loaded model. A run that will not fit is refused here,
-    # before the base is anywhere near memory. (A test-injected
-    # loader skips the pre-load estimate — the test controls its own
-    # fake world — and the post-load guard below still applies.)
-    if _model_loader is None:
-        pre_estimate, _ = estimate_training_from_metadata(ref, settings)
-        check_ram_fit(pre_estimate)
-
-    # Load the base, then check the guard a second time with the
-    # real param counts (belt and braces: the pre-load estimate
-    # already refused anything that cannot fit).
-    if _model_loader is not None:
-        model, tokenizer = _model_loader()
-    else:
-        model, tokenizer = load_base_model(ref, dtype=_dtype)
-    import torch
-    from peft import LoraConfig, PeftModel, get_peft_model
-
-    targets = detect_target_modules(model)
-    peft_config = LoraConfig(
-        r=int(settings.get("rank", 8)),
-        lora_alpha=int(settings.get("rank", 8)) * 2,
-        lora_dropout=0.05,
-        target_modules=targets,
-        task_type="CAUSAL_LM",
-    )
-
-    start_step = 0
-    start_epoch = 0
-    skip_in_epoch = 0
-    optimizer = None
+    # --resume with no checkpoints is refused here (T48), before
+    # the deps gate — the user should not have to install the
+    # training stack to learn there is nothing to resume. The list
+    # is reused inside the lock for the actual resume.
+    resume_checkpoints = None
     if resume:
-        checkpoints = list_checkpoints(
+        resume_checkpoints = list_checkpoints(
             store, profile, project, ckpt_dir=work_dir / "checkpoints"
         )
-        if not checkpoints:
+        if not resume_checkpoints:
             raise StellaError(
                 "nothing to resume. This project has no checkpoints yet"
             )
-        latest = checkpoints[-1]
-        ckpt_dir = Path(latest["path"])
-        model = PeftModel.from_pretrained(
-            model, str(ckpt_dir), is_trainable=True
-        )
-        state_file = ckpt_dir / "training_state.json"
-        state = json.loads(state_file.read_text(encoding="utf-8"))
-        start_step = int(state.get("step", 0))
-        start_epoch = int(state.get("epoch", 1)) - 1
-        skip_in_epoch = int(state.get("examples_seen_in_epoch", 0))
-        trainable = [p for p in model.parameters() if p.requires_grad]
-        optimizer = torch.optim.AdamW(
-            trainable, lr=float(settings.get("learning_rate", 0.0002)),
-            weight_decay=0.0,
-        )
-        opt_file = ckpt_dir / "optimizer.pt"
-        if opt_file.is_file():
-            # Safe load (T22): optimizer.pt travels cross-machine
-            # inside export packages, so it loads with
-            # weights_only=True — a pickle payload is refused, never
-            # executed. A checkpoint that cannot load safely is a
-            # plain error, not a traceback.
-            try:
-                saved = torch.load(
-                    str(opt_file), map_location="cpu", weights_only=True
-                )
-            except Exception as exc:
-                raise StellaError(
-                    f"checkpoint {ckpt_dir.name} cannot be loaded "
-                    "safely (its optimizer file is not a plain "
-                    f"optimizer state): {exc}"
-                ) from exc
-            optimizer.load_state_dict(saved["optimizer"])
-            # Restore the torch RNG state (T32): the dropout draws
-            # continue exactly where the pause left them. Old
-            # checkpoints (before v0.10.0) carry no RNG state —
-            # they resume with the RNG wherever it is, as before.
-            rng_state = saved.get("rng_state")
-            if rng_state is not None:
-                torch.set_rng_state(rng_state)
-    else:
-        # Seed everything (T32): the seed drives the LoRA init
-        # (A/B matrices) and every dropout draw, so a fresh run
-        # with the same seed trains the same adapter. Set before
-        # the adapter is built — the init itself is random. A
-        # resume never reseeds: the checkpoint's RNG state is
-        # restored above instead, and reseeding would break
-        # pause/resume exactness.
-        torch.manual_seed(int(settings.get("seed", 42)))
-        model = get_peft_model(model, peft_config)
 
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    cfg = model.config if hasattr(model, "config") else None
-    hidden = getattr(cfg, "hidden_size", 2048) if cfg else 2048
-    layers = getattr(cfg, "num_hidden_layers", 24) if cfg else 24
-    base_bpp = 2 if _dtype == "bfloat16" else 4
-    estimate, _breakdown = estimate_training_bytes(
-        params=total_params,
-        trainable_params=trainable_params,
-        base_bytes_per_param=base_bpp,
-        seq_len=int(settings.get("max_seq_len", 1024)),
-        batch_size=int(settings.get("batch_size", 1)),
-        hidden_size=hidden,
-        num_layers=layers,
-    )
-    check_ram_fit(estimate)
+    # One job at a time (T29): the engine lock. The cheap checks
+    # above ran without it, so a bad profile or dataset is still
+    # reported even while another job runs — but from here on this
+    # run loads models, so it holds the home's job lock until it
+    # returns. Sleep passes _skip_job_lock: it already holds the
+    # lock for the whole cycle (train + replay).
+    with job_lock(
+        store.home, f"training {profile}/{project}",
+        skip=_skip_job_lock,
+    ):
+        # The deps gate (T48): the cheap checks above ran first, so
+        # this message only appears when the run is otherwise ready
+        # to start.
+        require_training_deps()
 
-    if update_status:
-        store.update_project(profile, project, status="training")
-    try:
-        summary = run_training_loop(
-            model,
-            tokenizer,
-            train_examples,
-            val_examples,
-            settings,
-            work_dir,
-            on_event=on_event,
-            controller=controller,
-            start_step=start_step,
-            start_epoch=start_epoch,
-            skip_in_epoch=skip_in_epoch,
-            optimizer=optimizer,
-            max_steps=max_steps,
-            # A resume on a trained project extends a finished run
-            # (T25): the loop announces it before starting.
-            extending=bool(
-                resume and update_status
-                and proj.get("status") == "trained"
-            ),
+        # The RAM guard estimates BEFORE loading anything (T28): the
+        # estimate comes from the model's config + weight sizes, never
+        # from a loaded model. A run that will not fit is refused here,
+        # before the base is anywhere near memory. (A test-injected
+        # loader skips the pre-load estimate — the test controls its own
+        # fake world — and the post-load guard below still applies.)
+        if _model_loader is None:
+            pre_estimate, _ = estimate_training_from_metadata(ref, settings)
+            check_ram_fit(pre_estimate)
+
+        # Load the base, then check the guard a second time with the
+        # real param counts (belt and braces: the pre-load estimate
+        # already refused anything that cannot fit).
+        if _model_loader is not None:
+            model, tokenizer = _model_loader()
+        else:
+            model, tokenizer = load_base_model(ref, dtype=_dtype)
+        import torch
+        from peft import LoraConfig, PeftModel, get_peft_model
+
+        # T34: a hand-supplied target list wins — the CLI flag first,
+        # then the stored project setting — and an empty or missing
+        # list falls back to auto-detection.
+        override = target_modules
+        if override is None:
+            override = settings.get("target_modules") or None
+        targets = detect_target_modules(model, override=override)
+        peft_config = LoraConfig(
+            r=int(settings.get("rank", 8)),
+            lora_alpha=int(settings.get("rank", 8)) * 2,
+            lora_dropout=0.05,
+            target_modules=targets,
+            task_type="CAUSAL_LM",
         )
-    except Exception:
+
+        start_step = 0
+        start_epoch = 0
+        skip_in_epoch = 0
+        optimizer = None
+        if resume:
+            # The checkpoint list was already read before the lock
+            # (T48) — the empty case was refused there, so this
+            # list is non-empty.
+            checkpoints = resume_checkpoints
+            latest = checkpoints[-1]
+            ckpt_dir = Path(latest["path"])
+            model = PeftModel.from_pretrained(
+                model, str(ckpt_dir), is_trainable=True
+            )
+            state_file = ckpt_dir / "training_state.json"
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+            start_step = int(state.get("step", 0))
+            start_epoch = int(state.get("epoch", 1)) - 1
+            skip_in_epoch = int(state.get("examples_seen_in_epoch", 0))
+            trainable = [p for p in model.parameters() if p.requires_grad]
+            optimizer = torch.optim.AdamW(
+                trainable, lr=float(settings.get("learning_rate", 0.0002)),
+                weight_decay=0.0,
+            )
+            opt_file = ckpt_dir / "optimizer.pt"
+            if opt_file.is_file():
+                # Safe load (T22): optimizer.pt travels cross-machine
+                # inside export packages, so it loads with
+                # weights_only=True — a pickle payload is refused, never
+                # executed. A checkpoint that cannot load safely is a
+                # plain error, not a traceback.
+                try:
+                    saved = torch.load(
+                        str(opt_file), map_location="cpu", weights_only=True
+                    )
+                except Exception as exc:
+                    raise StellaError(
+                        f"checkpoint {ckpt_dir.name} cannot be loaded "
+                        "safely (its optimizer file is not a plain "
+                        f"optimizer state): {exc}"
+                    ) from exc
+                optimizer.load_state_dict(saved["optimizer"])
+                # Restore the torch RNG state (T32): the dropout draws
+                # continue exactly where the pause left them. Old
+                # checkpoints (before v0.10.0) carry no RNG state —
+                # they resume with the RNG wherever it is, as before.
+                rng_state = saved.get("rng_state")
+                if rng_state is not None:
+                    torch.set_rng_state(rng_state)
+        else:
+            # Seed everything (T32): the seed drives the LoRA init
+            # (A/B matrices) and every dropout draw, so a fresh run
+            # with the same seed trains the same adapter. Set before
+            # the adapter is built — the init itself is random. A
+            # resume never reseeds: the checkpoint's RNG state is
+            # restored above instead, and reseeding would break
+            # pause/resume exactness.
+            torch.manual_seed(int(settings.get("seed", 42)))
+            model = get_peft_model(model, peft_config)
+
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        cfg = model.config if hasattr(model, "config") else None
+        hidden = getattr(cfg, "hidden_size", 2048) if cfg else 2048
+        layers = getattr(cfg, "num_hidden_layers", 24) if cfg else 24
+        base_bpp = 2 if _dtype == "bfloat16" else 4
+        estimate, _breakdown = estimate_training_bytes(
+            params=total_params,
+            trainable_params=trainable_params,
+            base_bytes_per_param=base_bpp,
+            seq_len=int(settings.get("max_seq_len", 1024)),
+            batch_size=int(settings.get("batch_size", 1)),
+            hidden_size=hidden,
+            num_layers=layers,
+        )
+        check_ram_fit(estimate)
+
         if update_status:
-            store.update_project(profile, project, status="paused")
-        raise
-    if update_status:
-        store.update_project(
-            profile, project, status="paused" if summary["stopped"] else "trained"
-        )
-    summary["dataset"] = info
-    summary["trainable_params"] = trainable_params
-    summary["target_modules"] = targets
-    summary["ram_estimate_gb"] = round(estimate / 1024**3, 2)
-    return summary
+            store.update_project(profile, project, status="training")
+        try:
+            summary = run_training_loop(
+                model,
+                tokenizer,
+                train_examples,
+                val_examples,
+                settings,
+                work_dir,
+                on_event=on_event,
+                controller=controller,
+                start_step=start_step,
+                start_epoch=start_epoch,
+                skip_in_epoch=skip_in_epoch,
+                optimizer=optimizer,
+                max_steps=max_steps,
+                # A resume on a finished project extends a finished
+                # run (T25): the loop announces it before starting.
+                extending=bool(
+                    resume and update_status
+                    and proj.get("status") == "done"
+                ),
+            )
+        except Exception:
+            # A crash is not a pause (T53): a run that errors is
+            # failed, so the project never looks resumable when
+            # there is no clean checkpoint to resume from. A
+            # graceful stop returns a summary with stopped=True
+            # and lands in "paused" below, not here.
+            if update_status:
+                store.update_project(profile, project, status="failed")
+            raise
+        if update_status:
+            store.update_project(
+                profile, project, status="paused" if summary["stopped"] else "done"
+            )
+        summary["dataset"] = info
+        summary["trainable_params"] = trainable_params
+        summary["target_modules"] = targets
+        summary["ram_estimate_gb"] = round(estimate / 1024**3, 2)
+        return summary

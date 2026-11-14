@@ -24,6 +24,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from .job_lock import job_lock
 from .model import StellaError, Store
 from .train import RAM_LIMIT_BYTES
 
@@ -489,69 +490,73 @@ def export_gguf(
     def cancelled() -> bool:
         return should_stop is not None and should_stop()
 
-    try:
-        if cancelled():
-            raise StellaError("Cancelled.")
-        emit({
-            "type": "phase", "phase": "merge",
-            "message": "Merging the adapter into the base model...",
-        })
-        merge_adapter(
-            base_ref, adapter_dir, merged_dir,
-            _model_loader=_model_loader, _dtype=_dtype,
+    # One job at a time (T29): the merge loads the base and the
+    # converter loads it again, so the whole export holds the
+    # home's job lock. The cheap checks above ran without it.
+    with job_lock(store.home, f"GGUF export {profile}/{project}"):
+        try:
+            if cancelled():
+                raise StellaError("Cancelled.")
+            emit({
+                "type": "phase", "phase": "merge",
+                "message": "Merging the adapter into the base model...",
+            })
+            merge_adapter(
+                base_ref, adapter_dir, merged_dir,
+                _model_loader=_model_loader, _dtype=_dtype,
+            )
+            if gguf_path.exists():
+                # --force: the deliberate overwrite (T24).
+                gguf_path.unlink()
+            if cancelled():
+                raise StellaError("Cancelled.")
+            result = convert_to_gguf(
+                merged_dir, gguf_path, quant=quant,
+                llama_cpp=llama_cpp, _runner=_runner,
+                on_event=on_event, should_stop=should_stop,
+            )
+        except StellaError as exc:
+            # A failure after the merge leaves no orphaned merged
+            # weights behind (T26): remove the merged dir and say so.
+            if merged_dir.exists():
+                shutil.rmtree(merged_dir)
+                raise StellaError(
+                    f"{exc} The half-finished merged weights were removed."
+                ) from exc
+            raise
+        model_name = f"{profile}-{project}"
+        _modelfile, command = write_modelfile(
+            gguf_path, dest / "Modelfile", name=model_name
         )
-        if gguf_path.exists():
-            # --force: the deliberate overwrite (T24).
-            gguf_path.unlink()
-        if cancelled():
-            raise StellaError("Cancelled.")
-        result = convert_to_gguf(
-            merged_dir, gguf_path, quant=quant,
-            llama_cpp=llama_cpp, _runner=_runner,
-            on_event=on_event, should_stop=should_stop,
+        (dest / "gguf-export.json").write_text(
+            json.dumps(
+                {
+                    "profile": profile,
+                    "project": project,
+                    "base_ref": base_ref,
+                    "adapter": str(adapter_dir),
+                    "merged_hf": str(merged_dir),
+                    "gguf": str(gguf_path),
+                    "quant": quant,
+                    "gguf_bytes": result["bytes"],
+                    "warnings": warnings,
+                    "ollama_name": model_name,
+                    "ollama_create": command,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
         )
-    except StellaError as exc:
-        # A failure after the merge leaves no orphaned merged
-        # weights behind (T26): remove the merged dir and say so.
-        if merged_dir.exists():
-            shutil.rmtree(merged_dir)
-            raise StellaError(
-                f"{exc} The half-finished merged weights were removed."
-            ) from exc
-        raise
-    model_name = f"{profile}-{project}"
-    _modelfile, command = write_modelfile(
-        gguf_path, dest / "Modelfile", name=model_name
-    )
-    (dest / "gguf-export.json").write_text(
-        json.dumps(
-            {
-                "profile": profile,
-                "project": project,
-                "base_ref": base_ref,
-                "adapter": str(adapter_dir),
-                "merged_hf": str(merged_dir),
-                "gguf": str(gguf_path),
-                "quant": quant,
-                "gguf_bytes": result["bytes"],
-                "warnings": warnings,
-                "ollama_name": model_name,
-                "ollama_create": command,
-            },
-            indent=2,
-            sort_keys=True,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    store.update_project(profile, project, status="exported")
-    return {
-        "merged_hf": str(merged_dir),
-        "gguf": str(gguf_path),
-        "quant": quant,
-        "gguf_bytes": result["bytes"],
-        "warnings": warnings,
-        "modelfile": str(dest / "Modelfile"),
-        "ollama_name": model_name,
-        "ollama_create": command,
-    }
+        store.update_project(profile, project, status="exported")
+        return {
+            "merged_hf": str(merged_dir),
+            "gguf": str(gguf_path),
+            "quant": quant,
+            "gguf_bytes": result["bytes"],
+            "warnings": warnings,
+            "modelfile": str(dest / "Modelfile"),
+            "ollama_name": model_name,
+            "ollama_create": command,
+        }

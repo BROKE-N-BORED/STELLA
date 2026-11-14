@@ -1,5 +1,104 @@
 # Changelog
 
+## v0.13.0 — 2026-11-14
+
+The export/import + projects slice (audit #3/#8 tasks T23, T29,
+T30, T34, T36, T40, T41, T48, T51, T53, T54, T57, T60): packages
+are versioned, weights round-trip, deletes go to a trash, and
+the project lifecycle has one vocabulary everywhere.
+
+- T29 — one job at a time, enforced by the engine: a lock file
+  (`job.lock` in the home) is held for the whole job, so a second
+  job — from the window, the CLI, or a second Stella — is refused
+  in plain words naming the running job. The kernel releases the
+  lock if the holder dies, so a crash can never wedge the home.
+  Sleep takes the lock once and its inner training call skips it.
+- T36 — closing the window waits for every worker: close during
+  a job asks the workers to stop, says "Stopping ..." in the
+  status bar, the job card, and the log, and closes for real
+  when the last worker ends. The window never destroys a running
+  thread (the old Qt abort), and never blocks the UI waiting.
+- T40 — package format versioning: the manifest carries `format`
+  (this Stella writes and reads format 1), separate from the app
+  version. A newer format is refused with "this package needs a
+  newer Stella"; a package with no format field is a legacy
+  v0.1-v0.12 package and reads as format 1. The three package
+  kinds (`stella-export`, `stella-profile-export`,
+  `stella-recipe-export`) are defined in one place, and importing
+  a known kind this Stella cannot import yet says what the
+  package is. The format is documented in docs/FORMAT.md.
+- T41 — weights and probe results round-trip: the package's
+  weights/ land in the project's adapter/ dir on import (byte
+  identical), and probe_results.json comes back too. A package
+  whose manifest claims a finished status but carries no weights
+  imports as a draft, with a warning in the window and on the
+  CLI. The placeholder note is never copied as a weight.
+- T23 — trash on delete: deleting a profile or project moves it
+  to `trash/` (dated folder), and the confirm dialog offers
+  export-first. The File menu's Trash window lists what is
+  there, purges one item forever (its own confirm, defaulting
+  to No), or empties the trash. Moving a trash folder back
+  restores it. Import rollback still destroys outright, so a
+  failed import leaves no trash folder behind.
+- T30 — probe v2: refusals are read from the reply's first
+  sentence, with new markers, a compliance override (a reply
+  that starts answering is not a refusal), and the "can't
+  believe" idiom excluded. Replies with no answer are counted
+  and shown in the CLI, the window, and the chat. The probe
+  gate fails a silent model, and an empty prompt list is
+  refused. Replies are generated through the chat template
+  when the tokenizer has one.
+- T34 — target-module override: `--target-modules` on the CLI
+  (or `target_modules` in the project settings, CLI wins) picks
+  the LoRA target modules instead of auto-detection. A name
+  the model does not have is refused with the available names
+  listed. No UI: training settings stay out of the window
+  (T16).
+- T48 — cheap checks first: training reports a bad profile,
+  missing dataset, missing base, or nothing-to-resume BEFORE
+  the dependency gate, so a mistake is never answered with
+  "install the training stack". The dependency check fires
+  only when everything else is ready.
+- T51 — CLI help everywhere: every flag and positional on all
+  15 commands has help, and every command's `--help` shows a
+  worked example. The module docstring, the empty-home hint,
+  the `stella-cli` wrapper comment, and the README now all list
+  the same 15 commands.
+- T54 — base_ref sync rule (interim, until Joshua decides drop
+  vs define): changing a profile's tag moves base_ref to the
+  new tag when the base was following the old tag (or empty);
+  a deliberately split base stays split, and an explicit base
+  in the same save always wins. Training trusts base_ref.
+- T60 — config.json dropped: the manifest already holds the
+  settings, and nothing ever read the config.json copy, so
+  export stops writing it. Old packages that carry it still
+  import; a disagreeing or unreadable config.json is ignored
+  and the manifest's values win.
+- T53 — one status lifecycle, reconciled: the task's enum
+  (draft/ready/training/done/failed/exported) and the engine's
+  `trained`/`paused` are now one vocabulary: `draft`, `ready`,
+  `training`, `paused`, `done`, `failed`, `exported`. Mapping:
+  engine `trained` is now `done` (the task's word, plainer);
+  `paused` is kept (pause/resume is a real state with no slot
+  in the task enum); `ready` and `failed` are new. A crash
+  marks the project `failed`, a graceful stop marks it
+  `paused`. `trained` survives only as a legacy alias: old
+  project files and old packages read as `done`, and are
+  rewritten with the current word on the next write. The
+  window shows the status on every tree row and in the
+  project window, with a Mark ready button on drafts.
+- T57 — merge, don't discard, the profile block on import:
+  when the profile already exists, tag / role / base are
+  compared with the manifest — identical blocks import
+  silently; differing blocks ask (a dialog in the window,
+  `--profile-merge keep|take` or a prompt on the CLI). With no
+  way to ask, the local values are kept and a warning says so.
+  "Take" makes the stored block exactly the package's, and a
+  failed import restores the local values. The window and the
+  CLI both say when the profile already existed. Extension
+  point for T58: `compare_profile_block` in export.py (and its
+  diff shape) is what the import preview dialog reuses.
+
 ## v0.12.0 — 2026-11-14
 
 The UI rebuild, P1 slice (audit #9, tasks T74-T82): every job

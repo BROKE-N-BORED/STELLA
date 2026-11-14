@@ -46,6 +46,7 @@ from PySide6.QtCore import (
     QSettings,
     Qt,
     QThread,
+    QTimer,
     QUrl,
     Signal,
 )
@@ -1034,7 +1035,9 @@ class ProfileWindow(QDialog):
             "",
             _help_label(
                 "Where training loads the base model from: a Hugging Face "
-                "repo like LiquidAI/LFM3-1.7B. Needed before you train."
+                "repo like LiquidAI/LFM3-1.7B. Needed before you train. "
+                "It usually follows the tag above; it only differs when "
+                "the training weights live somewhere else."
             ),
         )
         # No Processor row: the stored field exists but nothing in
@@ -1063,8 +1066,12 @@ class ProfileWindow(QDialog):
         # Dirty tracking (T2): a snapshot of the loaded values, so
         # an edit can be told apart from a save. _loading is set
         # while _load fills the widgets, so the fill itself never
-        # counts as an edit.
+        # counts as an edit. _loaded_base (T54) is the base value
+        # the field SHOWED at load — save only passes base_ref when
+        # the user changed it, so the store's sync rule decides
+        # otherwise.
         self._snapshot = None
+        self._loaded_base = ""
         self._loading = False
         for widget, signal in (
             (self.display_edit, self.display_edit.textChanged),
@@ -1175,10 +1182,14 @@ class ProfileWindow(QDialog):
         # The Base ref field shows a repo, never a tag as if it
         # were one (T79): a stored value that is not a Hugging
         # Face repo id (no slash) shows blank, with the placeholder
-        # saying what belongs here. Saving keeps the blank. The
-        # model-side sync rule is T54's; this is the UI face.
+        # saying what belongs here. Saving passes base_ref only
+        # when the field changed (T54) — a blank field the user
+        # never touched leaves the stored value to the sync rule,
+        # so a tag-valued base follows the tag instead of being
+        # cleared by the save.
         base = p.get("base_ref", "")
-        self.base_edit.setText(base if is_hf_repo_id(base) else "")
+        self._loaded_base = base if is_hf_repo_id(base) else ""
+        self.base_edit.setText(self._loaded_base)
 
     def save(self):
         """Save the profile form. Returns True on success, False
@@ -1192,14 +1203,21 @@ class ProfileWindow(QDialog):
         )
         if warnings and not _confirm_tag(self, warnings):
             return False
+        fields = {
+            "display_name": self.display_edit.text().strip(),
+            "role": self.role_edit.text().strip(),
+            "ollama_tag": self.tag_combo.currentText().strip(),
+        }
+        # T54: only pass base_ref when the user changed what the
+        # field showed — otherwise the store's sync rule decides:
+        # a base that followed the old tag follows the new one, and
+        # a deliberately split base stays split. Passing the field
+        # unconditionally would clear a tag-valued base (the field
+        # shows blank for those, T79) and break the sync.
+        if self.base_edit.text().strip() != self._loaded_base:
+            fields["base_ref"] = self.base_edit.text().strip()
         try:
-            self._main.store.update_profile(
-                self._slug,
-                display_name=self.display_edit.text().strip(),
-                role=self.role_edit.text().strip(),
-                ollama_tag=self.tag_combo.currentText().strip(),
-                base_ref=self.base_edit.text().strip(),
-            )
+            self._main.store.update_profile(self._slug, **fields)
         except StellaError as exc:
             QMessageBox.warning(self, "Stella", str(exc))
             return False
@@ -1268,6 +1286,27 @@ class ProjectWindow(QDialog):
                 "The main screen has a sample to try."
             ),
         )
+        # Status (T53): read-only — training moves it on its own
+        # (training, paused, done, failed), GGUF export sets
+        # exported, and Mark ready is the one move the user makes
+        # (draft -> ready). The button only shows for a draft.
+        status_row = QWidget()
+        status_layout = QHBoxLayout(status_row)
+        status_layout.setContentsMargins(0, 0, 0, 0)
+        self.status_label = QLabel("")
+        self.mark_ready_btn = QPushButton("Mark ready")
+        self.mark_ready_btn.clicked.connect(self.mark_ready)
+        status_layout.addWidget(self.status_label)
+        status_layout.addWidget(self.mark_ready_btn)
+        status_layout.addStretch(1)
+        form.addRow("Status", status_row)
+        form.addRow(
+            "",
+            _help_label(
+                "Where this project is: draft, ready, training, "
+                "paused, done, failed, or exported."
+            ),
+        )
         details.content_layout.addLayout(form)
         layout.addWidget(details)
         self.details_section = details
@@ -1325,7 +1364,8 @@ class ProjectWindow(QDialog):
         # Ctrl+S saves here (T82); Tab walks the form in visual order.
         QShortcut(QKeySequence("Ctrl+S"), self, self.save)
         _chain_tab_order([
-            self.display_edit, self.dataset_edit, self.notes_edit,
+            self.display_edit, self.dataset_edit, self.mark_ready_btn,
+            self.notes_edit,
             self.save_notes_btn, self.save_btn, rename_btn, delete_btn,
             close_btn,
         ])
@@ -1464,6 +1504,11 @@ class ProjectWindow(QDialog):
             dataset = ""
             bad.append("dataset")
         self.dataset_edit.setText(dataset)
+        # Status (T53): read-only label, from the stored project;
+        # Mark ready only shows for a draft.
+        status = p.get("status", "draft")
+        self.status_label.setText(status)
+        self.mark_ready_btn.setVisible(status == "draft")
         if not isinstance(notes, str):
             notes = ""
             bad.append("notes")
@@ -1477,6 +1522,24 @@ class ProjectWindow(QDialog):
         else:
             self._load_note.setText("")
             self._load_note.setVisible(False)
+
+    def mark_ready(self):
+        """Draft -> ready (T53): the only user-driven transition.
+        A ready project is one the user says is set to train. The
+        form itself is not reloaded, so unsaved edits in it stay
+        put — only the status label and button change."""
+        try:
+            self._main.store.update_project(
+                self._profile, self._project, status="ready"
+            )
+        except StellaError as exc:
+            QMessageBox.warning(self, "Stella", str(exc))
+            return
+        self.status_label.setText("ready")
+        self.mark_ready_btn.setVisible(False)
+        self._main.refresh_tree()
+        self._main.refresh_session()
+        self._main._say(f"Project {self._project} is ready to train.")
 
     def save(self) -> bool:
         """Save the project form. Returns True on success, False when
@@ -1503,6 +1566,125 @@ class ProjectWindow(QDialog):
         self._capture_snapshot()
         self._update_title()
         return True
+
+
+class TrashDialog(QDialog):
+    """Deleted profiles and projects, with the purge action (T23).
+
+    Deleting moves a folder to the trash, dated, with everything
+    inside intact — so a misclick is recoverable by moving the
+    folder back. This window is where things are deleted FOREVER:
+    pick an item and press Delete forever (with its own confirm,
+    defaulting to No), or Empty trash for all of them. Nothing is
+    selected by default.
+    """
+
+    def __init__(self, main, parent=None):
+        super().__init__(parent)
+        self._main = main
+        self.setWindowTitle("Trash")
+        self.setMinimumWidth(520)
+        self.resize(560, 360)
+        layout = QVBoxLayout(self)
+        layout.addWidget(
+            _help_label(
+                "Deleted profiles and projects live here, with "
+                "everything inside them. To get one back, move its "
+                f"folder back out of {main.store.trash_dir}. "
+                "Delete forever removes it for good."
+            )
+        )
+        self.list_widget = QListWidget()
+        self.list_widget.itemSelectionChanged.connect(self._on_selection)
+        layout.addWidget(self.list_widget, 1)
+        self.empty_label = QLabel("The trash is empty.")
+        self.empty_label.setVisible(False)
+        layout.addWidget(self.empty_label)
+
+        btns = QHBoxLayout()
+        self.purge_btn = QPushButton("Delete forever")
+        self.purge_btn.setEnabled(False)
+        self.purge_btn.clicked.connect(self._purge_selected)
+        self.empty_btn = QPushButton("Empty trash")
+        self.empty_btn.clicked.connect(self._empty_trash)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.close)
+        btns.addWidget(self.purge_btn)
+        btns.addWidget(self.empty_btn)
+        btns.addStretch(1)
+        btns.addWidget(close_btn)
+        layout.addLayout(btns)
+        self._refresh()
+
+    def _refresh(self):
+        """Rebuild the list from the store. Nothing selected."""
+        self.list_widget.clear()
+        entries = self._main.store.list_trash()
+        for entry in entries:
+            if entry["kind"] == "profile":
+                what = f"profile {entry['profile']}"
+            elif entry["kind"] == "project":
+                what = (
+                    f"project {entry['project']} "
+                    f"(in profile {entry['profile']})"
+                )
+            else:
+                what = entry["name"]
+            label = what
+            if entry["trashed"]:
+                label += f", deleted {entry['trashed']}"
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, entry["name"])
+            self.list_widget.addItem(item)
+        self.empty_label.setVisible(not entries)
+        self.list_widget.setVisible(bool(entries))
+        self.empty_btn.setEnabled(bool(entries))
+        self.purge_btn.setEnabled(False)
+
+    def _on_selection(self):
+        self.purge_btn.setEnabled(
+            self.list_widget.currentItem() is not None
+        )
+
+    def _confirm_purge(self, text: str) -> bool:
+        """A destructive confirmation that defaults to No (U23/U31),
+        like the delete confirms."""
+        box = QMessageBox(self)
+        box.setWindowTitle("Delete forever")
+        box.setText(text)
+        box.setIcon(QMessageBox.Warning)
+        box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        box.setDefaultButton(QMessageBox.No)
+        box.setEscapeButton(QMessageBox.No)
+        return box.exec() == QMessageBox.Yes
+
+    def _purge_selected(self):
+        item = self.list_widget.currentItem()
+        if item is None:
+            return
+        name = item.data(Qt.UserRole)
+        label = item.text()
+        if not self._confirm_purge(
+            f"Delete {label} forever? This cannot be undone."
+        ):
+            return
+        try:
+            self._main.store.purge_trash(name)
+        except StellaError as exc:
+            QMessageBox.warning(self, "Stella", str(exc))
+            return
+        self._main.debug_log.action(f"trash purged: {name}")
+        self._refresh()
+
+    def _empty_trash(self):
+        if not self._confirm_purge(
+            "Delete everything in the trash forever? "
+            "This cannot be undone."
+        ):
+            return
+        count = self._main.store.empty_trash()
+        self._main.debug_log.action(f"trash emptied: {count} items")
+        self._refresh()
 
 
 class SettingsWindow(QDialog):
@@ -2336,6 +2518,15 @@ class MainWindow(QMainWindow):
         self._train_worker: TrainWorker | None = None
         self._sleep_worker: SleepWorker | None = None
         self._job_worker: JobWorker | None = None
+        # The running job worker's card title (T29): the refusal
+        # message names the running job, and a title is what the
+        # user recognizes ("Refusal probe", not "a job").
+        self._job_title: str | None = None
+        # Closing while a job runs (T36): the first close asks the
+        # workers to stop and waits with feedback; _closing is True
+        # until they have ended and the window closes for real.
+        self._closing = False
+        self._close_timer = None
         self._profile_windows: dict[str, ProfileWindow] = {}
         self._project_windows: dict[tuple, ProjectWindow] = {}
         self._settings_window: SettingsWindow | None = None
@@ -2489,6 +2680,11 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
         self._menu_action_settings = file_menu.addAction(
             "Settings...", self.open_settings_window
+        )
+        # T23: the trash is where deleted things wait, and where
+        # they are deleted forever.
+        self._menu_action_trash = file_menu.addAction(
+            "Trash...", self.open_trash_window
         )
         view_menu = bar.addMenu("View")
         self._menu_action_profiles = view_menu.addAction(
@@ -2899,6 +3095,11 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _project_label(p):
         label = p.get("display_name") or p.get("name") or "(unnamed project)"
+        # The status shows in the list row (T53): "Tool calls
+        # (done)". A damaged row has no status to show.
+        status = p.get("status")
+        if status and not p.get("_damaged"):
+            label += f" ({status})"
         # A broken metamorph block shows as a warning row (T39),
         # read through the shared reader — not a crash, not silent
         # normal. Every other project lists as usual.
@@ -3303,12 +3504,26 @@ class MainWindow(QMainWindow):
             w.setEnabled(has_session and not running)
         self._menu_action_run.setEnabled(self.go_btn.isEnabled())
 
+    def _running_job_name(self) -> str | None:
+        """The running job's plain-words name, or None when idle
+        (T29): the refusal message and the close feedback name the
+        job the user is waiting on."""
+        if self._training_running():
+            return "Training"
+        if self._sleep_running():
+            return "Sleep"
+        if self._job_worker is not None and self._job_worker.isRunning():
+            return self._job_title or "A job"
+        return None
+
     def _job_already_running(self) -> bool:
         """True when a job is running, with the plain-words refusal
-        said (T74): starting a second job is refused, not queued."""
-        if self._job_running():
+        said (T29/T74): starting a second job is refused, not
+        queued — and the message names the running job."""
+        name = self._running_job_name()
+        if name is not None:
             self._say(
-                "A job is already running. Wait for it to finish, "
+                f"{name} is already running. Wait for it to finish, "
                 "or cancel it first."
             )
             return True
@@ -3525,12 +3740,17 @@ class MainWindow(QMainWindow):
         self._start_job_worker(job, "Teaching a small model", True)
         self._train_log_line(f"Asking {teacher} the prompts...")
 
-    def _start_job_worker(self, job, title: str, determinate: bool):
+    def _start_job_worker(self, job, title: str, determinate: bool) -> bool:
         """Start a JobWorker job as a job card (T74): the card shows
         the title, the job's log lines become its live status, and
-        its progress reports move the bar. One job at a time — the
-        caller refuses a second job before this runs."""
+        its progress reports move the bar. One job at a time (T29):
+        a second job is refused here too, so no caller can ever
+        overwrite a running worker and orphan it. Returns False
+        when refused."""
+        if self._job_already_running():
+            return False
         self._job_worker = JobWorker(job)
+        self._job_title = title
         self._job_worker.log.connect(self._train_log_line)
         self._job_worker.log.connect(self.job_card.set_status)
         self._job_worker.progress.connect(self.job_card.set_progress)
@@ -3540,6 +3760,7 @@ class MainWindow(QMainWindow):
         self._job_worker.start()
         self._refresh_go()
         self._refresh_checklist()
+        return True
 
     # -- first-run checklist ----------------------------------------
     def _checklist_state(self) -> tuple[bool, bool, bool]:
@@ -3562,7 +3783,7 @@ class MainWindow(QMainWindow):
         step3 = False
         for p in profiles:
             for proj in self.store.list_projects(p["name"]):
-                if proj.get("status") == "trained":
+                if proj.get("status") == "done":
                     step3 = True
                     break
             if step3:
@@ -3942,6 +4163,16 @@ class MainWindow(QMainWindow):
         self._settings_window.activateWindow()
         return self._settings_window
 
+    def open_trash_window(self):
+        """Open the Trash window (T23): deleted profiles and
+        projects, and the delete-forever action. A fresh window
+        each time, so the list is never stale."""
+        trash = TrashDialog(self, parent=self)
+        trash.show()
+        trash.raise_()
+        trash.activateWindow()
+        return trash
+
     def open_howto_window(self):
         if self._howto_window is None:
             self._howto_window = HowToUseWindow(parent=self)
@@ -4057,9 +4288,11 @@ class MainWindow(QMainWindow):
         else:
             self.refresh_tree()
 
-    def _delete_confirm(self, title, text):
+    def _delete_confirm_with_export(self, title, text, export_label):
         """A destructive confirmation that defaults to No, and where
-        Escape leaves things untouched (U23/U31)."""
+        Escape leaves things untouched (U23/U31) — with an "Export
+        first" button (T23), so a delete can be a copy-out first.
+        Returns "yes", "no", or "export"."""
         box = QMessageBox(self)
         box.setWindowTitle(title)
         box.setText(text)
@@ -4067,18 +4300,37 @@ class MainWindow(QMainWindow):
         box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
         box.setDefaultButton(QMessageBox.No)
         box.setEscapeButton(QMessageBox.No)
-        return box.exec()
+        export_btn = box.addButton(export_label, QMessageBox.ActionRole)
+        result = box.exec()
+        # A stubbed exec (tests) returns a button value with no
+        # clicked button; a real click on Export first is read from
+        # the button, not the return value.
+        if box.clickedButton() is export_btn:
+            return "export"
+        if result == QMessageBox.Yes:
+            return "yes"
+        return "no"
 
     def delete_profile(self, slug=None):
         slug = slug or self._current_profile
         if not slug:
             return
-        answer = self._delete_confirm(
-            "Delete profile",
-            f"Delete profile {slug!r} and all its projects? This cannot be undone.",
-        )
-        if answer != QMessageBox.Yes:
-            return
+        while True:
+            answer = self._delete_confirm_with_export(
+                "Delete profile",
+                f"Move profile {slug!r} and all its projects to the "
+                "trash? You can move it back later, or delete it "
+                "forever from Trash in the File menu.",
+                "Export all projects first",
+            )
+            if answer == "export":
+                # Export, then ask again: the delete still needs
+                # its own Yes after the copy is safe.
+                self._export_all_projects(slug)
+                continue
+            if answer != "yes":
+                return
+            break
         try:
             self.store.delete_profile(slug)
         except StellaError as exc:
@@ -4095,6 +4347,7 @@ class MainWindow(QMainWindow):
             self.set_session(None, None)
         else:
             self.refresh_tree()
+        self._say(f"Moved profile {slug} to the trash.")
 
     # -- project actions --------------------------------------------
     def new_project(self):
@@ -4158,12 +4411,22 @@ class MainWindow(QMainWindow):
         project = project or self._selected_project()
         if not profile or not project:
             return
-        answer = self._delete_confirm(
-            "Delete project",
-            f"Delete project {project!r}? This cannot be undone.",
-        )
-        if answer != QMessageBox.Yes:
-            return
+        while True:
+            answer = self._delete_confirm_with_export(
+                "Delete project",
+                f"Move project {project!r} to the trash? You can "
+                "move it back later, or delete it forever from "
+                "Trash in the File menu.",
+                "Export this project first",
+            )
+            if answer == "export":
+                # Export, then ask again: the delete still needs
+                # its own Yes after the copy is safe.
+                self._export_project_to_folder(profile, project)
+                continue
+            if answer != "yes":
+                return
+            break
         try:
             self.store.delete_project(profile, project)
         except StellaError as exc:
@@ -4180,27 +4443,128 @@ class MainWindow(QMainWindow):
             self.set_session(profile, None)
         else:
             self.refresh_tree()
+        self._say(f"Moved project {project} to the trash.")
 
     # -- export / import --------------------------------------------
+    def _export_project_to_folder(self, profile, project):
+        """Pick a folder and export one project into it (T23: the
+        project delete dialog's "Export first" shares this).
+        Returns the export dir, or None when the user cancelled or
+        the export failed (a warning was already shown)."""
+        dest = QFileDialog.getExistingDirectory(
+            self, "Export project to folder", str(Path.home())
+        )
+        if not dest:
+            return None
+        try:
+            out = export_mod.export_project(
+                self.store, profile, project, dest
+            )
+        except StellaError as exc:
+            self._warn(str(exc))
+            return None
+        self.debug_log.action(
+            f"project exported: {profile}/{project} to {out}"
+        )
+        return out
+
+    def _export_all_projects(self, slug):
+        """Export every project in a profile (T23: the profile
+        delete dialog's "Export all projects first"). Returns True
+        when every project exported; False when the user cancelled
+        or any export failed (a warning was already shown)."""
+        dest = QFileDialog.getExistingDirectory(
+            self, "Export all projects to folder", str(Path.home())
+        )
+        if not dest:
+            return False
+        projects = [
+            p for p in self.store.list_projects(slug)
+            if not p.get("_damaged")
+        ]
+        if not projects:
+            self._warn(f"Profile {slug} has no projects to export.")
+            return False
+        failed = []
+        for proj in projects:
+            try:
+                export_mod.export_project(self.store, slug, proj["name"], dest)
+            except StellaError as exc:
+                failed.append(f"{proj['name']}: {exc}")
+        if failed:
+            self._warn(
+                "Some projects did not export:\n" + "\n".join(failed)
+            )
+            return False
+        self.debug_log.action(
+            f"profile exported: {slug} ({len(projects)} projects) "
+            f"to {dest}"
+        )
+        self._say(f"Exported {len(projects)} projects to {dest}.")
+        return True
+
     def export_project(self):
         profile = self._selected_profile()
         project = self._selected_project()
         if not profile or not project:
             self._warn("Pick a project to export.")
             return
-        dest = QFileDialog.getExistingDirectory(
-            self, "Export project to folder", str(Path.home())
-        )
-        if not dest:
+        out = self._export_project_to_folder(profile, project)
+        if out is None:
             return
-        try:
-            out = export_mod.export_project(self.store, profile, project, dest)
-        except StellaError as exc:
-            self._warn(str(exc))
-            return
-        self.debug_log.action(f"project exported: {profile}/{project} to {out}")
         self._say(f"Exported to {out}.")
         QMessageBox.information(self, "Stella", f"Exported project to:\n{out}")
+
+    # -- T57: the profile already exists, and the package disagrees --
+    def _profile_merge_box(self, slug, diff):
+        """The merge-choice dialog: one line per differing field, two
+        plain-word buttons. Factored out so tests can read the box
+        without showing it. Both buttons close the dialog; the
+        answer comes from which one was clicked."""
+        from PySide6.QtWidgets import QMessageBox
+
+        box = QMessageBox(self)
+        box.setWindowTitle("Profile already exists")
+        box.setText(
+            f"The profile {slug!r} is already here, but the package "
+            "says something different."
+        )
+        lines = []
+        for field in export_mod.PROFILE_BLOCK_FIELDS:
+            if field not in diff:
+                continue
+            word = export_mod.PROFILE_FIELD_WORDS[field]
+            local = diff[field]["local"] or "(blank)"
+            package = diff[field]["package"] or "(blank)"
+            lines.append(
+                f"{word}: yours is {local!r}, the package has "
+                f"{package!r}."
+            )
+        lines.append("")
+        lines.append("Keep yours, or use the package's?")
+        box.setInformativeText("\n".join(lines))
+        keep = box.addButton(
+            "Keep mine", QMessageBox.ButtonRole.AcceptRole
+        )
+        take = box.addButton(
+            "Use the package's", QMessageBox.ButtonRole.AcceptRole
+        )
+        box.setDefaultButton(keep)
+        box.setEscapeButton(keep)
+        box._stella_keep_button = keep
+        box._stella_take_button = take
+        return box
+
+    def _ask_profile_merge(self, slug, diff):
+        """The on_profile_conflict callback for import: show the
+        merge dialog, return "keep" or "take". A dialog that closes
+        without a click (or a stubbed exec in a test) keeps yours —
+        the safe answer."""
+        box = self._profile_merge_box(slug, diff)
+        box.exec()
+        if box.clickedButton() is box._stella_take_button:
+            return "take"
+        return "keep"
 
     def import_package(self):
         path = QFileDialog.getExistingDirectory(
@@ -4209,7 +4573,10 @@ class MainWindow(QMainWindow):
         if not path:
             return
         try:
-            result = export_mod.import_export(self.store, path)
+            result = export_mod.import_export(
+                self.store, path,
+                on_profile_conflict=self._ask_profile_merge,
+            )
         except StellaError as exc:
             self._warn(str(exc))
             self.refresh_tree()
@@ -4229,7 +4596,27 @@ class MainWindow(QMainWindow):
             f"project imported: {result['profile']}/{result['project']}"
         )
         self.set_session(result["profile"], result["project"])
-        self._say(f"Imported {result['project']} into {result['profile']}.")
+        # T57: the window says when the profile already existed,
+        # and when the profile now uses the package's values.
+        message = (
+            f"Imported {result['project']} into {result['profile']}."
+        )
+        if result.get("profile_existed"):
+            message += " The profile already existed."
+        if result.get("profile_choice") == "take":
+            fields = export_mod.describe_profile_diff(
+                result.get("profile_diff") or {}
+            )
+            message += (
+                f" The profile now uses the package's {fields}."
+            )
+        self._say(message)
+        # An import warning (T41: a "done" package with no
+        # weights imports as a draft) is shown, not buried: the
+        # project the user just imported is not what the package
+        # claimed it was.
+        for warning in result.get("warnings", []):
+            self._warn(warning)
 
     # -- training ---------------------------------------------------
     def _train_log_line(self, text: str):
@@ -4363,13 +4750,10 @@ class MainWindow(QMainWindow):
         if not profile or not project:
             self._warn("Pick a project to train.")
             return
-        if self._training_running():
-            self._say("Training is already running.")
-            return
-        if self._sleep_running():
-            # Training and sleep each load the base model — running
-            # both at once would blow the 8 GB ceiling.
-            self._say("Sleep is already running.")
+        # One job at a time (T29): training refuses while sleep OR
+        # any job-card job runs — a probe loading models beside a
+        # training run is the OOM shape the slot exists to stop.
+        if self._job_already_running():
             return
         # An open Project window may hold unsaved edits (T8): the
         # run trains on the STORED dataset, so edits sitting unsaved
@@ -4383,14 +4767,14 @@ class MainWindow(QMainWindow):
                     "Training not started: the project has unsaved changes."
                 )
                 return
-        # Re-training a trained project replaces the finished
+        # Re-training a finished project replaces the finished
         # adapter (T25): ask first. A "yes" passes force through
         # to the worker; a "no" stops here. Resume never asks —
         # it extends, and the loop announces that instead.
         force = False
         if not resume:
             status = self.store.get_project(profile, project).get("status")
-            if status == "trained":
+            if status == "done":
                 answer = QMessageBox.question(
                     self,
                     "Train again?",
@@ -4490,6 +4874,7 @@ class MainWindow(QMainWindow):
         self.refresh_session()
 
     def _on_job_finished(self, ok: bool, message: str):
+        self._job_title = None
         self._set_activity("idle", "Idle")
         self._train_log_line(message)
         self._say(message.splitlines()[0] if message else "Done.")
@@ -4505,11 +4890,9 @@ class MainWindow(QMainWindow):
         if not profile or not project:
             self._warn("Pick a project to sleep.")
             return
-        if self._training_running():
-            self._say("Training is already running.")
-            return
-        if self._sleep_running():
-            self._say("Sleep is already running.")
+        # One job at a time (T29): sleep refuses while training OR
+        # any job-card job runs, same as training does.
+        if self._job_already_running():
             return
         from .train import training_deps_missing
 
@@ -4650,11 +5033,19 @@ class MainWindow(QMainWindow):
             _passed, verdict = probe_gate(result)
             before = result["before"]
             after = result["after"]
-            return (
+            summary = (
                 f"Refusal probe: {before['refusals']}/{before['total']} "
                 f"refusals before, {after['refusals']}/{after['total']} "
-                f"after.\n{verdict}"
+                f"after."
             )
+            # T30: a silent prompt is named, not hidden inside a clean 0.
+            silent = before.get("empty", 0) + after.get("empty", 0)
+            if silent:
+                summary += (
+                    f" {silent} prompt"
+                    f"{'s' if silent != 1 else ''} got no answer."
+                )
+            return f"{summary}\n{verdict}"
 
         self._start_job_worker(job, "Refusal probe", True)
         self._train_log_line("Running refusal probe (before vs after)...")
@@ -4672,25 +5063,62 @@ class MainWindow(QMainWindow):
                 if item.isExpanded()
             ],
         )
-        if self._training_running():
-            self._train_worker.request_stop()
-            self._train_worker.wait(15000)
-        if self._sleep_running():
-            self._sleep_worker.request_stop()
-            self._sleep_worker.wait(15000)
-        if self._job_worker is not None and self._job_worker.isRunning():
-            # A job thread destroyed while running aborts the app:
-            # cancel it and wait for it to stop (the cancel kills
-            # a running subprocess; only the in-process merge phase
-            # of an export runs to its next check point).
-            self._job_worker.request_cancel()
-            self._job_worker.wait(60000)
+        if self._job_running():
+            # Close waits for every worker, without freezing (T36):
+            # the old code blocked the UI thread on wait(15000) —
+            # a 15-second dead window with no feedback, and a worker
+            # that ignored the stop was destroyed anyway (Qt prints
+            # "QThread: Destroyed while thread is still running",
+            # which can abort the app). Instead: ask the workers to
+            # stop, say so in plain words, and close when the last
+            # thread has actually ended. The window stays responsive
+            # the whole time, and no running thread is ever
+            # destroyed. A second close click while stopping just
+            # repeats the message.
+            name = self._running_job_name() or "A job"
+            if self._training_running():
+                self._train_worker.request_stop()
+            if self._sleep_running():
+                self._sleep_worker.request_stop()
+            if self._job_worker is not None and self._job_worker.isRunning():
+                # The cancel kills a running subprocess; only the
+                # in-process merge phase of an export runs to its
+                # next check point.
+                self._job_worker.request_cancel()
+            self._say(f"Stopping {name.lower()}...")
+            self.job_card.set_status(f"Stopping {name.lower()}...")
+            self._train_log_line(f"Stopping {name.lower()}...")
+            if not self._closing:
+                self._closing = True
+                self._close_timer = QTimer(self)
+                self._close_timer.setInterval(250)
+                self._close_timer.timeout.connect(self._finish_closing)
+                self._close_timer.start()
+            event.ignore()
+            return
+        if self._close_timer is not None:
+            self._close_timer.stop()
+            self._close_timer = None
+        self._closing = False
         if self._chat_window is not None:
             self._chat_window.stop_worker()
         if self.download_manager.is_running():
             self.download_manager.cancel()
             self.download_manager.wait_for_finished(5000)
         super().closeEvent(event)
+
+    def _finish_closing(self):
+        """The close timer's tick (T36): when the last worker has
+        ended, close for real. Until then the window stays open
+        with the "Stopping..." feedback showing."""
+        if not self._closing:
+            return
+        if self._job_running():
+            return
+        self._close_timer.stop()
+        self._close_timer = None
+        self._closing = False
+        self.close()
 
 
 def main(argv: list[str] | None = None) -> int:

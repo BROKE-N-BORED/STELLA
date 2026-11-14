@@ -907,11 +907,19 @@ class ChatAgent:
         before = result["before"]
         after = result["after"]
         _passed, verdict = probe_gate(result)
-        return (
+        summary = (
             f"Refusal probe for {project!r}: {before['refusals']}/"
             f"{before['total']} refusals before tuning, "
-            f"{after['refusals']}/{after['total']} after. {verdict}"
+            f"{after['refusals']}/{after['total']} after."
         )
+        # T30: a silent prompt is named, not hidden inside a clean 0.
+        silent = before.get("empty", 0) + after.get("empty", 0)
+        if silent:
+            summary += (
+                f" {silent} prompt"
+                f"{'s' if silent != 1 else ''} got no answer."
+            )
+        return f"{summary} {verdict}"
 
     def _tool_export_gguf(self, args: dict) -> str:
         session = self._need_session(args)

@@ -269,6 +269,134 @@ def test_detect_target_modules_none_found(need_torch):
         detect_target_modules(model)
 
 
+def _install_fake_torch(monkeypatch):
+    """A torch stand-in so detect_target_modules can be tested
+    without the training stack: nn.Linear is a plain class."""
+    import sys
+    import types
+
+    fake = types.ModuleType("torch")
+
+    class Linear:
+        pass
+
+    nn = types.ModuleType("torch.nn")
+    nn.Linear = Linear
+    fake.nn = nn
+    monkeypatch.setitem(sys.modules, "torch", fake)
+    return Linear
+
+
+class _FakeLayerModel:
+    """A model whose linear leaves are whatever names it is given."""
+
+    def __init__(self, linear, leaves):
+        self._linear = linear
+        self._leaves = leaves
+
+    def named_modules(self):
+        for leaf in self._leaves:
+            yield f"layers.0.{leaf}", self._linear()
+        yield "layers.0.norm", object()
+
+
+def test_detect_target_modules_override_honored(monkeypatch):
+    # T34: an unrecognized architecture trains with a hand-supplied
+    # list — the override is used as-is (sorted, deduped).
+    Linear = _install_fake_torch(monkeypatch)
+    model = _FakeLayerModel(Linear, ["weird_attn", "weird_mlp"])
+    assert detect_target_modules(
+        model, override=["weird_mlp", "weird_attn", "weird_attn"]
+    ) == ["weird_attn", "weird_mlp"]
+
+
+def test_detect_target_modules_override_missing_names(monkeypatch):
+    # T34: an override name the model does not have is refused,
+    # naming the missing one and what the model does have.
+    Linear = _install_fake_torch(monkeypatch)
+    model = _FakeLayerModel(Linear, ["weird_attn"])
+    with pytest.raises(StellaError, match="weird_nope"):
+        detect_target_modules(model, override=["weird_attn", "weird_nope"])
+    try:
+        detect_target_modules(model, override=["weird_nope"])
+    except StellaError as exc:
+        assert "weird_attn" in str(exc)
+
+
+def test_detect_target_modules_failure_names_override(monkeypatch):
+    # T34: when detection fails, the error names the override.
+    Linear = _install_fake_torch(monkeypatch)
+    model = _FakeLayerModel(Linear, ["weird_attn", "weird_mlp"])
+    with pytest.raises(StellaError, match="--target-modules"):
+        detect_target_modules(model)
+
+
+def test_detect_target_modules_empty_override_falls_back(monkeypatch):
+    # T34: an empty or missing override is auto-detection.
+    Linear = _install_fake_torch(monkeypatch)
+    model = _FakeLayerModel(Linear, ["q_proj", "k_proj", "weird"])
+    assert detect_target_modules(model, override=[]) == ["k_proj", "q_proj"]
+    assert detect_target_modules(model, override=None) == ["k_proj", "q_proj"]
+
+
+# -- T48: cheap checks before the deps gate -----------------------
+
+def test_train_bad_profile_reported_before_deps_gate(tmp_path):
+    # T48: on a base install, a wrong profile name is reported —
+    # not the deps message.
+    from stella.model import Store
+
+    store = _tiny_project(Store(tmp_path / "home"), tmp_path)
+    with pytest.raises(StellaError, match="no profile"):
+        train_project(store, "ghost", "proof")
+
+
+def test_train_missing_dataset_reported_before_deps_gate(tmp_path):
+    # T48: a missing dataset is reported, not the deps message.
+    from stella.model import Store
+
+    store = _tiny_project(Store(tmp_path / "home"), tmp_path)
+    store.update_project("tiny", "proof", dataset_ref="ghost.jsonl")
+    with pytest.raises(StellaError, match="dataset not found"):
+        train_project(store, "tiny", "proof")
+
+
+def test_train_no_checkpoints_reported_before_deps_gate(tmp_path):
+    # T48: --resume with no checkpoints is refused, not the deps.
+    from stella.model import Store
+
+    store = _tiny_project(Store(tmp_path / "home"), tmp_path)
+    with pytest.raises(StellaError, match="nothing to resume"):
+        train_project(store, "tiny", "proof", resume=True)
+
+
+def test_train_no_base_ref_reported_before_deps_gate(tmp_path):
+    # T48: a profile with no base_ref is reported, not the deps.
+    from stella.model import Store
+
+    store = Store(tmp_path / "home")
+    store.create_profile("p1")  # no base_ref
+    data = write_dataset(tmp_path / "data.jsonl", prompt_rows(4))
+    store.create_project("p1", "proj", dataset_ref=str(data))
+    with pytest.raises(StellaError, match="base_ref"):
+        train_project(store, "p1", "proj")
+
+
+def test_train_deps_gate_fires_only_when_ready(tmp_path, monkeypatch):
+    # T48: with everything else ready, the deps message is what a
+    # base install reports. The missing deps are faked so this
+    # holds in a full env too.
+    import stella.train as train_mod
+    from stella.model import Store
+
+    monkeypatch.setattr(
+        train_mod, "training_deps_missing", lambda: ["torch"]
+    )
+    store = _tiny_project(Store(tmp_path / "home"), tmp_path)
+    with pytest.raises(StellaError, match="install-training"):
+        train_project(store, "tiny", "proof")
+
+
 # -- the real loop on a tiny model (needs the training stack) -------
 
 def _tiny_project(store, tmp_path, rows=4):
@@ -314,7 +442,7 @@ def test_two_step_lora_run_saves_adapter(need_torch, tmp_path):
     project_dir = store.project_dir("tiny", "proof")
     assert (project_dir / "adapter" / "adapter_config.json").is_file()
     assert (project_dir / "adapter" / "training_summary.json").is_file()
-    assert store.get_project("tiny", "proof")["status"] == "trained"
+    assert store.get_project("tiny", "proof")["status"] == "done"
     log_lines = (project_dir / "train_log.jsonl").read_text().splitlines()
     assert len([json.loads(line) for line in log_lines
                 if "loss" in json.loads(line)]) == 3
@@ -322,6 +450,57 @@ def test_two_step_lora_run_saves_adapter(need_torch, tmp_path):
     assert [c["step"] for c in checkpoints] == [1, 2, 3]
     kinds = {e["type"] for e in events}
     assert {"started", "step", "checkpoint", "val", "done"} <= kinds
+
+
+def test_train_project_honors_target_modules_flag(need_torch, tmp_path):
+    # T34: a hand-supplied target list reaches the LoRA config and
+    # the summary.
+    from stella.model import Store
+
+    store = _tiny_project(Store(tmp_path / "home"), tmp_path)
+    summary = train_project(
+        store, "tiny", "proof",
+        _model_loader=tiny_model_and_tokenizer,
+        _dtype="float32",
+        target_modules=["c_attn"],
+    )
+    assert summary["target_modules"] == ["c_attn"]
+
+
+def test_train_project_uses_stored_target_modules(need_torch, tmp_path):
+    # T34: the stored setting is used when no flag is passed.
+    from stella.model import Store
+
+    store = _tiny_project(Store(tmp_path / "home"), tmp_path)
+    store.update_project(
+        "tiny", "proof", settings={"target_modules": ["c_fc"]}
+    )
+    summary = train_project(
+        store, "tiny", "proof",
+        _model_loader=tiny_model_and_tokenizer,
+        _dtype="float32",
+    )
+    assert summary["target_modules"] == ["c_fc"]
+
+
+def test_train_failure_marks_failed(need_torch, tmp_path, monkeypatch):
+    # T53: a run that errors is failed — a crash is not a pause.
+    import stella.train as train_mod
+    from stella.model import Store
+
+    store = _tiny_project(Store(tmp_path / "home"), tmp_path)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(train_mod, "run_training_loop", _boom)
+    with pytest.raises(RuntimeError, match="boom"):
+        train_project(
+            store, "tiny", "proof",
+            _model_loader=tiny_model_and_tokenizer,
+            _dtype="float32",
+        )
+    assert store.get_project("tiny", "proof")["status"] == "failed"
 
 
 def test_pause_then_resume_completes(need_torch, tmp_path):
@@ -357,7 +536,7 @@ def test_pause_then_resume_completes(need_torch, tmp_path):
     # 2 epochs x 3 steps = 6 total; the resume finished the rest.
     assert resumed["stopped"] is False
     assert resumed["steps"] == 6
-    assert store.get_project("tiny", "proof")["status"] == "trained"
+    assert store.get_project("tiny", "proof")["status"] == "done"
     assert (store.project_dir("tiny", "proof") / "adapter").is_dir()
 
 
@@ -911,7 +1090,7 @@ def test_train_metadata_estimate_then_loads_tiny_model(need_torch, tmp_path):
     assert summary["steps"] == 3
     assert summary["stopped"] is False
     assert (store.project_dir("tiny", "proof") / "adapter").is_dir()
-    assert store.get_project("tiny", "proof")["status"] == "trained"
+    assert store.get_project("tiny", "proof")["status"] == "done"
 
 
 def test_remote_metadata_from_fetched_files(monkeypatch, tmp_path):
@@ -1155,7 +1334,7 @@ def test_steps_cap_runs_exactly_n_steps(need_torch, tmp_path):
     assert summary["steps"] == 2
     assert summary["stopped"] is False
     assert summary["total_steps"] == 2
-    assert store.get_project("tiny", "proof")["status"] == "trained"
+    assert store.get_project("tiny", "proof")["status"] == "done"
     assert (store.project_dir("tiny", "proof") / "adapter").is_dir()
     started = [e for e in events if e["type"] == "started"]
     assert started[0]["total_steps"] == 2
@@ -1214,7 +1393,7 @@ def test_resume_with_steps_trains_exactly_n_more(need_torch, tmp_path):
     assert resumed["steps"] == 3
     assert resumed["total_steps"] == 3
     assert resumed["stopped"] is False
-    assert store.get_project("tiny", "proof")["status"] == "trained"
+    assert store.get_project("tiny", "proof")["status"] == "done"
     started = [e for e in events if e["type"] == "started"]
     assert started[0]["total_steps"] == 3
 
@@ -1231,7 +1410,7 @@ def _adapter_bytes(project_dir):
     }
 
 
-def test_retrain_trained_project_refuses_without_force(need_torch, tmp_path):
+def test_retrain_done_project_refuses_without_force(need_torch, tmp_path):
     from stella.model import Store
 
     store = _tiny_project(Store(tmp_path / "home"), tmp_path)
@@ -1239,7 +1418,7 @@ def test_retrain_trained_project_refuses_without_force(need_torch, tmp_path):
         store, "tiny", "proof",
         _model_loader=_seeded_loader(), _dtype="float32",
     )
-    assert store.get_project("tiny", "proof")["status"] == "trained"
+    assert store.get_project("tiny", "proof")["status"] == "done"
     before = _adapter_bytes(store.project_dir("tiny", "proof"))
     with pytest.raises(StellaError, match="already trained"):
         train_project(
@@ -1257,7 +1436,7 @@ def test_retrain_trained_project_refuses_without_force(need_torch, tmp_path):
     assert _adapter_bytes(store.project_dir("tiny", "proof")) == before
 
 
-def test_retrain_trained_project_with_force_retrains(need_torch, tmp_path):
+def test_retrain_done_project_with_force_retrains(need_torch, tmp_path):
     from stella.model import Store
 
     store = _tiny_project(Store(tmp_path / "home"), tmp_path)
@@ -1271,10 +1450,10 @@ def test_retrain_trained_project_with_force_retrains(need_torch, tmp_path):
     )
     assert summary["steps"] == 3
     assert summary["stopped"] is False
-    assert store.get_project("tiny", "proof")["status"] == "trained"
+    assert store.get_project("tiny", "proof")["status"] == "done"
 
 
-def test_resume_on_trained_announces_extension(need_torch, tmp_path):
+def test_resume_on_done_announces_extension(need_torch, tmp_path):
     # The audit's case: a --steps 2 proof run finishes (status
     # trained), then --resume extends it to the full schedule.
     # The run announces the extension + the new total first.
@@ -1287,7 +1466,7 @@ def test_resume_on_trained_announces_extension(need_torch, tmp_path):
         _model_loader=_seeded_loader(), _dtype="float32",
     )
     assert first["steps"] == 2
-    assert store.get_project("tiny", "proof")["status"] == "trained"
+    assert store.get_project("tiny", "proof")["status"] == "done"
     events: list[dict] = []
     resumed = train_project(
         store, "tiny", "proof", resume=True,
@@ -1332,7 +1511,7 @@ def test_resume_on_paused_does_not_announce_extension(need_torch, tmp_path):
     assert "extending" not in [e["type"] for e in events]
 
 
-def test_sleep_not_blocked_by_trained_status(need_torch, tmp_path):
+def test_sleep_not_blocked_by_done_status(need_torch, tmp_path):
     # Sleep consolidates a trained project with update_status=False:
     # the T25 refusal must not block it.
     from stella.model import Store
@@ -1342,7 +1521,7 @@ def test_sleep_not_blocked_by_trained_status(need_torch, tmp_path):
         store, "tiny", "proof",
         _model_loader=_seeded_loader(), _dtype="float32",
     )
-    assert store.get_project("tiny", "proof")["status"] == "trained"
+    assert store.get_project("tiny", "proof")["status"] == "done"
     cycle_dir = tmp_path / "cycle"
     summary = train_project(
         store, "tiny", "proof",
@@ -1351,4 +1530,4 @@ def test_sleep_not_blocked_by_trained_status(need_torch, tmp_path):
     )
     assert summary["steps"] == 3
     assert (cycle_dir / "adapter").is_dir()
-    assert store.get_project("tiny", "proof")["status"] == "trained"
+    assert store.get_project("tiny", "proof")["status"] == "done"

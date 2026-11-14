@@ -87,8 +87,9 @@ def test_tree_shows_role_and_tag(window):
     assert "lfm3:1.7b" in text
     child = window.tree.topLevelItem(0).child(0).text(0)
     assert "tool-calls" in child
-    # The tree label is just the project name: no dead mode suffix.
-    assert child == "tool-calls"
+    # The tree label is the project name plus its status (T53);
+    # the dead metamorph-mode suffix is still gone.
+    assert child == "tool-calls (draft)"
 
 
 def test_empty_store_window(qapp, store, settings):
@@ -142,6 +143,8 @@ def test_menu_bar_has_expected_menus_and_actions(window):
             "Import package...",
             "Run the picked job",
             "Settings...",
+            "Trash...",  # T23: deleted things wait here, and are
+            # deleted forever here.
         ],
         "View": ["Profiles", "Projects"],
         "Help": ["How to Use Stella...", "Chat..."],
@@ -435,7 +438,9 @@ def test_delete_confirm_defaults_to_no(window, monkeypatch):
     assert window.store.get_project("lfm3-tool", "tool-calls")
 
 
-def test_delete_project_actually_deletes(window, monkeypatch):
+def test_delete_project_moves_to_trash(window, monkeypatch):
+    # T23: deleting a project moves it to the trash, dated, with
+    # its contents intact — the list is empty but nothing is gone.
     from PySide6.QtWidgets import QMessageBox
 
     _select_session(window)
@@ -447,9 +452,15 @@ def test_delete_project_actually_deletes(window, monkeypatch):
     assert window._current_project is None
     assert window._current_profile == "lfm3-tool"
     assert window.tree.topLevelItem(0).childCount() == 0
+    entries = window.store.list_trash()
+    assert len(entries) == 1
+    assert entries[0]["kind"] == "project"
+    assert entries[0]["project"] == "tool-calls"
+    assert "trash" in window.statusBar().currentMessage()
 
 
-def test_delete_profile_actually_deletes(window, monkeypatch):
+def test_delete_profile_moves_to_trash(window, monkeypatch):
+    # T23: deleting a profile trashes the profile and its projects.
     from PySide6.QtWidgets import QMessageBox
 
     _select_session(window)
@@ -460,6 +471,80 @@ def test_delete_profile_actually_deletes(window, monkeypatch):
     assert window.store.list_profiles() == []
     assert window._current_profile is None
     assert window.tree.topLevelItemCount() == 0
+    entries = window.store.list_trash()
+    assert len(entries) == 1
+    assert entries[0]["kind"] == "profile"
+    assert entries[0]["profile"] == "lfm3-tool"
+    assert "trash" in window.statusBar().currentMessage()
+
+
+def test_delete_confirm_offers_export_first(window, monkeypatch):
+    # T23: the delete dialog offers to export first, before the
+    # delete happens.
+    from PySide6.QtWidgets import QMessageBox
+
+    _select_session(window)
+    seen = []
+
+    def fake_exec(self):
+        seen.append(self)
+        return QMessageBox.No
+
+    monkeypatch.setattr(QMessageBox, "exec", fake_exec)
+    window.delete_project()
+    assert len(seen) == 1
+    texts = [b.text() for b in seen[0].buttons()]
+    assert "Export this project first" in texts
+    window.delete_profile()
+    assert len(seen) == 2
+    texts = [b.text() for b in seen[1].buttons()]
+    assert "Export all projects first" in texts
+
+
+def test_trash_dialog_lists_and_purges(window, monkeypatch):
+    # T23: the Trash window lists what was deleted and can delete
+    # one item forever, with its own confirm defaulting to No.
+    from PySide6.QtWidgets import QMessageBox
+
+    _select_session(window)
+    seen = []
+
+    def fake_exec(self):
+        seen.append(self)
+        return QMessageBox.Yes
+
+    monkeypatch.setattr(QMessageBox, "exec", fake_exec)
+    window.delete_project()
+    trash = window.open_trash_window()
+    assert trash.list_widget.count() == 1
+    assert "tool-calls" in trash.list_widget.item(0).text()
+    # Nothing selected by default, so Delete forever starts off.
+    assert not trash.purge_btn.isEnabled()
+    trash.list_widget.setCurrentRow(0)
+    assert trash.purge_btn.isEnabled()
+    trash.purge_btn.click()
+    # The purge confirm defaulted to No (the last box shown).
+    assert seen[-1].defaultButton() is seen[-1].button(QMessageBox.No)
+    assert window.store.list_trash() == []
+    assert trash.list_widget.count() == 0
+    trash.close()
+
+
+def test_trash_dialog_empty_trash(window, monkeypatch):
+    # T23: Empty trash purges everything, with a confirm.
+    from PySide6.QtWidgets import QMessageBox
+
+    _select_session(window)
+    monkeypatch.setattr(
+        QMessageBox, "exec", lambda self: QMessageBox.Yes
+    )
+    window.delete_project()
+    trash = window.open_trash_window()
+    assert trash.empty_btn.isEnabled()
+    trash.empty_btn.click()
+    assert window.store.list_trash() == []
+    assert not trash.empty_btn.isEnabled()
+    trash.close()
 
 
 # -- text rules (U11, U33) ------------------------------------------
@@ -473,12 +558,14 @@ def test_no_ampersand_in_visible_labels(window):
     settings_win = window.open_settings_window()
     howto = window.open_howto_window()
     howto.topic_list.setCurrentRow(0)
+    trash = window.open_trash_window()
     bad = [t for t in _visible_texts(window) if "&" in t]
     assert bad == []
     prof.close()
     proj.close()
     settings_win.close()
     howto.close()
+    trash.close()
 
 
 def test_no_em_dash_in_visible_text(window, seeded):
@@ -499,6 +586,7 @@ def test_no_em_dash_in_visible_text(window, seeded):
     settings_win = window.open_settings_window()
     howto = window.open_howto_window()
     howto.topic_list.setCurrentRow(0)
+    trash = window.open_trash_window()
     bad = [t for t in _visible_texts(window) if "—" in t]
     # The sleep-cycle list rows are list items, not widgets: check too.
     for i in range(window.sleep_cycles.count()):
@@ -509,6 +597,7 @@ def test_no_em_dash_in_visible_text(window, seeded):
     proj.close()
     settings_win.close()
     howto.close()
+    trash.close()
 
 
 # -- train / sleep panels -------------------------------------------
@@ -1244,8 +1333,8 @@ def test_tree_warns_on_string_metamorph(window, seeded, qapp):
     warned = [r for r in rows if "warning" in r]
     assert len(warned) == 1
     assert "broken" in warned[0]
-    # The good project lists normally, with no warning.
-    assert any(r == "tool-calls" for r in rows)
+    # The good project lists normally, with its status and no warning.
+    assert any(r == "tool-calls (draft)" for r in rows)
 
 
 # -- T1: GUI import handler ------------------------------------------
@@ -1518,7 +1607,7 @@ def test_tree_shows_damaged_project_row(window, seeded, qapp):
     window.refresh_tree()
     qapp.processEvents()
     child = window.tree.topLevelItem(0).child(0)
-    assert child.text(0) == "tool-calls"
+    assert child.text(0) == "tool-calls (draft)"
     assert child.font(0).italic() is False
 
 
@@ -1936,13 +2025,13 @@ def _start_training_ready(window, monkeypatch):
     monkeypatch.setattr(gui_mod.TrainWorker, "run", lambda self: None)
 
 
-def test_start_training_on_trained_project_asks_first(
+def test_start_training_on_done_project_asks_first(
     window, seeded, monkeypatch, qapp
 ):
     from PySide6.QtWidgets import QMessageBox
 
     _select_session(window)
-    seeded.update_project("lfm3-tool", "tool-calls", status="trained")
+    seeded.update_project("lfm3-tool", "tool-calls", status="done")
     asked = []
     monkeypatch.setattr(
         QMessageBox, "question",
@@ -1957,13 +2046,13 @@ def test_start_training_on_trained_project_asks_first(
     assert window._train_worker is None
 
 
-def test_start_training_on_trained_project_yes_forces(
+def test_start_training_on_done_project_yes_forces(
     window, seeded, monkeypatch, qapp
 ):
     from PySide6.QtWidgets import QMessageBox
 
     _select_session(window)
-    seeded.update_project("lfm3-tool", "tool-calls", status="trained")
+    seeded.update_project("lfm3-tool", "tool-calls", status="done")
     monkeypatch.setattr(
         QMessageBox, "question", lambda *a, **k: QMessageBox.Yes
     )
@@ -1980,7 +2069,7 @@ def test_start_training_on_draft_project_does_not_ask(
     from PySide6.QtWidgets import QMessageBox
 
     _select_session(window)
-    assert seeded.get_project("lfm3-tool", "tool-calls")["status"] != "trained"
+    assert seeded.get_project("lfm3-tool", "tool-calls")["status"] != "done"
     asked = []
     monkeypatch.setattr(
         QMessageBox, "question",
@@ -2281,10 +2370,10 @@ def test_checklist_steps_tick_as_setup_progresses(
     qapp.processEvents()
     assert win.check_steps[1][0].text() == "✓"
     assert win.check_steps[2][1].isEnabled()
-    # A trained project ticks step 3 and the checklist is done:
+    # A finished project ticks step 3 and the checklist is done:
     # the bento shows, and the checklist never comes back.
     store.create_project("lfm3-tool", "tool-calls")
-    store.update_project("lfm3-tool", "tool-calls", status="trained")
+    store.update_project("lfm3-tool", "tool-calls", status="done")
     win.refresh_session()
     qapp.processEvents()
     assert not win.checklist_widget.isVisible()
@@ -2653,6 +2742,136 @@ def test_second_job_is_refused_in_plain_words(window, monkeypatch, qapp):
     QTest.qWait(500)
 
 
+def test_train_refused_while_job_runs_and_names_it(window, monkeypatch, qapp):
+    """T29: training refuses while a job-card job runs, naming it —
+    the train-vs-job hole (A8-W7): start_training used to check
+    train/sleep only, so a probe could load models beside a run."""
+    import time
+
+    from PySide6.QtTest import QTest
+
+    _select_session(window)
+    said = []
+    monkeypatch.setattr(window, "_say", said.append)
+
+    def job(ctx):
+        for _ in range(40):
+            if ctx.is_cancelled():
+                return "stopped"
+            time.sleep(0.05)
+        return "done"
+
+    window._start_job_worker(job, "Refusal probe", True)
+    assert window._job_worker.isRunning()
+    window.start_training()
+    assert window._train_worker is None
+    assert any("Refusal probe is already running" in s for s in said)
+    window.job_card.cancel_btn.click()
+    QTest.qWait(500)
+
+
+def test_probe_refused_while_export_runs(window, monkeypatch, qapp):
+    """T29: the probe refuses while an export runs — starting a
+    second job never overwrites the running worker."""
+    import time
+
+    from PySide6.QtTest import QTest
+
+    _select_session(window)
+    said = []
+    monkeypatch.setattr(window, "_say", said.append)
+
+    def job(ctx):
+        for _ in range(40):
+            if ctx.is_cancelled():
+                return "stopped"
+            time.sleep(0.05)
+        return "done"
+
+    window._start_job_worker(job, "Exporting GGUF", False)
+    first = window._job_worker
+    assert first.isRunning()
+    window.run_probe_gui()
+    assert window._job_worker is first
+    assert any("Exporting GGUF is already running" in s for s in said)
+    window.job_card.cancel_btn.click()
+    QTest.qWait(500)
+
+
+def test_start_job_worker_itself_refuses_a_second_job(window, qapp):
+    """T29: even a direct _start_job_worker call cannot orphan a
+    running worker — the guard lives in the starter, not just the
+    callers."""
+    import time
+
+    from PySide6.QtTest import QTest
+
+    _select_session(window)
+
+    def job(ctx):
+        for _ in range(40):
+            if ctx.is_cancelled():
+                return "stopped"
+            time.sleep(0.05)
+        return "done"
+
+    assert window._start_job_worker(job, "A long job", False) is True
+    first = window._job_worker
+    assert window._start_job_worker(job, "Another job", False) is False
+    assert window._job_worker is first
+    window.job_card.cancel_btn.click()
+    QTest.qWait(500)
+
+
+def test_close_during_job_waits_with_feedback_and_closes(window, qapp):
+    """T36: closing mid-job shows Stopping feedback, waits for the
+    worker to end, and closes cleanly — no 15-second freeze, no
+    destroyed thread."""
+    import time
+
+    from PySide6.QtTest import QTest
+
+    _select_session(window)
+
+    def job(ctx):
+        for _ in range(200):
+            if ctx.is_cancelled():
+                return "stopped"
+            time.sleep(0.05)
+        return "done"
+
+    window._start_job_worker(job, "A long job", False)
+    assert window._job_worker.isRunning()
+    assert window.close() is False  # ignored: a job is running
+    assert window.isVisible()
+    assert "Stopping" in window.statusBar().currentMessage()
+    deadline = 0
+    while window.isVisible() and deadline < 10000:
+        QTest.qWait(100)
+        deadline += 100
+    assert not window.isVisible()
+    assert window._job_worker.isRunning() is False
+
+
+def test_close_during_job_subprocess_no_destroyed_thread(tmp_path):
+    """T36: closing mid-job in a separate process exits 0 with no
+    destroyed-thread warning on stderr."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    home = tmp_path / "home"
+    res = subprocess.run(
+        [sys.executable, str(root / "tests" / "_close_driver.py"), str(home)],
+        cwd=root, env=dict(os.environ), capture_output=True, text=True,
+        timeout=60,
+    )
+    assert res.returncode == 0, res.stderr
+    assert "Destroyed while thread" not in res.stderr
+
+
 def test_requant_runs_as_a_job_card(window, monkeypatch, qapp):
     """T74/T75: Make smaller runs as a card with a title."""
     from PySide6.QtTest import QTest
@@ -2823,7 +3042,7 @@ def test_tree_rows_carry_full_text_tooltips(window):
     top = window.tree.topLevelItem(0)
     assert top.toolTip(0).startswith(top.text(0))
     child = top.child(0)
-    assert child.toolTip(0) == "tool-calls"
+    assert child.toolTip(0) == "tool-calls (draft)"
 
 
 def test_profile_row_shows_health_badge(window, monkeypatch, qapp):
@@ -2886,6 +3105,41 @@ def test_download_enabled_with_repo(window, seeded, qapp):
     assert window.download_fix_btn.isVisible() is False
 
 
+def test_project_window_shows_status_and_mark_ready(window, seeded):
+    # T53: the project window shows the status read-only, and a
+    # draft can be marked ready from here — the tree row shows the
+    # new status too.
+    win = window.open_project_window("lfm3-tool", "tool-calls")
+    assert win.status_label.text() == "draft"
+    assert not win.mark_ready_btn.isHidden()
+    win.mark_ready_btn.click()
+    assert seeded.get_project("lfm3-tool", "tool-calls")["status"] == "ready"
+    assert win.status_label.text() == "ready"
+    assert win.mark_ready_btn.isHidden()
+    child = window.tree.topLevelItem(0).child(0)
+    assert child.text(0) == "tool-calls (ready)"
+    win.close()
+
+
+def test_project_window_hides_mark_ready_when_not_draft(window, seeded):
+    # T53: Mark ready only shows for a draft.
+    seeded.update_project("lfm3-tool", "tool-calls", status="ready")
+    win = window.open_project_window("lfm3-tool", "tool-calls")
+    assert win.status_label.text() == "ready"
+    assert win.mark_ready_btn.isHidden()
+    win.close()
+
+
+def test_tree_row_shows_status(window, seeded):
+    # T53: the list row shows the status in plain words.
+    child = window.tree.topLevelItem(0).child(0)
+    assert child.text(0) == "tool-calls (draft)"
+    seeded.update_project("lfm3-tool", "tool-calls", status="done")
+    window.refresh_tree()
+    child = window.tree.topLevelItem(0).child(0)
+    assert child.text(0) == "tool-calls (done)"
+
+
 def test_profile_window_base_edit_blank_for_tag(window, seeded, qapp):
     """T79: a tag-valued base_ref is not shown as if it were a
     repo; a real repo is shown."""
@@ -2907,6 +3161,59 @@ def test_profile_window_base_edit_blank_for_tag(window, seeded, qapp):
     seeded.update_profile("lfm3-tool", base_ref="LiquidAI/LFM3-1.7B")
     win = window.open_profile_window("lfm3-tool")
     assert win.base_edit.text() == "LiquidAI/LFM3-1.7B"
+    win.close()
+
+
+def test_profile_save_syncs_base_with_tag(window, seeded, monkeypatch):
+    # T54: changing the tag in the profile window syncs the base
+    # ref — the field shows blank for a tag-valued base (T79) and
+    # the save must not clear it.
+    from PySide6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.Yes
+    )
+    win = window.open_profile_window("lfm3-tool")
+    assert win.base_edit.text() == ""
+    win.tag_combo.setCurrentText("lfm3:2b")
+    assert win.save() is True
+    assert seeded.get_profile("lfm3-tool")["base_ref"] == "lfm3:2b"
+    win.close()
+
+
+def test_profile_save_keeps_split_base(window, seeded, monkeypatch):
+    # T54: a repo base stays split when the tag changes.
+    from PySide6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.Yes
+    )
+    seeded.update_profile("lfm3-tool", base_ref="LiquidAI/LFM3-1.7B")
+    win = window.open_profile_window("lfm3-tool")
+    assert win.base_edit.text() == "LiquidAI/LFM3-1.7B"
+    win.tag_combo.setCurrentText("lfm3:2b")
+    assert win.save() is True
+    assert (
+        seeded.get_profile("lfm3-tool")["base_ref"]
+        == "LiquidAI/LFM3-1.7B"
+    )
+    win.close()
+
+
+def test_profile_save_passes_edited_base(window, seeded, monkeypatch):
+    # T54: typing a repo into the blank base field stores it.
+    from PySide6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.Yes
+    )
+    win = window.open_profile_window("lfm3-tool")
+    win.base_edit.setText("LiquidAI/LFM3-1.7B")
+    assert win.save() is True
+    assert (
+        seeded.get_profile("lfm3-tool")["base_ref"]
+        == "LiquidAI/LFM3-1.7B"
+    )
     win.close()
 
 
@@ -3117,3 +3424,114 @@ def test_tab_order_follows_visual_order(window, seeded, qapp):
     QTest.keyClick(window.new_model_btn, Qt.Key_Tab)
     qapp.processEvents()
     assert QApplication.focusWidget() is window.download_btn
+
+
+# -- T57: merge, don't discard, the profile block on import --------
+
+
+def _source_package(tmp_path):
+    """A package exported from a separate home: profile lfm3-tool,
+    tag lfm3:1.7b, role fast, project tool-calls."""
+    from stella import export as export_mod
+    from stella.model import Store
+
+    src = Store(tmp_path / "src-home")
+    src.create_profile("lfm3-tool", ollama_tag="lfm3:1.7b", role="fast")
+    src.create_project("lfm3-tool", "tool-calls",
+                       dataset_ref="forge-traces.jsonl")
+    return export_mod.export_project(
+        src, "lfm3-tool", "tool-calls", tmp_path)
+
+
+def _clear_seeded_project(window, seeded):
+    """Remove the seeded project (to the trash) so an import of
+    tool-calls can land; the profile stays."""
+    seeded.delete_project("lfm3-tool", "tool-calls")
+    window.refresh_tree()
+
+
+def test_profile_merge_box_lists_fields_and_defaults_to_keep(window):
+    diff = {
+        "ollama_tag": {"local": "other:9b", "package": "lfm3:1.7b"},
+        "role": {"local": "driver", "package": "fast"},
+    }
+    box = window._profile_merge_box("lfm3-tool", diff)
+    assert box.windowTitle() == "Profile already exists"
+    assert "lfm3-tool" in box.text()
+    info = box.informativeText()
+    assert "tag: yours is 'other:9b', the package has 'lfm3:1.7b'." in info
+    assert "role: yours is 'driver', the package has 'fast'." in info
+    assert "Keep yours, or use the package's?" in info
+    assert [b.text() for b in box.buttons()] == [
+        "Keep mine", "Use the package's"]
+    assert box.defaultButton() is box._stella_keep_button
+    assert box.escapeButton() is box._stella_keep_button
+    # No em-dash anywhere in the dialog's visible text.
+    for text in (box.text(), info, box.windowTitle()):
+        assert "\u2014" not in text
+
+
+def test_import_identical_profile_is_silent_and_says_existed(
+        window, seeded, tmp_path, monkeypatch, qapp):
+    from PySide6.QtWidgets import QFileDialog
+
+    pkg = _source_package(tmp_path)
+    _clear_seeded_project(window, seeded)
+    monkeypatch.setattr(
+        QFileDialog, "getExistingDirectory", lambda *a, **k: str(pkg))
+    window.import_package()
+    qapp.processEvents()
+    message = window.statusBar().currentMessage()
+    assert "Imported tool-calls into lfm3-tool." in message
+    assert "The profile already existed." in message
+    assert "now uses" not in message
+
+
+def test_import_differing_profile_asks_and_keeps(
+        window, seeded, tmp_path, monkeypatch, qapp):
+    from PySide6.QtWidgets import QFileDialog, QMessageBox
+
+    pkg = _source_package(tmp_path)
+    _clear_seeded_project(window, seeded)
+    seeded.update_profile("lfm3-tool", ollama_tag="other:9b",
+                          role="driver")
+    monkeypatch.setattr(
+        QFileDialog, "getExistingDirectory", lambda *a, **k: str(pkg))
+    # No click: the dialog closes without an answer, which keeps
+    # yours — the safe answer.
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: 1)
+    window.import_package()
+    qapp.processEvents()
+    prof = seeded.get_profile("lfm3-tool")
+    assert (prof["ollama_tag"], prof["role"]) == ("other:9b", "driver")
+    message = window.statusBar().currentMessage()
+    assert "The profile already existed." in message
+    assert "now uses" not in message
+
+
+def test_import_differing_profile_take_updates_profile(
+        window, seeded, tmp_path, monkeypatch, qapp):
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QApplication, QFileDialog
+
+    pkg = _source_package(tmp_path)
+    _clear_seeded_project(window, seeded)
+    seeded.update_profile("lfm3-tool", ollama_tag="other:9b",
+                          role="driver")
+    monkeypatch.setattr(
+        QFileDialog, "getExistingDirectory", lambda *a, **k: str(pkg))
+
+    def click_take():
+        dlg = QApplication.activeModalWidget()
+        assert dlg is not None
+        dlg._stella_take_button.click()
+
+    QTimer.singleShot(100, click_take)
+    window.import_package()
+    qapp.processEvents()
+    prof = seeded.get_profile("lfm3-tool")
+    assert (prof["ollama_tag"], prof["role"], prof["base_ref"]) == (
+        "lfm3:1.7b", "fast", "lfm3:1.7b")
+    message = window.statusBar().currentMessage()
+    assert "The profile already existed." in message
+    assert "The profile now uses the package's tag, role and base." in message

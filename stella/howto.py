@@ -200,15 +200,12 @@ gigabytes, and the other PC downloads them the same way you did.
 
 Import brings a package back in. File menu, then Import package, and
 pick the export folder. It creates the profile if it is not there
-yet, and brings back the notes, checkpoints, and sleep
-cycles.
-
-One honest gap: import does not put the trained adapter or the
-probe results back into the project. They stay in the export
-folder, in weights/ and probe_results.json. The project keeps its
-"trained" status, but the adapter itself is not restored. If you
-need the adapter on the new PC, copy the weights/ folder into the
-project folder by hand and name it adapter/.""",
+yet, and brings back the notes, checkpoints, sleep cycles, the
+trained adapter (into the project's adapter folder), and the
+refusal-probe results. A package that says the project finished
+training but carries no weights imports as a draft instead, with a
+warning. A project with no weights must not claim to be
+finished.""",
     ),
     (
         "The refusal probe",

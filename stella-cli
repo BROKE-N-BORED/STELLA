@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# STELLA command line — run with: bash stella <command>
-#   bash stella profiles
-#   bash stella projects <profile>
-#   bash stella export <profile> <project> <dir>
-#   bash stella import <export-dir>
-#   bash stella train <profile> <project>
-#   bash stella export-gguf <profile> <project> <dir>
-#   bash stella probe <profile> <project>
+# STELLA command line — run with: bash stella-cli <command>
+#   bash stella-cli profiles
+#   bash stella-cli projects <profile>
+#   bash stella-cli export <profile> <project> <dir>
+#   bash stella-cli import <export-dir>
+#   bash stella-cli create-profile <name> --tag <ollama-tag> --role <role>
+#   bash stella-cli create-project <profile> <name>
+#   bash stella-cli train <profile> <project>
+#   bash stella-cli export-gguf <profile> <project> <dir>
+#   bash stella-cli probe <profile> <project>
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"

@@ -1,5 +1,6 @@
 """Data-model tests: profiles, projects, validation, notes."""
 import json
+import re
 
 import pytest
 
@@ -65,6 +66,49 @@ def test_rename_profile(store):
     assert (store.home / "profiles" / "new" / "profile.json").is_file()
 
 
+def test_tag_update_syncs_base_ref(store):
+    # T54: the audit probe — update a tag and base_ref follows it.
+    store.create_profile("p1", ollama_tag="lfm3:1.7b")
+    assert store.get_profile("p1")["base_ref"] == "lfm3:1.7b"
+    updated = store.update_profile("p1", ollama_tag="lfm3:2b")
+    assert updated["base_ref"] == "lfm3:2b"
+
+
+def test_tag_update_keeps_split_base_ref(store):
+    # T54: a base_ref that differs from the old tag is a deliberate
+    # split — it stays.
+    store.create_profile(
+        "p1", ollama_tag="lfm3:1.7b", base_ref="LiquidAI/LFM3-1.7B"
+    )
+    updated = store.update_profile("p1", ollama_tag="lfm3:2b")
+    assert updated["base_ref"] == "LiquidAI/LFM3-1.7B"
+
+
+def test_tag_update_syncs_empty_base_ref(store):
+    # T54: an empty base_ref follows the new tag too.
+    store.create_profile("p1")
+    updated = store.update_profile("p1", ollama_tag="lfm3:2b")
+    assert updated["base_ref"] == "lfm3:2b"
+
+
+def test_explicit_base_ref_wins_over_sync(store):
+    # T54: a base_ref passed in the same call always wins.
+    store.create_profile("p1", ollama_tag="lfm3:1.7b")
+    updated = store.update_profile(
+        "p1", ollama_tag="lfm3:2b", base_ref="someone/else"
+    )
+    assert updated["base_ref"] == "someone/else"
+
+
+def test_update_without_tag_change_leaves_base_ref(store):
+    # T54: the sync only fires on a tag change.
+    store.create_profile("p1", ollama_tag="lfm3:1.7b")
+    updated = store.update_profile("p1", role="fast")
+    assert updated["base_ref"] == "lfm3:1.7b"
+    updated = store.update_profile("p1", ollama_tag="lfm3:1.7b")
+    assert updated["base_ref"] == "lfm3:1.7b"
+
+
 def test_rename_profile_collision(store):
     store.create_profile("a")
     store.create_profile("b")
@@ -73,11 +117,100 @@ def test_rename_profile_collision(store):
 
 
 def test_delete_profile(store):
+    # T23: deleting moves to the trash, dated, contents intact.
     store.create_profile("p1")
     store.create_project("p1", "proj")
-    store.delete_profile("p1")
+    trashed = store.delete_profile("p1")
     assert store.list_profiles() == []
     assert not (store.home / "profiles" / "p1").exists()
+    assert trashed.is_dir()
+    assert trashed.parent == store.trash_dir
+    assert trashed.name.startswith("p1-")
+    assert (trashed / "profile.json").is_file()
+    assert (trashed / "projects" / "proj" / "project.json").is_file()
+
+
+def test_delete_project_moves_to_trash_with_contents(store):
+    # T23: checkpoints and notes survive the move to the trash.
+    store.create_profile("p1")
+    store.create_project("p1", "proj")
+    store.write_notes("p1", "proj", "keep me\n")
+    pdir = store.project_dir("p1", "proj")
+    ckpt = pdir / "checkpoints" / "1"
+    ckpt.mkdir(parents=True)
+    (ckpt / "adapter_model.safetensors").write_bytes(b"w")
+    trashed = store.delete_project("p1", "proj")
+    assert store.list_projects("p1") == []
+    assert trashed.name.startswith("p1-proj-")
+    assert (trashed / "notes.md").read_text() == "keep me\n"
+    assert (
+        trashed / "checkpoints" / "1" / "adapter_model.safetensors"
+    ).read_bytes() == b"w"
+
+
+def test_trash_names_are_dated_and_unique(store):
+    # T23: <base>-YYYYMMDD-HHMMSS, with a -2 suffix when two
+    # deletes land in the same second.
+    store.create_profile("p1")
+    store.create_project("p1", "a")
+    store.create_project("p1", "b")
+    first = store.delete_project("p1", "a")
+    second = store.delete_project("p1", "b")
+    assert first.name != second.name
+    for name in (first.name, second.name):
+        assert re.search(r"-\d{8}-\d{6}(-\d+)?$", name), name
+    entries = store.list_trash()
+    assert {e["project"] for e in entries} == {"a", "b"}
+    assert all(e["kind"] == "project" for e in entries)
+    assert all(e["profile"] == "p1" for e in entries)
+    assert all(e["trashed"].startswith("20") for e in entries)
+
+
+def test_restore_by_moving_back(store):
+    # T23: restoring is a plain move back — no special code needed.
+    store.create_profile("p1")
+    store.create_project("p1", "proj")
+    trashed = store.delete_project("p1", "proj")
+    dest = store.home / "profiles" / "p1" / "projects" / "proj"
+    trashed.rename(dest)
+    assert store.get_project("p1", "proj")["name"] == "proj"
+    assert store.list_trash() == []
+
+
+def test_purge_trash_deletes_forever(store):
+    # T23: purge is the only permanent delete.
+    store.create_profile("p1")
+    trashed = store.delete_profile("p1")
+    store.purge_trash(trashed.name)
+    assert not trashed.exists()
+    assert store.list_trash() == []
+    with pytest.raises(StellaError):
+        store.purge_trash("no-such-item")
+    with pytest.raises(StellaError):
+        store.purge_trash("../profiles")
+
+
+def test_empty_trash(store):
+    # T23: emptying removes every trashed item, and reports how many.
+    store.create_profile("p1")
+    store.create_project("p1", "a")
+    store.create_project("p1", "b")
+    store.delete_project("p1", "a")
+    store.delete_project("p1", "b")
+    assert store.empty_trash() == 2
+    assert store.list_trash() == []
+    assert store.empty_trash() == 0
+
+
+def test_destroy_methods_leave_no_trash(store):
+    # T23: the import rollback's destroy path leaves the home
+    # exactly as it was — no trash folder behind.
+    store.create_profile("p1")
+    store.create_project("p1", "proj")
+    store._destroy_project("p1", "proj")
+    store._destroy_profile("p1")
+    assert store.list_profiles() == []
+    assert not store.trash_dir.exists()
 
 
 def test_create_project_defaults(store):
@@ -128,13 +261,95 @@ def test_update_project_merges_settings(store):
     assert updated["metamorph"] == {"mode": "compress", "notes": "small"}
 
 
+def test_target_modules_setting_validated(store):
+    # T34: target_modules is a list of layer names, or empty for
+    # auto-detection; anything else is refused, naming the setting.
+    from stella.model import validate_settings
+
+    assert validate_settings({"target_modules": []}) == {
+        "target_modules": []
+    }
+    assert validate_settings({"target_modules": ["q_proj", " k_proj "]}) == {
+        "target_modules": ["q_proj", "k_proj"]
+    }
+    for bad in ("q_proj", ["q_proj", 7], ["q_proj", ""], ["  "], [None]):
+        with pytest.raises(StellaError, match="target_modules"):
+            validate_settings({"target_modules": bad})
+    with pytest.raises(StellaError, match="target_modules"):
+        validate_settings({"target_module": ["q_proj"]})
+
+
+def test_create_project_stores_target_modules(store):
+    # T34: the setting survives a create + read round trip.
+    store.create_profile("p1")
+    data = store.create_project(
+        "p1", "proj", settings={"target_modules": ["weird_a", "weird_b"]}
+    )
+    assert data["settings"]["target_modules"] == ["weird_a", "weird_b"]
+    assert store.get_project("p1", "proj")["settings"]["target_modules"] == [
+        "weird_a", "weird_b",
+    ]
+
+
+def test_update_project_rejects_invalid_status(store):
+    # T53: status is a validated enum — "banana" is rejected.
+    store.create_profile("p1")
+    store.create_project("p1", "proj")
+    with pytest.raises(StellaError, match="status must be one of"):
+        store.update_project("p1", "proj", status="banana")
+    with pytest.raises(StellaError, match="status must be one of"):
+        store.update_project("p1", "proj", status=5)
+
+
+def test_update_project_stamps_status_changed(store):
+    # T53: every real transition stamps status_changed; a
+    # same-status update does not re-stamp.
+    store.create_profile("p1")
+    store.create_project("p1", "proj")
+    assert "status_changed" not in store.get_project("p1", "proj")
+    updated = store.update_project("p1", "proj", status="ready")
+    assert updated["status_changed"]
+    first = updated["status_changed"]
+    updated = store.update_project("p1", "proj", status="ready")
+    assert updated["status_changed"] == first
+    updated = store.update_project("p1", "proj", status="training")
+    assert updated["status_changed"] >= first
+
+
+def test_legacy_trained_status_reads_as_done(store):
+    # T53: a v0.1-v0.12 "trained" project reads as "done" — in
+    # memory; the file on disk is untouched until a write happens.
+    store.create_profile("p1")
+    store.create_project("p1", "proj")
+    manifest = store.project_dir("p1", "proj") / "project.json"
+    data = json.loads(manifest.read_text())
+    data["status"] = "trained"
+    manifest.write_text(json.dumps(data))
+    assert store.get_project("p1", "proj")["status"] == "done"
+    assert store.list_projects("p1")[0]["status"] == "done"
+    assert json.loads(manifest.read_text())["status"] == "trained"
+    store.update_project("p1", "proj", status="done")
+    assert json.loads(manifest.read_text())["status"] == "done"
+
+
+def test_update_project_accepts_legacy_trained(store):
+    # T53: writing the old word stores the new one, never the old.
+    store.create_profile("p1")
+    store.create_project("p1", "proj")
+    updated = store.update_project("p1", "proj", status="trained")
+    assert updated["status"] == "done"
+
+
 def test_rename_and_delete_project(store):
     store.create_profile("p1")
     store.create_project("p1", "old")
     renamed = store.rename_project("p1", "old", "new")
     assert renamed["name"] == "new"
-    store.delete_project("p1", "new")
+    trashed = store.delete_project("p1", "new")
     assert store.list_projects("p1") == []
+    # T23: the delete went to the trash, under the renamed name.
+    assert trashed.name.startswith("p1-new-")
+    assert store.list_trash()[0]["project"] == "new"
 
 
 def test_notes_round_trip(store):

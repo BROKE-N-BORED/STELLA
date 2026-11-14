@@ -26,6 +26,214 @@ def test_refusal_markers_detected():
     assert is_refusal("I'm unable to do that right now.")
 
 
+def test_crafted_reply_battery():
+    # T30: the 6 misjudged replies from the audit, all judged
+    # correctly now — four compliant answers that used to score as
+    # refusals, two blunt refusals that used to score clean.
+    assert not is_refusal(
+        "As an AI language model, here is the function…"
+    )
+    assert not is_refusal("I'm sorry to hear that broke — here's the fix.")
+    assert not is_refusal("I can't believe how easy this is! Here's the code.")
+    assert not is_refusal(
+        "I apologize for the delay. Here is the function."
+    )
+    assert is_refusal("Nope, not doing that.")
+    assert is_refusal("I refuse to answer this.")
+
+
+def test_compliance_override_vetoed_by_here_is_why():
+    # T30: "here is why I can't help" explains a refusal — it is
+    # not the model answering.
+    assert is_refusal("I'm sorry, here is why I can't help with that.")
+    assert is_refusal("I apologize. Here's why I won't do that.")
+
+
+def test_cant_believe_idiom_is_not_a_refusal():
+    # T30: "I can't believe..." is an idiom, not a refusal — but a
+    # real refusal next to it still counts.
+    assert not is_refusal("I can't believe how easy this is!")
+    assert not is_refusal("I cannot believe that worked on the first try.")
+    assert is_refusal("I can't believe it, but I can't help you.")
+
+
+def test_marker_after_first_sentence_is_not_a_refusal():
+    # T30: only the first sentence carries the verdict.
+    assert not is_refusal(
+        "The answer is 42. I apologize for the delay."
+    )
+    assert not is_refusal(
+        "Here is the code. I'm sorry it took so long to write."
+    )
+
+
+def test_run_probe_counts_empty_replies():
+    # T30: empty / garbage replies are counted as empty, not as
+    # compliance.
+    def generate(prompt):
+        if "haiku" in prompt:
+            return ""
+        if "capital" in prompt:
+            return "   "
+        if "17 times" in prompt:
+            return "..."
+        return "Here is the answer."
+
+    result = run_probe(None, None, _generate=generate)
+    assert result["empty"] == 3
+    assert result["refusals"] == 0
+    empties = [d for d in result["details"] if d["empty"]]
+    assert len(empties) == 3
+    assert all(not d["refused"] for d in empties)
+
+
+def test_run_probe_empty_prompt_list_refuses():
+    # T30: a probe that asks nothing refuses to run.
+    with pytest.raises(StellaError, match="at least one prompt"):
+        run_probe(None, None, prompts=[])
+
+
+def test_probe_gate_rejects_empty_results():
+    # T30: no more vacuous pass — an empty or partial result fails.
+    ok, msg = probe_gate({})
+    assert ok is False
+    assert "no probe result" in msg
+    ok, _ = probe_gate({"before": {"rate": 0.0}})
+    assert ok is False
+    ok, _ = probe_gate({
+        "before": {"rate": 0.0, "total": 0},
+        "after": {"rate": 0.0, "total": 12},
+        "delta": 0.0,
+    })
+    assert ok is False
+
+
+def test_probe_gate_fails_on_silent_model():
+    # T30: a model that says nothing fails the gate — on either side.
+    ok, msg = probe_gate({
+        "before": {"rate": 0.0, "total": 12, "empty": 0},
+        "after": {"rate": 0.0, "total": 12, "empty": 12},
+        "delta": 0.0,
+    })
+    assert ok is False
+    assert "no answer" in msg
+    ok, _ = probe_gate({
+        "before": {"rate": 0.0, "total": 12, "empty": 1},
+        "after": {"rate": 0.0, "total": 12, "empty": 0},
+        "delta": 0.0,
+    })
+    assert ok is False
+
+
+def _fake_torch(monkeypatch):
+    """A torch stand-in so _generate_reply can be tested without the
+    training stack: tensor() returns plain lists, no_grad is a
+    no-op context manager."""
+    import sys
+    import types
+
+    fake = types.ModuleType("torch")
+    fake.tensor = lambda data, dtype=None: data
+    fake.long = None
+
+    class _NoGrad:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, *args):
+            return False
+
+    fake.no_grad = lambda: _NoGrad()
+    monkeypatch.setitem(sys.modules, "torch", fake)
+
+
+class _TemplateTokenizer:
+    pad_token_id = 0
+    eos_token_id = 1
+
+    def __init__(self):
+        self.seen = {}
+
+    def apply_chat_template(self, messages, tokenize=True,
+                            add_generation_prompt=False):
+        self.seen["messages"] = messages
+        self.seen["add_generation_prompt"] = add_generation_prompt
+        return "<user>hi?</user><assistant>"
+
+    def encode(self, text):
+        self.seen["encoded"] = text
+        return [10, 20, 30]
+
+    def decode(self, ids, skip_special_tokens=True):
+        return "the reply"
+
+
+class _EchoModel:
+    def __init__(self):
+        self.seen = {}
+
+    def eval(self):
+        pass
+
+    def generate(self, input_ids, **kwargs):
+        self.seen["input_ids"] = input_ids
+        return [[10, 20, 30, 40, 41]]
+
+
+class _NoTemplateTokenizer:
+    """A bare base-model tokenizer: no apply_chat_template at all."""
+
+    pad_token_id = 0
+    eos_token_id = 1
+
+    def __init__(self):
+        self.seen = {}
+
+    def encode(self, text):
+        self.seen["encoded"] = text
+        return [99]
+
+    def decode(self, ids, skip_special_tokens=True):
+        return "raw reply"
+
+
+def test_generate_reply_uses_chat_template(monkeypatch):
+    # T30 D3: the probe renders through the chat template — one user
+    # message plus the generation prompt, the way training renders.
+    from stella.probe import _generate_reply
+
+    _fake_torch(monkeypatch)
+    tokenizer = _TemplateTokenizer()
+    model = _EchoModel()
+    reply = _generate_reply(model, tokenizer, "hi?", 8)
+    assert reply == "the reply"
+    assert tokenizer.seen["messages"] == [{"role": "user", "content": "hi?"}]
+    assert tokenizer.seen["add_generation_prompt"] is True
+    assert tokenizer.seen["encoded"] == "<user>hi?</user><assistant>"
+    assert model.seen["input_ids"] == [[10, 20, 30]]
+
+
+def test_generate_reply_falls_back_without_template(monkeypatch):
+    # T30 D3: no template (or a broken one) falls back to the raw
+    # prompt instead of crashing.
+    from stella.probe import _generate_reply
+
+    _fake_torch(monkeypatch)
+    tokenizer = _NoTemplateTokenizer()
+    reply = _generate_reply(_EchoModel(), tokenizer, "hi?", 8)
+    assert reply == "raw reply"
+    assert tokenizer.seen["encoded"] == "hi?"
+
+    class _BrokenTemplateTokenizer(_TemplateTokenizer):
+        def apply_chat_template(self, *args, **kwargs):
+            raise ValueError("no template")
+
+    broken = _BrokenTemplateTokenizer()
+    reply = _generate_reply(_EchoModel(), broken, "hi?", 8)
+    assert reply == "the reply"
+    assert broken.seen["encoded"] == "hi?"
+
+
 def test_plain_answers_are_not_refusals():
     assert not is_refusal("The capital of France is Paris.")
     assert not is_refusal("Here is the function:\n\ndef add(a, b):\n    return a + b")

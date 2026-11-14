@@ -5,6 +5,13 @@
     stella export <profile> <project> <dir>
                                           export a project package
     stella import <export-dir>            import a package back
+    stella create-profile <name> [--tag <ollama-tag>] [--role <role>]
+                                          [--display <name>]
+                                          [--base <hf-repo>]
+                                          create a profile
+    stella create-project <profile> <name> [--display <name>]
+                                          [--dataset <file>]
+                                          create a project in a profile
     stella train <profile> <project>      LoRA-tune a project (Item 3)
     stella export-gguf <profile> <project> <dir>
                                           merge + convert + quantize to GGUF
@@ -56,7 +63,9 @@ def cmd_profiles(args) -> int:
     profiles = store.list_profiles()
     if not profiles:
         print("No profiles yet. Create one in the Stella window,")
-        print("or: stella create-profile <name> --tag <ollama-tag> --role <role>")
+        # The working form before install is bash stella-cli (T51):
+        # `stella` only exists after install.
+        print("or: bash stella-cli create-profile <name> --tag <ollama-tag> --role <role>")
         return 0
     for p in profiles:
         # A damaged manifest (T3) is a row with its error, not a
@@ -122,10 +131,61 @@ def cmd_export(args) -> int:
     return 0
 
 
+def _prompt_profile_merge(slug, diff) -> str:
+    """The on_profile_conflict callback for the CLI on a terminal:
+    print the differing fields, ask keep or take, return "keep" or
+    "take". An empty answer, an answer that is not "use", or a
+    closed stdin keeps yours — the safe answer."""
+    print(f"Profile {slug!r} already exists, but the package differs:")
+    for field in export_mod.PROFILE_BLOCK_FIELDS:
+        if field not in diff:
+            continue
+        word = export_mod.PROFILE_FIELD_WORDS[field]
+        local = diff[field]["local"] or "(blank)"
+        package = diff[field]["package"] or "(blank)"
+        print(f"  {word}: yours is {local!r}, the package has {package!r}.")
+    try:
+        answer = input(
+            "Keep yours, or use the package's? "
+            "[K]eep mine / [U]se the package's (default: keep mine): "
+        )
+    except (EOFError, KeyboardInterrupt):
+        return "keep"
+    if answer.strip().lower() in ("u", "use", "take"):
+        return "take"
+    return "keep"
+
+
 def cmd_import(args) -> int:
     store = _store()
-    result = export_mod.import_export(store, args.dir)
+    choice = getattr(args, "profile_merge", None)
+    # With a flag, the flag decides. Without one, ask on a
+    # terminal; anywhere else (a script, a pipe) the engine keeps
+    # the local values and warns — import never hangs on input().
+    on_conflict = None
+    if choice is None and sys.stdin.isatty():
+        on_conflict = _prompt_profile_merge
+    result = export_mod.import_export(
+        store, args.dir,
+        profile_choice=choice, on_profile_conflict=on_conflict,
+    )
     print(f"Imported project {result['project']!r} into profile {result['profile']!r}")
+    if result.get("profile_existed"):
+        print(f"Profile {result['profile']!r} already existed.")
+    if result.get("profile_choice") == "take":
+        fields = export_mod.describe_profile_diff(
+            result.get("profile_diff") or {}
+        )
+        print(f"Profile updated from the package ({fields}).")
+    for warning in result.get("warnings", []):
+        print(f"Warning: {warning}")
+    if (
+        result.get("profile_choice") == "keep"
+        and result.get("profile_diff")
+        and choice is None
+        and on_conflict is None
+    ):
+        print("Use --profile-merge take to use the package's values instead.")
     return 0
 
 
@@ -197,6 +257,15 @@ def cmd_train(args) -> int:
         controller.request_stop()
 
     old_handler = signal.signal(signal.SIGINT, _sigint)
+    # T34: --target-modules is a comma-separated list; an absent
+    # flag is None (auto-detection), never an empty list.
+    target_modules = None
+    if args.target_modules:
+        target_modules = [
+            name.strip()
+            for name in args.target_modules.split(",")
+            if name.strip()
+        ] or None
     try:
         summary = train_project(
             store,
@@ -207,6 +276,7 @@ def cmd_train(args) -> int:
             dataset_path=args.dataset,
             base_ref=args.base,
             force=args.force,
+            target_modules=target_modules,
             on_event=on_event,
             controller=controller,
         )
@@ -258,14 +328,19 @@ def cmd_probe(args) -> int:
     result = probe_project(store, args.profile, args.project)
     before = result["before"]
     after = result["after"]
-    print(
-        f"Before tuning: {before['refusals']}/{before['total']} refusals "
-        f"({before['rate']:.0%})"
-    )
-    print(
-        f"After tuning:  {after['refusals']}/{after['total']} refusals "
-        f"({after['rate']:.0%})"
-    )
+
+    def _line(label, side):
+        # T30: a silent prompt is named, not hidden inside a clean 0.
+        text = (
+            f"{label} {side['refusals']}/{side['total']} refusals "
+            f"({side['rate']:.0%})"
+        )
+        if side.get("empty"):
+            text += f", {side['empty']} with no answer"
+        return text
+
+    print(_line("Before tuning:", before))
+    print(_line("After tuning: ", after))
     passed, message = probe_gate(result)
     print(message)
     return 0 if passed else 1
@@ -615,43 +690,93 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"stella {STELLA_VERSION}")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p = sub.add_parser("profiles", help="list profiles")
+    def _cmd(name, text, epilog):
+        """A subcommand whose help keeps its example lines: the
+        default formatter would collapse the epilog into one
+        wrapped paragraph (T51). For a user who hand-types from a
+        phone screen, --help is the manual — every command shows
+        a worked example."""
+        return sub.add_parser(
+            name, help=text, description=text, epilog=epilog,
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+        )
+
+    p = _cmd("profiles", "list profiles",
+             "examples:\n  stella profiles")
     p.set_defaults(func=cmd_profiles)
 
-    p = sub.add_parser("projects", help="list projects in a profile")
-    p.add_argument("profile")
+    p = _cmd("projects", "list projects in a profile",
+             "examples:\n  stella projects lfm3-tool")
+    p.add_argument("profile", help="profile name, e.g. lfm3-tool")
     p.set_defaults(func=cmd_projects)
 
-    p = sub.add_parser("export", help="export a project package")
-    p.add_argument("profile")
-    p.add_argument("project")
-    p.add_argument("dir")
+    p = _cmd("export", "export a project package",
+             "examples:\n  stella export lfm3-tool tool-calls ~/exports")
+    p.add_argument("profile", help="profile name, e.g. lfm3-tool")
+    p.add_argument("project", help="project name, e.g. tool-calls")
+    p.add_argument("dir", help="folder to write the package into")
     p.set_defaults(func=cmd_export)
 
-    p = sub.add_parser("import", help="import an export package")
-    p.add_argument("dir")
+    p = _cmd("import", "import an export package",
+             "examples:\n  stella import ~/exports/lfm3-tool-tool-calls\n"
+             "  stella import ~/exports/lfm3-tool-tool-calls "
+             "--profile-merge take")
+    p.add_argument("dir", help="folder holding the package to import")
+    p.add_argument(
+        "--profile-merge", choices=["keep", "take"], default=None,
+        help="when the profile already exists and the package's tag, "
+        "role or base differ: keep uses this profile's values, take "
+        "uses the package's. Without this flag Stella asks, or keeps "
+        "yours when it cannot ask.",
+    )
     p.set_defaults(func=cmd_import)
 
-    p = sub.add_parser("create-profile", help="create a profile")
-    p.add_argument("name")
-    p.add_argument("--tag", default="")
-    p.add_argument("--role", default="")
-    p.add_argument("--display", default="")
+    p = _cmd(
+        "create-profile", "create a profile",
+        "examples:\n"
+        "  stella create-profile lfm3 --tag lfm3:1.7b --role fast "
+        "--base LiquidAI/LFM3-1.7B\n"
+        "  stella create-profile lfm3 --tag lfm3:1.7b",
+    )
+    p.add_argument("name", help="profile name, e.g. lfm3")
+    p.add_argument("--tag", default="",
+                   help="Ollama tag of the model this profile uses "
+                   "(e.g. lfm3:1.7b)")
+    p.add_argument("--role", default="",
+                   help="what this profile is for, in plain words "
+                   "(e.g. fast)")
+    p.add_argument("--display", default="",
+                   help="display name shown in the window (defaults to "
+                   "the profile name)")
     p.add_argument("--base", default="",
                    help="Hugging Face repo or local folder of the base "
                    "weights (for training, e.g. LiquidAI/LFM3-1.7B)")
     p.set_defaults(func=cmd_create_profile)
 
-    p = sub.add_parser("create-project", help="create a project in a profile")
-    p.add_argument("profile")
-    p.add_argument("name")
-    p.add_argument("--display", default="")
-    p.add_argument("--dataset", default="")
+    p = _cmd(
+        "create-project", "create a project in a profile",
+        "examples:\n"
+        "  stella create-project lfm3-tool tool-calls "
+        "--dataset sample-tool-calls.jsonl",
+    )
+    p.add_argument("profile", help="profile name, e.g. lfm3-tool")
+    p.add_argument("name", help="project name, e.g. tool-calls")
+    p.add_argument("--display", default="",
+                   help="display name shown in the window (defaults to "
+                   "the project name)")
+    p.add_argument("--dataset", default="",
+                   help="dataset file for this project (.jsonl, "
+                   "e.g. sample-tool-calls.jsonl)")
     p.set_defaults(func=cmd_create_project)
 
-    p = sub.add_parser("train", help="LoRA-tune a project on CPU")
-    p.add_argument("profile")
-    p.add_argument("project")
+    p = _cmd(
+        "train", "LoRA-tune a project on CPU",
+        "examples:\n"
+        "  stella train lfm3-tool tool-calls\n"
+        "  stella train lfm3-tool tool-calls --resume",
+    )
+    p.add_argument("profile", help="profile name, e.g. lfm3-tool")
+    p.add_argument("project", help="project name, e.g. tool-calls")
     p.add_argument("--steps", type=_positive_int, default=None,
                    help="cap the run at N optimizer steps (proof run)")
     p.add_argument("--resume", action="store_true",
@@ -664,12 +789,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--base", default=None,
                    help="Hugging Face repo or local folder of the base "
                    "weights (overrides the profile base_ref)")
+    p.add_argument("--target-modules", default=None,
+                   help="LoRA target layers, comma-separated "
+                   "(e.g. q_proj,k_proj). For a model Stella does not "
+                   "recognize: name the layers to train by hand. "
+                   "Leave unset and Stella finds them itself")
     p.set_defaults(func=cmd_train)
 
-    p = sub.add_parser("export-gguf", help="merge + convert + quantize to GGUF")
-    p.add_argument("profile")
-    p.add_argument("project")
-    p.add_argument("dir")
+    p = _cmd(
+        "export-gguf", "merge + convert + quantize to GGUF",
+        "examples:\n"
+        "  stella export-gguf lfm3-tool tool-calls ~/exports/gguf",
+    )
+    p.add_argument("profile", help="profile name, e.g. lfm3-tool")
+    p.add_argument("project", help="project name, e.g. tool-calls")
+    p.add_argument("dir", help="folder to write the GGUF into")
     p.add_argument("--quant", default="Q4_K_M",
                    help="llama.cpp quant type (default Q4_K_M)")
     p.add_argument("--from-checkpoint", type=int, default=None,
@@ -679,18 +813,22 @@ def build_parser() -> argparse.ArgumentParser:
                    help="overwrite an existing GGUF at the output path")
     p.set_defaults(func=cmd_export_gguf)
 
-    p = sub.add_parser("probe", help="refusal probe, before vs after tuning")
-    p.add_argument("profile")
-    p.add_argument("project")
+    p = _cmd("probe", "refusal probe, before vs after tuning",
+             "examples:\n  stella probe lfm3-tool tool-calls")
+    p.add_argument("profile", help="profile name, e.g. lfm3-tool")
+    p.add_argument("project", help="project name, e.g. tool-calls")
     p.set_defaults(func=cmd_probe)
 
-    p = sub.add_parser(
+    p = _cmd(
         "sleep",
-        help="sleep cycle: consolidate new rows into a new LoRA "
+        "sleep cycle: consolidate new rows into a new LoRA "
         "adapter, with a replay check against old rows",
+        "examples:\n"
+        "  stella sleep lfm3-tool tool-calls\n"
+        "  stella sleep lfm3-tool tool-calls --dream",
     )
-    p.add_argument("profile")
-    p.add_argument("project")
+    p.add_argument("profile", help="profile name, e.g. lfm3-tool")
+    p.add_argument("project", help="project name, e.g. tool-calls")
     p.add_argument("--dream", action="store_true",
                    help="dream synthetic practice rows from the local "
                    "Ollama model before consolidating")
@@ -706,15 +844,19 @@ def build_parser() -> argparse.ArgumentParser:
                    "(default 0.10)")
     p.set_defaults(func=cmd_sleep)
 
-    p = sub.add_parser("sleep-status", help="per-cycle sleep stats")
-    p.add_argument("profile")
-    p.add_argument("project")
+    p = _cmd("sleep-status", "per-cycle sleep stats",
+             "examples:\n  stella sleep-status lfm3-tool tool-calls")
+    p.add_argument("profile", help="profile name, e.g. lfm3-tool")
+    p.add_argument("project", help="project name, e.g. tool-calls")
     p.set_defaults(func=cmd_sleep_status)
 
-    p = sub.add_parser(
+    p = _cmd(
         "chat",
-        help="talk to Stella: the chat sets up and runs training "
+        "talk to Stella: the chat sets up and runs training "
         "for you (/quit to exit)",
+        "examples:\n"
+        "  stella chat\n"
+        "  stella chat --model qwen3.5:4b",
     )
     p.add_argument("--model", default="",
                    help="model to chat with (if left out, Stella asks "
@@ -727,10 +869,13 @@ def build_parser() -> argparse.ArgumentParser:
                    "(groq, gemini, custom)")
     p.set_defaults(func=cmd_chat)
 
-    p = sub.add_parser(
+    p = _cmd(
         "requant",
-        help="re-quantize an installed Ollama model to a smaller "
+        "re-quantize an installed Ollama model to a smaller "
         "quant and register it as a new tag",
+        "examples:\n"
+        "  stella requant qwen3.5:4b\n"
+        "  stella requant qwen3.5:4b --quant Q2_K --as qwen3.5:4b-q2",
     )
     p.add_argument("tag", help="installed Ollama tag, e.g. qwen3.5:4b")
     p.add_argument("--quant", default="Q4_K_M",
@@ -740,20 +885,24 @@ def build_parser() -> argparse.ArgumentParser:
                    "(default: the old tag plus the quant)")
     p.set_defaults(func=cmd_requant)
 
-    p = sub.add_parser(
+    p = _cmd(
         "pc-info",
-        help="what this PC can do, and the training settings "
+        "what this PC can do, and the training settings "
         "Stella picks for it",
+        "examples:\n  stella pc-info",
     )
     p.set_defaults(func=cmd_pc_info)
 
-    p = sub.add_parser(
+    p = _cmd(
         "distill",
-        help="ask a teacher model each prompt in a file and save "
+        "ask a teacher model each prompt in a file and save "
         "the answers as the project's dataset",
+        "examples:\n"
+        "  stella distill lfm3-tool tool-calls "
+        "--teacher qwen3.5:4b --prompts prompts.txt",
     )
-    p.add_argument("profile")
-    p.add_argument("project")
+    p.add_argument("profile", help="profile name, e.g. lfm3-tool")
+    p.add_argument("project", help="project name, e.g. tool-calls")
     p.add_argument("--teacher", required=True,
                    help="installed Ollama tag to learn from")
     p.add_argument("--prompts", required=True,

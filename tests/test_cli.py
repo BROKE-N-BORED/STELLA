@@ -19,6 +19,92 @@ def run_cli(home, *args):
     )
 
 
+# -- T51: help text for every flag, examples in every command ----
+
+ALL_COMMANDS = [
+    "profiles", "projects", "export", "import",
+    "create-profile", "create-project", "train", "export-gguf",
+    "probe", "sleep", "sleep-status", "chat", "requant",
+    "pc-info", "distill",
+]
+
+
+@pytest.mark.parametrize("command", ALL_COMMANDS)
+def test_every_command_help_shows_an_example(home, command):
+    # T51: every command's --help shows a worked example.
+    res = run_cli(home, command, "--help")
+    assert res.returncode == 0
+    assert "examples:" in res.stdout
+    assert f"stella {command}" in res.stdout
+
+
+def test_create_commands_help_names_every_flag(home):
+    # T51: the two create commands used to be nearly blank.
+    res = run_cli(home, "create-profile", "--help")
+    assert res.returncode == 0
+    for flag, meaning in (
+        ("--tag", "Ollama tag"),
+        ("--role", "what this profile is for"),
+        ("--display", "display name"),
+        ("--base", "Hugging Face repo"),
+    ):
+        assert flag in res.stdout
+        assert meaning in res.stdout
+    assert (
+        "stella create-profile lfm3 --tag lfm3:1.7b --role fast "
+        "--base LiquidAI/LFM3-1.7B"
+    ) in res.stdout
+    res = run_cli(home, "create-project", "--help")
+    assert res.returncode == 0
+    assert "--display" in res.stdout
+    assert "--dataset" in res.stdout
+    assert "dataset file" in res.stdout
+
+
+def test_every_flag_and_positional_has_help():
+    # T51: structural pin — no flag or positional without help.
+    from stella.cli import build_parser
+
+    parser = build_parser()
+    subs = parser._subparsers._group_actions[0].choices
+    assert sorted(subs) == sorted(ALL_COMMANDS)
+    for name, sub in subs.items():
+        for action in sub._actions:
+            assert action.help, f"{name}: {action.dest} has no help"
+
+
+def test_empty_home_hint_names_the_working_command(home):
+    # T51: before install, `stella` does not exist — the hint uses
+    # the form that works.
+    res = run_cli(home, "profiles")
+    assert res.returncode == 0
+    assert "bash stella-cli create-profile" in res.stdout
+
+
+def test_docstring_lists_all_commands():
+    # T51: the module docstring lists every command that exists.
+    import stella.cli as cli_mod
+
+    for command in ALL_COMMANDS:
+        assert command in cli_mod.__doc__, command
+
+
+def test_readme_lists_all_commands():
+    # T51: the README's Command line section lists every command.
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    section = readme.split("## Command line", 1)[1].split("## ", 1)[0]
+    for command in ALL_COMMANDS:
+        assert f"stella {command}" in section, command
+
+
+def test_stella_cli_wrapper_comment_names_the_wrapper():
+    # T51: the wrapper's header comment says bash stella-cli, not
+    # bash stella — stella is only the name after install.
+    text = (ROOT / "stella-cli").read_text(encoding="utf-8")
+    assert "bash stella-cli <command>" in text
+    assert "bash stella " not in text
+
+
 def test_cli_profiles_empty(home):
     res = run_cli(home, "profiles")
     assert res.returncode == 0
@@ -118,10 +204,10 @@ def test_cli_train_no_base_ref(home):
     run_cli(home, "create-project", "p1", "proj")
     res = run_cli(home, "train", "p1", "proj")
     assert res.returncode == 1
-    # Either the deps gate or the base_ref check fires first — both
-    # name the fix. The profile has no HF base, so one of them must.
-    assert ("base_ref" in res.stderr
-            or "install-training.sh" in res.stderr)
+    # T48: the cheap checks run before the deps gate, so the
+    # missing base_ref is reported — never the deps message.
+    assert "base_ref" in res.stderr
+    assert "install-training.sh" not in res.stderr
 
 
 def test_cli_export_gguf_no_adapter(home):
@@ -145,6 +231,7 @@ def test_cli_train_help(home):
     assert res.returncode == 0
     assert "--resume" in res.stdout
     assert "--steps" in res.stdout
+    assert "--target-modules" in res.stdout
 
 
 def test_cli_train_missing_deps_in_process(home, monkeypatch, capsys):
@@ -159,7 +246,12 @@ def test_cli_train_missing_deps_in_process(home, monkeypatch, capsys):
         train_mod, "training_deps_missing", lambda: ["torch"]
     )
     run_cli(home, "create-profile", "p1", "--base", "test/tiny-model")
-    run_cli(home, "create-project", "p1", "proj")
+    # T48: the project must be otherwise ready (dataset set) for
+    # the run to reach the deps gate at all.
+    run_cli(
+        home, "create-project", "p1", "proj",
+        "--dataset", "sample-tool-calls.jsonl",
+    )
     code = cli_mod.main(["train", "p1", "proj"])
     assert code == 1
     assert "install-training.sh" in capsys.readouterr().err
@@ -446,7 +538,7 @@ def test_cli_corrupt_home_lists_survive(home):
     assert "Traceback" not in res.stderr
 
 
-def test_cli_resume_on_trained_announces(home, monkeypatch, capsys):
+def test_cli_resume_on_finished_announces(home, monkeypatch, capsys):
     # In-process: the engine emits the extending event (T25) and
     # the CLI prints it before the steps.
     import stella.cli as cli_mod
@@ -508,6 +600,39 @@ def test_cli_train_force_flag_reaches_engine(home, monkeypatch, capsys):
     assert seen["force"] is True
 
 
+def test_cli_train_target_modules_flag_reaches_engine(
+    home, monkeypatch, capsys
+):
+    # T34: --target-modules q_proj,k_proj reaches the engine as a
+    # list (whitespace stripped); an absent flag is None.
+    import stella.cli as cli_mod
+    import stella.train as train_mod
+
+    monkeypatch.setenv("STELLA_HOME", str(home))
+    seen = {}
+
+    def fake_train(store, profile, project, **kwargs):
+        seen.update(kwargs)
+        return {
+            "steps": 3,
+            "final_loss": 5.5,
+            "trainable_params": 12345,
+            "ram_estimate_gb": 4.2,
+        }
+
+    monkeypatch.setattr(train_mod, "train_project", fake_train)
+    run_cli(home, "create-profile", "p1", "--base", "test/tiny-model")
+    run_cli(home, "create-project", "p1", "proj")
+    code = cli_mod.main(
+        ["train", "p1", "proj", "--target-modules", "q_proj, k_proj"]
+    )
+    assert code == 0
+    assert seen["target_modules"] == ["q_proj", "k_proj"]
+    code = cli_mod.main(["train", "p1", "proj"])
+    assert code == 0
+    assert seen["target_modules"] is None
+
+
 def test_cli_export_gguf_prints_converter_warning(home, monkeypatch, capsys):
     # In-process: the engine calls on_warning before the merge
     # (T31) and the CLI prints it; --force (T24) reaches the engine.
@@ -543,3 +668,85 @@ def test_cli_export_gguf_prints_converter_warning(home, monkeypatch, capsys):
     assert "Close other apps before exporting." in out
     # The warning prints before the result lines.
     assert out.index("Close other apps") < out.index("Merged HF weights")
+
+
+# -- T57: merge, don't discard, the profile block on import --------
+
+
+def _cli_package(home, tmp_path):
+    """A package exported from `home`: profile p1, tag x:1b,
+    role fast, project proj."""
+    run_cli(home, "create-profile", "p1", "--tag", "x:1b",
+            "--role", "fast")
+    run_cli(home, "create-project", "p1", "proj")
+    dest = tmp_path / "exports"
+    run_cli(home, "export", "p1", "proj", str(dest))
+    return dest / "proj-stella-export"
+
+
+def _cli_profile(home, slug="p1"):
+    path = home / "profiles" / slug / "profile.json"
+    return json.loads(path.read_text())
+
+
+def test_cli_import_profile_merge_take(tmp_path):
+    pkg = _cli_package(tmp_path / "home1", tmp_path)
+    home2 = tmp_path / "home2"
+    run_cli(home2, "create-profile", "p1", "--tag", "y:2b",
+            "--role", "driver")
+    res = run_cli(home2, "import", str(pkg), "--profile-merge", "take")
+    assert res.returncode == 0
+    assert "Profile 'p1' already existed." in res.stdout
+    assert "Profile updated from the package" in res.stdout
+    prof = _cli_profile(home2)
+    assert (prof["ollama_tag"], prof["role"], prof["base_ref"]) == (
+        "x:1b", "fast", "x:1b")
+
+
+def test_cli_import_profile_merge_keep(tmp_path):
+    pkg = _cli_package(tmp_path / "home1", tmp_path)
+    home2 = tmp_path / "home2"
+    run_cli(home2, "create-profile", "p1", "--tag", "y:2b",
+            "--role", "driver")
+    res = run_cli(home2, "import", str(pkg), "--profile-merge", "keep")
+    assert res.returncode == 0
+    assert "Profile 'p1' already existed." in res.stdout
+    assert "updated from the package" not in res.stdout
+    prof = _cli_profile(home2)
+    assert (prof["ollama_tag"], prof["role"]) == ("y:2b", "driver")
+
+
+def test_cli_import_without_flag_keeps_local_and_warns(tmp_path):
+    pkg = _cli_package(tmp_path / "home1", tmp_path)
+    home2 = tmp_path / "home2"
+    run_cli(home2, "create-profile", "p1", "--tag", "y:2b",
+            "--role", "driver")
+    # No flag, no terminal (subprocess stdin is not a tty): the
+    # import must not hang on input — it keeps local and warns.
+    res = run_cli(home2, "import", str(pkg))
+    assert res.returncode == 0
+    assert "Warning:" in res.stdout
+    assert "kept" in res.stdout
+    assert "--profile-merge take" in res.stdout
+    prof = _cli_profile(home2)
+    assert (prof["ollama_tag"], prof["role"]) == ("y:2b", "driver")
+
+
+def test_cli_prompt_profile_merge(monkeypatch, capsys):
+    from stella import cli as cli_mod
+
+    diff = {"ollama_tag": {"local": "y:2b", "package": "x:1b"}}
+    monkeypatch.setattr("builtins.input", lambda prompt: "u")
+    assert cli_mod._prompt_profile_merge("p1", diff) == "take"
+    monkeypatch.setattr("builtins.input", lambda prompt: "")
+    assert cli_mod._prompt_profile_merge("p1", diff) == "keep"
+    monkeypatch.setattr("builtins.input", lambda prompt: "nonsense")
+    assert cli_mod._prompt_profile_merge("p1", diff) == "keep"
+
+    def _eof(prompt):
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", _eof)
+    assert cli_mod._prompt_profile_merge("p1", diff) == "keep"
+    out = capsys.readouterr().out
+    assert "yours is 'y:2b'" in out

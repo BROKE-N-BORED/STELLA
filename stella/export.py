@@ -4,7 +4,6 @@ An export is a folder:
 
     <project>-stella-export/
       manifest.json     # profile + project + metamorph block + versions
-      config.json       # training settings (the knobs Item 3 will drive)
       README.md         # human summary: what this is, how to use it
       weights/          # the trained LoRA adapter, when training has
                         # run (Item 3). Ships a placeholder note until
@@ -14,10 +13,25 @@ An export is a folder:
       sleep/            # sleep cycles (adapters, manifest, replay
                         # reports), if any were run (Item 4)
 
+The manifest is the one source of truth for the settings (T60):
+v0.1–v0.12 exports also carried a config.json copy of the settings,
+but nothing ever read it — import always took the settings from the
+manifest — so v0.13 stopped writing it. Old packages that carry it
+still import; the file is ignored.
+
+The package format is versioned separately from the app version
+(T40): `format: 1` in the manifest, enforced on import. See
+docs/FORMAT.md for the format, the kinds, and the legacy rule.
+
 Import reads a package back, verifies it (required keys, known
 metamorph mode, sane names), and recreates the profile (if missing)
 and project. The round-trip check (export -> import into a fresh
 home -> compare manifests) is the v0.1 proof the package is real.
+
+When the profile already exists, import merges the profile block
+instead of discarding it (T57): tag, role and base are compared
+with the manifest — identical blocks import silently, differing
+blocks ask the user to keep theirs or take the package's.
 """
 
 from __future__ import annotations
@@ -32,14 +46,39 @@ from .model import (
     METAMORPH_MODES,
     PROJECT_STATUSES,
     STELLA_VERSION,
+    WEIGHT_STATUSES,
     StellaError,
     Store,
     metamorph_mode,
+    normalize_status,
     validate_settings,
     validate_slug,
 )
 
 EXPORT_SUFFIX = "-stella-export"
+
+# Package format (T40): the format version is separate from the app
+# version. 1 is the only version this Stella writes, and the newest
+# it reads. A package claiming a newer format is refused on import
+# with "this package needs a newer Stella". A package with no
+# format field is a legacy v0.1-v0.12 package and reads as format 1
+# (the shape is the same) — see docs/FORMAT.md.
+FORMAT_VERSION = 1
+MIN_SUPPORTED_FORMAT = 1
+
+# Package kinds (T40): distinct `kind` values sharing one manifest
+# shape, so profile export (T86) and recipe export (T170) never
+# become two formats. Only the project package is importable yet;
+# the other two are defined here so their shape is settled before
+# anything writes one.
+PACKAGE_KINDS = {
+    "stella-export": "project package: one profile block + one project",
+    "stella-profile-export": (
+        "profile package: a profile with all its projects (T86)"
+    ),
+    "stella-recipe-export": "recipe package: a reusable training recipe (T170)",
+}
+PROJECT_PACKAGE_KIND = "stella-export"
 
 
 def _metamorph_block(proj: dict) -> dict:
@@ -84,7 +123,8 @@ def _build_package(store, profile, project, prof, proj, out: Path) -> None:
     """Write every package file into `out` (the staging dir)."""
     manifest = {
         "stella_version": STELLA_VERSION,
-        "kind": "stella-export",
+        "format": FORMAT_VERSION,
+        "kind": PROJECT_PACKAGE_KIND,
         "profile": {
             "name": prof["name"],
             "display_name": prof.get("display_name", prof["name"]),
@@ -107,10 +147,9 @@ def _build_package(store, profile, project, prof, proj, out: Path) -> None:
     (out / "manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
-    (out / "config.json").write_text(
-        json.dumps(proj.get("settings", {}), indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    # No config.json (T60): the manifest already holds the settings,
+    # and nothing ever read the copy. Never require a file you
+    # never read.
     role = prof.get("role") or "no role set"
     (out / "README.md").write_text(
         f"# {proj.get('display_name', proj['name'])}: Stella export\n\n"
@@ -120,10 +159,12 @@ def _build_package(store, profile, project, prof, proj, out: Path) -> None:
         f"Dataset: {proj.get('dataset_ref') or 'not set'}.\n"
         f"Status: {proj.get('status', 'draft')}.\n\n"
         "## Contents\n\n"
-        "- `manifest.json`: the full profile + project record.\n"
-        "- `config.json`: training settings.\n"
+        "- `manifest.json`: the full profile + project record, "
+        "including the training settings.\n"
         "- `weights/`: adapter / merged weights (Item 3).\n"
         "- `checkpoints/`: training checkpoints, if any were made.\n"
+        "- `probe_results.json`: the refusal-probe result, if the "
+        "probe ran.\n"
         "- `sleep/`: sleep cycles (adapters, manifest, replay "
         "reports), if any were run.\n\n"
         "Import back into Stella with: `stella import <this folder>`\n"
@@ -205,8 +246,10 @@ def verify_export(path: str | Path) -> dict:
     metamorph mode enum, and the project status enum. Nothing
     downstream ever sees a manifest field this has not validated.
     Settings VALUE ranges are the model layer's job (T6) and are
-    checked by import before anything is created. The version range
-    check is T40's, not this task's: no format versioning here.
+    checked by import before anything is created. The format
+    version (T40) is checked here too: a newer format is refused
+    with "needs a newer Stella", and a package with no format
+    field reads as the legacy format 1.
     """
     path = Path(path).expanduser()
     manifest_path = path / "manifest.json"
@@ -216,8 +259,40 @@ def verify_export(path: str | Path) -> dict:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise StellaError(f"manifest.json is not valid JSON: {exc}") from exc
-    if not isinstance(manifest, dict) or manifest.get("kind") != "stella-export":
+    if not isinstance(manifest, dict):
         raise StellaError("not a Stella export: bad manifest kind")
+    kind = manifest.get("kind")
+    if kind not in PACKAGE_KINDS:
+        raise StellaError("not a Stella export: bad manifest kind")
+    if kind != PROJECT_PACKAGE_KIND:
+        # A known kind this Stella cannot import yet (T40): say
+        # what it is, not just "bad kind" — profile and recipe
+        # packages arrive in later versions.
+        raise StellaError(
+            f"this package is a {PACKAGE_KINDS[kind]}. This Stella "
+            "can only import project packages yet."
+        )
+    # Format version (T40), separate from the app version: a
+    # package from a newer Stella must never import silently and
+    # lose what the newer format carries.
+    fmt = manifest.get("format")
+    if fmt is None:
+        # Legacy rule: packages written before format versioning
+        # (v0.1-v0.12) carry no format field and read as format 1.
+        fmt = FORMAT_VERSION
+    if isinstance(fmt, bool) or not isinstance(fmt, int):
+        raise StellaError(
+            "export manifest: 'format' must be a whole number, "
+            f"not {fmt!r}"
+        )
+    if fmt > FORMAT_VERSION:
+        raise StellaError(
+            f"this package needs a newer Stella (package format "
+            f"{fmt}, this Stella reads up to format "
+            f"{FORMAT_VERSION}). Update Stella and try again."
+        )
+    if fmt < MIN_SUPPORTED_FORMAT:
+        raise StellaError(f"export manifest: unknown package format {fmt}")
     prof = manifest.get("profile")
     proj = manifest.get("project")
     if not isinstance(prof, dict) or not isinstance(proj, dict):
@@ -244,22 +319,134 @@ def verify_export(path: str | Path) -> dict:
             raise StellaError(f"export has unknown metamorph mode: {mode!r}")
     status = proj.get("status")
     if status is not None:
+        # A legacy status ("trained") reads as its current word
+        # ("done", T53) — the manifest dict is normalized in
+        # memory, so the import stores the current word. The
+        # package file itself is untouched.
+        status = normalize_status(status)
+        proj["status"] = status
         if not isinstance(status, str) or status not in PROJECT_STATUSES:
             raise StellaError(
                 f"export has unknown project status: {status!r} "
                 f"(must be one of {', '.join(PROJECT_STATUSES)})"
             )
-    if not (path / "config.json").is_file():
-        raise StellaError("export is missing config.json")
+    # No config.json check (T60): the file was dropped in v0.13 —
+    # the manifest holds the settings, and old packages that carry
+    # config.json still import (the file is ignored).
     return manifest
 
 
-def import_export(store: Store, path: str | Path) -> dict:
+def _is_placeholder_readme(path: Path) -> bool:
+    """True when a weights/README.txt is the placeholder note
+    export writes for an untrained project (T41) — never a weight,
+    never copied as one."""
+    if path.name != "README.txt" or not path.is_file():
+        return False
+    try:
+        return path.read_text(encoding="utf-8").startswith(
+            "No trained adapter yet."
+        )
+    except OSError:
+        return False
+
+
+def _package_weights(path: Path) -> list[Path]:
+    """The real weight files in a package's weights/ dir (T41):
+    everything except the placeholder note. Empty when the package
+    carries no adapter."""
+    weights = path / "weights"
+    if not weights.is_dir():
+        return []
+    return [
+        item
+        for item in sorted(weights.iterdir())
+        if not _is_placeholder_readme(item)
+    ]
+
+
+# The profile block fields import compares (T57): tag, role, base.
+# display_name, config, processor and dependencies are the
+# profile's own furniture and are never merged — only the three
+# fields that say which model this profile trains.
+PROFILE_BLOCK_FIELDS = ("ollama_tag", "role", "base_ref")
+
+# Plain words for the three fields, for warnings and dialogs.
+PROFILE_FIELD_WORDS = {
+    "ollama_tag": "tag",
+    "role": "role",
+    "base_ref": "base",
+}
+
+
+def compare_profile_block(local: dict, package: dict) -> dict:
+    """Compare a stored profile block with a manifest's profile block.
+
+    Returns {field: {"local": ..., "package": ...}} for the fields
+    that differ, and {} when the blocks agree. Only the three
+    PROFILE_BLOCK_FIELDS are compared.
+
+    This is the T58 extension point: the import preview dialog
+    reuses this comparator (and this diff shape) to show the
+    existing-profile warning before anything is imported.
+    """
+    diff = {}
+    for field in PROFILE_BLOCK_FIELDS:
+        local_value = local.get(field, "")
+        package_value = package.get(field, "")
+        if local_value != package_value:
+            diff[field] = {"local": local_value, "package": package_value}
+    return diff
+
+
+def describe_profile_diff(diff: dict) -> str:
+    """Plain-words list of the differing fields: "tag", "tag and
+    role", "tag, role and base". Empty diff -> ""."""
+    words = [
+        PROFILE_FIELD_WORDS[field]
+        for field in PROFILE_BLOCK_FIELDS
+        if field in diff
+    ]
+    if not words:
+        return ""
+    if len(words) == 1:
+        return words[0]
+    if len(words) == 2:
+        return f"{words[0]} and {words[1]}"
+    return f"{words[0]}, {words[1]} and {words[2]}"
+
+
+def import_export(
+    store: Store,
+    path: str | Path,
+    profile_choice: str | None = None,
+    on_profile_conflict=None,
+) -> dict:
     """Import a verified export package into this home.
 
     Creates the profile if it does not exist yet (same slug, role and
     base from the manifest); the project must not already exist.
-    Returns {"profile": ..., "project": ...}.
+    Returns {"profile": ..., "project": ..., "profile_existed": ...,
+    "profile_diff": ..., "profile_choice": ..., "warnings": [...]}.
+
+    The weights round-trip (T41): the package's weights/ (minus the
+    placeholder note) land in the project's adapter/ dir, and
+    probe_results.json comes back too, so the refusal evidence
+    travels with the fine-tune. A package whose manifest claims a
+    finished status but carries no weights imports as a draft, with
+    a warning in the result — a project with no weights must not
+    claim to be finished.
+
+    The profile block is merged, not discarded (T57). When the
+    profile already exists, tag / role / base are compared with the
+    manifest: identical blocks import silently; differing blocks
+    need a choice. `profile_choice` ("keep" or "take") decides
+    outright; `on_profile_conflict(slug, diff)` is asked instead
+    when given (the GUI dialog, the CLI prompt); with neither, the
+    local values are kept and a warning says so. "take" makes the
+    stored profile block exactly the package's — all three fields
+    are passed explicitly, so the T54 tag/base sync cannot move the
+    base underneath the merge. A take that is later rolled back
+    restores the local values.
 
     Atomic (T1): names are normalized once at import start, so the
     returned names match the stored names; settings values are
@@ -267,6 +454,11 @@ def import_export(store: Store, path: str | Path) -> dict:
     fails, the profile/project just created are removed again — a
     failed import leaves the home exactly as it was.
     """
+    if profile_choice is not None and profile_choice not in ("keep", "take"):
+        raise StellaError(
+            f"profile_choice must be 'keep' or 'take', "
+            f"not {profile_choice!r}"
+        )
     path = Path(path).expanduser()
     manifest = verify_export(path)
     prof = manifest["profile"]
@@ -280,13 +472,52 @@ def import_export(store: Store, path: str | Path) -> dict:
     merged_settings = dict(DEFAULT_SETTINGS)
     merged_settings.update(proj.get("settings") or {})
     validate_settings(merged_settings)
+    # Weights decide the imported status (T41): a finished status
+    # with no weights behind it is corrected to draft, with a
+    # warning the caller surfaces.
+    warnings: list[str] = []
+    weight_items = _package_weights(path)
+    status = proj.get("status") or "draft"
+    if status in WEIGHT_STATUSES and not weight_items:
+        warnings.append(
+            f"the package says this project is {status}, but it "
+            "carries no trained weights, so it imports as a draft. "
+            "Train it first, then export again."
+        )
+        status = "draft"
     try:
         store.get_profile(slug)
         profile_existed = True
     except StellaError:
         profile_existed = False
+    # T57: compare the profile block before creating anything, so a
+    # choice is asked (or a warning recorded) while the home is
+    # still untouched. Identical blocks import silently.
+    profile_diff: dict = {}
+    choice = None
+    local_block: dict | None = None
+    if profile_existed:
+        local_block = store.get_profile(slug)
+        profile_diff = compare_profile_block(local_block, prof)
+    if profile_diff:
+        if profile_choice is not None:
+            choice = profile_choice
+        elif on_profile_conflict is not None:
+            answer = on_profile_conflict(slug, profile_diff)
+            choice = answer if answer in ("keep", "take") else "keep"
+        else:
+            # No way to ask: keep the local values and say so.
+            choice = "keep"
+            fields = describe_profile_diff(profile_diff)
+            verb = "differs" if len(profile_diff) == 1 else "differ"
+            warnings.append(
+                f"the package's {fields} {verb} from this "
+                f"profile's, so this profile's values were kept."
+            )
     created_profile = False
     created_project = False
+    merged_profile = False
+    merged_before: dict | None = None
     try:
         if not profile_existed:
             store.create_profile(
@@ -300,6 +531,22 @@ def import_export(store: Store, path: str | Path) -> dict:
                 dependencies=prof.get("dependencies", []),
             )
             created_profile = True
+        elif choice == "take":
+            # T57 take: the stored block becomes the package's,
+            # exactly — all three fields passed explicitly, so the
+            # T54 sync cannot move the base. The local values are
+            # remembered so a failed import restores them.
+            merged_before = {
+                field: (local_block or {}).get(field, "")
+                for field in PROFILE_BLOCK_FIELDS
+            }
+            store.update_profile(
+                slug,
+                ollama_tag=prof.get("ollama_tag", ""),
+                role=prof.get("role", ""),
+                base_ref=prof.get("base_ref", ""),
+            )
+            merged_profile = True
         metamorph = proj.get("metamorph") or {}
         created = store.create_project(
             slug,
@@ -311,9 +558,30 @@ def import_export(store: Store, path: str | Path) -> dict:
             metamorph_notes=metamorph.get("notes", ""),
         )
         created_project = True
-        if proj.get("status"):
-            store.update_project(slug, project_slug, status=proj["status"])
+        if status != "draft":
+            store.update_project(slug, project_slug, status=status)
             created = store.get_project(slug, project_slug)
+        # The trained adapter comes back (T41): the package's
+        # weights/ land in the project's adapter/ dir, minus the
+        # placeholder note — the payload the program exists to
+        # produce, restored instead of dropped.
+        if weight_items:
+            dst_adapter = (
+                store.project_dir(slug, project_slug) / "adapter"
+            )
+            dst_adapter.mkdir(parents=True, exist_ok=True)
+            for item in weight_items:
+                if item.is_file():
+                    shutil.copy2(item, dst_adapter / item.name)
+                elif item.is_dir():
+                    shutil.copytree(item, dst_adapter / item.name)
+        # The refusal evidence travels with the fine-tune.
+        probe_src = path / "probe_results.json"
+        if probe_src.is_file():
+            shutil.copy2(
+                probe_src,
+                store.project_dir(slug, project_slug) / "probe_results.json",
+            )
         # Bring checkpoints + notes along, if the package has them.
         src_ckpt = path / "checkpoints"
         if src_ckpt.is_dir():
@@ -335,20 +603,31 @@ def import_export(store: Store, path: str | Path) -> dict:
             shutil.copytree(src_sleep, dst_sleep)
     except BaseException:
         # Roll back what this import created, best effort: a failed
-        # import leaves the home exactly as it was.
+        # import leaves the home exactly as it was. The destroy
+        # path (not the trash): a rollback must not leave a trash
+        # folder behind. A take-merge is unwound the same way, so
+        # the profile keeps the values it had before the import.
+        if merged_profile and merged_before is not None:
+            try:
+                store.update_profile(slug, **merged_before)
+            except Exception:
+                pass
         if created_project:
             try:
-                store.delete_project(slug, project_slug)
+                store._destroy_project(slug, project_slug)
             except Exception:
                 pass
         if created_profile:
             try:
-                store.delete_profile(slug)
+                store._destroy_profile(slug)
             except Exception:
                 pass
         raise
     return {
         "profile": slug,
         "profile_existed": profile_existed,
+        "profile_diff": profile_diff,
+        "profile_choice": choice,
         "project": created["name"],
+        "warnings": warnings,
     }

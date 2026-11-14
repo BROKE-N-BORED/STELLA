@@ -29,7 +29,7 @@ from pathlib import Path
 
 from .autoconfig import compute_settings, measure_pc
 
-STELLA_VERSION = "0.12.0"
+STELLA_VERSION = "0.13.0"
 
 # Slug: lowercase letters, digits, dash, underscore. Must start alnum.
 # No dots, no slashes — a slug can never climb out of its directory.
@@ -44,11 +44,45 @@ DEFAULT_METAMORPH_MODE = "morph"
 # but it does not run on this PC (train.py always trains LoRA).
 SETTING_METHODS = ("lora", "full")
 
-# Project lifecycle statuses, as used across the tree: draft at
-# creation, training/paused/trained by the engine, exported by GGUF
-# export. The import boundary (export.verify_export) rejects any
-# other status.
-PROJECT_STATUSES = ("draft", "training", "paused", "trained", "exported")
+# Project lifecycle statuses (T53, reconciled). The task's enum
+# (draft/ready/training/done/failed/exported) and the engine's
+# (draft/training/paused/trained/exported) disagreed; this is the
+# one vocabulary now:
+#   draft    — just created, not started
+#   ready    — the user marked it ready to train (draft -> ready is
+#              the only user-driven transition)
+#   training — a run is in progress
+#   paused   — a run stopped cleanly (Pause / Ctrl+C) and can resume
+#   done     — a run finished (the engine's old word was "trained")
+#   failed   — a run errored (a crash is not a pause)
+#   exported — the adapter was exported to GGUF
+# Transitions are driven by actions, never free text: training
+# sets training/paused/done/failed, GGUF export sets exported,
+# the user sets ready. `paused` has no slot in the task's enum but
+# pause/resume is a real state, so it stays.
+PROJECT_STATUSES = (
+    "draft", "ready", "training", "paused", "done", "failed", "exported",
+)
+
+# Old status words, normalized on read, never persisted (T53):
+# v0.1-v0.12 stored "trained" for a finished run; it reads as
+# "done" now.
+LEGACY_STATUS_ALIASES = {"trained": "done"}
+
+
+def normalize_status(status) -> str:
+    """The canonical status for a stored value (T53): a legacy
+    alias maps to its current word, anything else passes through
+    unchanged (validation happens on write, not on read)."""
+    if isinstance(status, str):
+        return LEGACY_STATUS_ALIASES.get(status, status)
+    return status
+
+
+# Statuses that claim a trained adapter exists (T41): a package
+# claiming one of these without weights imports as a draft — a
+# project with no weights must not claim to be finished.
+WEIGHT_STATUSES = ("done", "exported")
 
 # Where a project's settings came from: "auto" (measured from this
 # PC, re-resolved at each run start) or "manual" (set by a human —
@@ -91,6 +125,10 @@ DEFAULT_SETTINGS = {
     "warmup_steps": 5,
     "seed": 42,
     "notes": "",
+    # T34: hand-supplied LoRA target layers for architectures the
+    # auto-detection does not recognize. Empty means "find them
+    # yourself" — the normal case; a non-empty list is used as-is.
+    "target_modules": [],
 }
 
 
@@ -216,11 +254,31 @@ def validate_settings(settings: dict) -> dict:
                 raise StellaError(f"notes must be text, not {value!r}")
             cleaned[key] = value
             continue
+        if key == "target_modules":
+            # T34: a list of layer leaf names, or empty for
+            # auto-detection. Each name is checked against the
+            # model at train time; here only the shape is checked.
+            if not isinstance(value, list):
+                raise StellaError(
+                    "target_modules must be a list of layer names, "
+                    f"not {value!r}"
+                )
+            names = []
+            for item in value:
+                if not isinstance(item, str) or not item.strip():
+                    raise StellaError(
+                        "target_modules must be a list of layer names, "
+                        f"not {value!r}"
+                    )
+                names.append(item.strip())
+            cleaned[key] = names
+            continue
         rule = SETTING_RULES.get(key)
         if rule is None:
             raise StellaError(
                 f"there is no setting called {key!r}. The settings are: "
-                f"{', '.join(sorted(SETTING_RULES))}, method, notes"
+                f"{', '.join(sorted(SETTING_RULES))}, method, notes, "
+                "target_modules"
             )
         kind, low, high = rule
         if isinstance(value, bool):
@@ -292,6 +350,117 @@ class Store:
     def __init__(self, home: Path | str | None = None):
         self.home = Path(home) if home is not None else default_home()
         self.profiles_dir = self.home / "profiles"
+        # Deleted profiles and projects go here (T23), dated, so a
+        # misclick past Yes is recoverable: move the folder back.
+        self.trash_dir = self.home / "trash"
+
+    # -- trash ------------------------------------------------------
+    def _trash_name(self, base: str) -> str:
+        """A dated trash folder name: <base>-YYYYMMDD-HHMMSS, with
+        a -2, -3 suffix when two deletes land in the same second."""
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        name = f"{base}-{stamp}"
+        n = 2
+        while (self.trash_dir / name).exists():
+            name = f"{base}-{stamp}-{n}"
+            n += 1
+        return name
+
+    def _move_to_trash(self, folder: Path, base: str) -> Path:
+        """Move a profile/project folder into the trash. Returns
+        the trash path."""
+        self.trash_dir.mkdir(parents=True, exist_ok=True)
+        dest = self.trash_dir / self._trash_name(base)
+        folder.rename(dest)
+        return dest
+
+    def list_trash(self) -> list[dict]:
+        """Every trashed item: {"name", "kind", "profile",
+        "project", "trashed", "path"}. The kind and names come
+        from the manifest inside the folder, so a hand-moved
+        folder still reads right; the date comes from the folder
+        name."""
+        out = []
+        if not self.trash_dir.is_dir():
+            return out
+        for d in sorted(self.trash_dir.iterdir()):
+            if not d.is_dir():
+                continue
+            entry = {
+                "name": d.name,
+                "kind": "unknown",
+                "profile": "",
+                "project": "",
+                "trashed": "",
+                "path": str(d),
+            }
+            match = re.match(
+                r"^(.+)-(\d{8})-(\d{6})(?:-\d+)?$", d.name
+            )
+            if match:
+                date, clock = match.group(2), match.group(3)
+                entry["trashed"] = (
+                    f"{date[:4]}-{date[4:6]}-{date[6:]} "
+                    f"{clock[:2]}:{clock[2:4]}:{clock[4:]}"
+                )
+            prof_manifest = d / "profile.json"
+            proj_manifest = d / "project.json"
+            try:
+                if prof_manifest.is_file():
+                    data = _read_json(prof_manifest)
+                    entry["kind"] = "profile"
+                    entry["profile"] = data.get("name", d.name)
+                elif proj_manifest.is_file():
+                    data = _read_json(proj_manifest)
+                    entry["kind"] = "project"
+                    entry["profile"] = data.get("profile", "")
+                    entry["project"] = data.get("name", d.name)
+            except StellaError:
+                pass
+            out.append(entry)
+        return out
+
+    def purge_trash(self, name: str) -> None:
+        """Delete one trashed item forever (T23). The name must be
+        a plain trash entry name — never a path."""
+        if not name or "/" in name or "\\" in name or name in (".", ".."):
+            raise StellaError(f"not a trash item: {name!r}")
+        target = self.trash_dir / name
+        if not target.is_dir():
+            raise StellaError(f"nothing in the trash named {name!r}")
+        shutil.rmtree(target)
+
+    def empty_trash(self) -> int:
+        """Delete everything in the trash forever. Returns how many
+        items were removed."""
+        if not self.trash_dir.is_dir():
+            return 0
+        count = 0
+        for d in list(self.trash_dir.iterdir()):
+            if d.is_dir():
+                shutil.rmtree(d)
+                count += 1
+            elif d.is_file():
+                d.unlink()
+                count += 1
+        return count
+
+    def _destroy_profile(self, slug: str) -> None:
+        """Remove a profile permanently, no trash (T23). Only the
+        import rollback uses this: a failed import must leave the
+        home exactly as it was, and trash would leave a folder
+        behind. Everything else deletes through the trash."""
+        slug = validate_slug(slug, "profile name")
+        pdir = self.profile_dir(slug)
+        if (pdir / "profile.json").exists():
+            shutil.rmtree(pdir)
+
+    def _destroy_project(self, profile: str, project: str) -> None:
+        """Remove a project permanently, no trash (T23) — see
+        _destroy_profile."""
+        pdir = self.project_dir(profile, project)
+        if (pdir / "project.json").exists():
+            shutil.rmtree(pdir)
 
     # -- paths ------------------------------------------------------
     def profile_dir(self, slug: str) -> Path:
@@ -380,10 +549,26 @@ class Store:
             "config",
             "dependencies",
         }
+        old_tag = data.get("ollama_tag", "")
+        old_base = data.get("base_ref", "")
         for key, value in fields.items():
             if key not in allowed:
                 raise StellaError(f"cannot change {key!r} on a profile")
             data[key] = value
+        # T54 sync rule (interim, until Joshua decides drop vs
+        # define): changing the tag updates base_ref unless the
+        # user deliberately split them. A stored base_ref that
+        # equals the OLD tag (or is empty) means "not split" — it
+        # follows the new tag. A stored base_ref that differs from
+        # the old tag is a deliberate split and stays. An explicit
+        # base_ref in the same call always wins.
+        if (
+            "ollama_tag" in fields
+            and "base_ref" not in fields
+            and fields["ollama_tag"] != old_tag
+            and (not old_base or old_base == old_tag)
+        ):
+            data["base_ref"] = fields["ollama_tag"]
         data["updated"] = utc_now()
         _write_json(self.profile_dir(slug) / "profile.json", data)
         return data
@@ -417,12 +602,17 @@ class Store:
         src.rename(dst)
         return self.get_profile(new_slug)
 
-    def delete_profile(self, slug: str) -> None:
+    def delete_profile(self, slug: str) -> Path:
+        """Delete a profile — to the trash (T23), not gone: the
+        folder moves to trash/<slug>-<date>/ with its projects,
+        notes, and checkpoints intact, so a misclick is
+        recoverable. Returns the trash path. Purge (delete
+        forever) is purge_trash."""
         slug = validate_slug(slug, "profile name")
         pdir = self.profile_dir(slug)
         if not (pdir / "profile.json").exists():
             raise StellaError(f"no profile named {slug!r}")
-        shutil.rmtree(pdir)
+        return self._move_to_trash(pdir, slug)
 
     # -- projects ---------------------------------------------------
     def list_projects(self, profile: str) -> list[dict]:
@@ -435,7 +625,14 @@ class Store:
             manifest = d / "project.json"
             if d.is_dir() and manifest.is_file():
                 try:
-                    out.append(_read_json(manifest))
+                    entry = _read_json(manifest)
+                    # Legacy statuses read as their current word
+                    # (T53), in memory only.
+                    if "status" in entry:
+                        entry["status"] = normalize_status(
+                            entry["status"]
+                        )
+                    out.append(entry)
                 except StellaError as exc:
                     # A broken manifest is a damaged row, not a skip
                     # (T3) — see list_profiles.
@@ -458,6 +655,11 @@ class Store:
         data = _read_json(manifest)
         data.setdefault("name", project)
         data.setdefault("profile", validate_slug(profile, "profile name"))
+        data.setdefault("status", "draft")
+        # A legacy status reads as its current word (T53): a
+        # v0.1-v0.12 "trained" project is "done" now. The file on
+        # disk is untouched — the next write persists the new word.
+        data["status"] = normalize_status(data.get("status", "draft"))
         # Default the metamorph block in memory (T37): a missing,
         # null, or wrong-type block reads as the default instead of
         # crashing the next reader. The file on disk is untouched —
@@ -582,6 +784,22 @@ class Store:
                     )
                 data[key] = value
                 continue
+            if key == "status":
+                # T53: status is a validated enum — anything else
+                # is rejected. A legacy alias ("trained") is
+                # accepted and stored as its current word ("done"),
+                # never persisted as the old word. Every real
+                # transition stamps status_changed.
+                value = normalize_status(value)
+                if value not in PROJECT_STATUSES:
+                    raise StellaError(
+                        f"status must be one of "
+                        f"{', '.join(PROJECT_STATUSES)}, not {value!r}"
+                    )
+                if normalize_status(data.get("status")) != value:
+                    data["status_changed"] = utc_now()
+                data["status"] = value
+                continue
             data[key] = value
         # Explicit settings are a human choice: the project becomes
         # manual, unless the caller named the source itself (the
@@ -612,11 +830,18 @@ class Store:
         src.rename(dst)
         return self.get_project(profile, new_slug)
 
-    def delete_project(self, profile: str, project: str) -> None:
+    def delete_project(self, profile: str, project: str) -> Path:
+        """Delete a project — to the trash (T23), not gone: the
+        folder moves to trash/<profile>-<project>-<date>/ with its
+        checkpoints and notes intact. Returns the trash path."""
         pdir = self.project_dir(profile, project)
         if not (pdir / "project.json").exists():
             raise StellaError(f"no project named {project!r}")
-        shutil.rmtree(pdir)
+        return self._move_to_trash(
+            pdir,
+            f"{validate_slug(profile, 'profile name')}-"
+            f"{validate_slug(project, 'project name')}",
+        )
 
     # -- notes ------------------------------------------------------
     def read_notes(self, profile: str, project: str) -> str:

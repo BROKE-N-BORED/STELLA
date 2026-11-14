@@ -907,6 +907,7 @@ accounts for their findings.)
 - **Origin:** audit #1 T5 + audit #2 T8 (merged — one trash system)
 - **Covers:** A1-W5, A1-D6; A2-W8, A2-D10
 - **Effort:** M
+- **Status:** DONE in v0.13.0 (2026-11-14) — deletes move to trash as `<profile>-<project>-<date>`; restore or purge from the Trash window (File menu).
 - **Problem:** Both deletes are `shutil.rmtree` behind a single
   Yes/No dialog. `delete_profile` destroys the profile, its
   projects, notes, and (from v0.2) checkpoints; `delete_project`
@@ -1086,6 +1087,7 @@ accounts for their findings.)
 - **Covers:** A4-W9, A4-D9; A8-W7, A8-D5
 - **Effort:** M
 - **Note:** Extended by T74 (Audit #9 R7).
+- **Status:** DONE in v0.13.0 (2026-11-14) — one job at a time enforced in the GUI and the engine via a lock file (stella/job_lock.py), so two CLI runs cannot load models at once.
 - **Problem:** Probed with slow fake jobs: starting the refusal
   probe while a GGUF export was running started a second
   `JobWorker` alongside the first — and starting a GGUF export
@@ -1124,6 +1126,7 @@ accounts for their findings.)
 - **Origin:** audit #8 T3
 - **Covers:** A8-W4, A8-W5, A8-W6, A8-D2, A8-D3
 - **Effort:** M
+- **Status:** DONE in v0.13.0 (2026-11-14) — the refusal probe is trustworthy now: first-sentence detection, silent models fail the gate, chat-template prompts.
 - **Problem:** The probe's refusal detection is brittle both
   ways (W4): substring matching against 16 markers in the first
   400 chars (`probe.py:65`) cannot tell an apology from a
@@ -1259,6 +1262,7 @@ accounts for their findings.)
 - **Origin:** audit #8 T6
 - **Covers:** A8-G1
 - **Effort:** S
+- **Status:** DONE in v0.13.0 (2026-11-14) — the target-module override is honored from a CLI flag and a stored settings field (flag wins); no UI per T16.
 - **Problem:** `detect_target_modules` fails cleanly on unknown
   layers (naming the model's actual layers), but there is no
   setting, flag, or config to supply `target_modules` by hand.
@@ -1296,6 +1300,7 @@ accounts for their findings.)
 - **Origin:** audit #4 T10
 - **Covers:** A4-W10, A4-D10
 - **Effort:** M
+- **Status:** DONE in v0.13.0 (2026-11-14) — close waits for a running job instead of freezing.
 - **Problem:** `closeEvent` (`gui.py:916-919`) waits for the
   *train* worker only. Probed in a separate process: closing the
   window during a GGUF export returned in 0.05s and Qt printed
@@ -1414,6 +1419,7 @@ accounts for their findings.)
 - **Origin:** audit #3 T2
 - **Covers:** A3-W5, A3-W6 (format side), A3-G1, A3-G3, A3-D1
 - **Effort:** M
+- **Status:** DONE in v0.13.0 (2026-11-14) — the package format is versioned (format 1, profile + recipe kinds defined up front, documented in docs/FORMAT.md).
 - **Problem:** `stella_version` is stamped on every manifest and
   means nothing: no supported range, no "too new" rejection, no
   migration. Probed: a manifest claiming version `99.0` imports
@@ -1456,6 +1462,7 @@ accounts for their findings.)
 - **Covers:** A3-W6, A3-D5; R1
 - **Effort:** S
 - **Depends on:** T40 (lands with the version check)
+- **Status:** DONE in v0.13.0 (2026-11-14) — weights and probe results round-trip through export/import.
 - **Problem:** Import copies checkpoints and notes only
   (`export.py:174-187`); `weights/` is not mentioned. Probed: a
   package containing `weights/adapter.safetensors` imported
@@ -1658,6 +1665,7 @@ accounts for their findings.)
 - **Origin:** audit #5 T5
 - **Covers:** A5-W5, A5-D5
 - **Effort:** S
+- **Status:** DONE in v0.13.0 (2026-11-14) — cheap checks run before the training-deps gate, so a missing dataset or settings problem is caught without loading the training stack.
 - **Problem:** On a base install (no torch), `train_project` calls
   `require_training_deps()` before it looks up the profile or the
   dataset. Probes: a nonexistent profile, a missing dataset, and
@@ -1717,6 +1725,7 @@ accounts for their findings.)
 - **Origin:** audit #5 T8
 - **Covers:** A5-U1, A5-U2, A5-D11
 - **Effort:** S
+- **Status:** DONE in v0.13.0 (2026-11-14) — help text and worked examples on every CLI command; the doc drift is fixed.
 - **Problem:** `create-profile --tag`, `--role`, and `--display`
   have no help at all (`cli.py:235-237`); only `--base` does.
   `create-project --display`, `--dataset`, and `--metamorph` have
@@ -1780,6 +1789,7 @@ accounts for their findings.)
 - **Origin:** audit #2 T5 + audit #4 T23 (status part; merged — one fix); extended by the repo-audit verdict (R16)
 - **Covers:** A2-W5, A2-U4, A2-G1, A2-D5; A4-G5, A4-D22 (status part); R16
 - **Effort:** M
+- **Status:** DONE in v0.13.0 (2026-11-14) — a real status lifecycle (draft, ready, training, paused, done, failed, exported; trained reads as done via legacy alias) shown on every project row, with status_changed timestamps.
 - **Problem:** `status` is free text with no lifecycle and no UI.
   Every project is born `draft` and stays `draft` forever — nothing
   transitions it through training, done, failed, or exported, and
@@ -1809,6 +1819,7 @@ accounts for their findings.)
 - **Covers:** A1-W3, A1-D3
 - **Effort:** M
 - **Note:** Extended by T79 (Audit #9 R12).
+- **Status:** DONE in v0.13.0 (2026-11-14) — the interim sync rule is in place (base_ref is the one source of truth, synced from the tag where they disagree); the drop-vs-define decision is still Joshua's.
 - **Problem:** `ollama_tag` and `base_ref` are two fields with one
   meaning and no sync rule. Create with a tag and `base_ref` is set
   to the same value; change the tag later and `base_ref` stays stale
@@ -1897,6 +1908,7 @@ accounts for their findings.)
 - **Origin:** audit #3 T4
 - **Covers:** A3-W4, A3-U7, A3-D4
 - **Effort:** M
+- **Status:** DONE in v0.13.0 (2026-11-14) — profile merge on import (keep local or take package), with compare_profile_block and the {field: {local, package}} diff shape as T58's extension point.
 - **Problem:** If the profile already exists, `import_export`
   reuses it and never looks at the manifest's profile block
   (`export.py:143-151`). Probed: importing into a home whose
@@ -1975,6 +1987,7 @@ accounts for their findings.)
 - **Origin:** audit #3 T5
 - **Covers:** A3-W3, A3-D6
 - **Effort:** S
+- **Status:** DONE in v0.13.0 (2026-11-14) — settings have one source of truth in the model, read everywhere from the same place.
 - **Problem:** `config.json` is required but never read:
   `verify_export` rejects a package missing it
   (`export.py:131-132`), but nothing ever reads the file — import

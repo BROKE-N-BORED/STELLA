@@ -60,6 +60,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from .job_lock import job_lock
 from .model import STELLA_VERSION, StellaError, Store, utc_now
 from .train import (
     TrainController,
@@ -694,98 +695,104 @@ def sleep_project(
     has_checkpoints = (cycle_dir / "checkpoints").is_dir() and any(
         (cycle_dir / "checkpoints").iterdir()
     )
-    summary = train_project(
-        store,
-        profile,
-        project,
-        dataset_path=cycle_dir / "train_rows.jsonl",
-        on_event=_forward,
-        controller=controller,
-        _model_loader=_model_loader,
-        _dtype=_dtype,
-        work_dir=cycle_dir,
-        update_status=False,
-        resume=(resumed and has_checkpoints),
-        settings_override={"rank": sleep_rank},
-    )
-    if summary["stopped"]:
-        emit({"type": "paused", "cycle": cycle_no, "step": summary["steps"]})
-        return {
+    # One job at a time (T29): sleep loads models twice (the
+    # consolidation train, then the replay check), so the whole
+    # cycle holds the home's job lock. The inner train call
+    # skips its own lock: this one already covers it.
+    with job_lock(store.home, f"sleep {profile}/{project}"):
+        summary = train_project(
+            store,
+            profile,
+            project,
+            dataset_path=cycle_dir / "train_rows.jsonl",
+            on_event=_forward,
+            controller=controller,
+            _model_loader=_model_loader,
+            _dtype=_dtype,
+            work_dir=cycle_dir,
+            update_status=False,
+            resume=(resumed and has_checkpoints),
+            settings_override={"rank": sleep_rank},
+            _skip_job_lock=True,
+        )
+        if summary["stopped"]:
+            emit({"type": "paused", "cycle": cycle_no, "step": summary["steps"]})
+            return {
+                "cycle": cycle_no,
+                "status": "paused",
+                "steps": summary["steps"],
+                "real_rows": real_count,
+                "dreamed_rows": dreamed_count,
+                "resumed": resumed,
+            }
+
+        # Replay check: one model at a time, old then new.
+        emit({"type": "replay", "cycle": cycle_no})
+        prev_adapter = None
+        if cycle_no > 1:
+            prev_dir = sleep_dir(store, profile, project) / f"cycle-{cycle_no - 1}" / "adapter"
+            if (prev_dir / "adapter_config.json").is_file():
+                prev_adapter = prev_dir
+        old_val = [
+            _example_from_messages(ex["messages"])
+            for ex in manifest["old_val_rows"]
+        ]
+        replay = replay_check(
+            store,
+            profile,
+            project,
+            cycle_dir,
+            old_val,
+            val_rows,
+            threshold=threshold,
+            prev_adapter=prev_adapter,
+            _model_loader=_model_loader,
+            _dtype=_dtype,
+            max_seq_len=int(settings.get("max_seq_len", 1024)),
+        )
+        emit({"type": "replay_done", **replay})
+
+        report = {
+            "stella_version": STELLA_VERSION,
             "cycle": cycle_no,
-            "status": "paused",
-            "steps": summary["steps"],
+            "timestamp": utc_now(),
+            "status": replay["status"],
             "real_rows": real_count,
             "dreamed_rows": dreamed_count,
+            "steps": summary["steps"],
+            "final_loss": summary["final_loss"],
+            "old_loss_before": replay["old_loss_before"],
+            "old_loss_after": replay["old_loss_after"],
+            "new_loss": replay["new_loss"],
+            "old_delta_relative": replay["old_delta_relative"],
+            "threshold": threshold,
+            "old_val_rows": replay["old_val_rows"],
+            "new_val_rows": replay["new_val_rows"],
+            "new_val_in_sample": in_sample,
+            "rank": sleep_rank,
+            "trainable_params": summary["trainable_params"],
+            "ram_estimate_gb": summary["ram_estimate_gb"],
             "resumed": resumed,
         }
+        _atomic_write_json(cycle_dir / "report.json", report)
 
-    # Replay check: one model at a time, old then new.
-    emit({"type": "replay", "cycle": cycle_no})
-    prev_adapter = None
-    if cycle_no > 1:
-        prev_dir = sleep_dir(store, profile, project) / f"cycle-{cycle_no - 1}" / "adapter"
-        if (prev_dir / "adapter_config.json").is_file():
-            prev_adapter = prev_dir
-    old_val = [
-        _example_from_messages(ex["messages"])
-        for ex in manifest["old_val_rows"]
-    ]
-    replay = replay_check(
-        store,
-        profile,
-        project,
-        cycle_dir,
-        old_val,
-        val_rows,
-        threshold=threshold,
-        prev_adapter=prev_adapter,
-        _model_loader=_model_loader,
-        _dtype=_dtype,
-        max_seq_len=int(settings.get("max_seq_len", 1024)),
-    )
-    emit({"type": "replay_done", **replay})
+        # Manifest: mark the real rows slept, bank the dreamed hashes,
+        # and keep this cycle's val rows as tomorrow's old val rows.
+        manifest["slept_hashes"] = sorted(slept | set(real_hashes))
+        manifest["dreamed_hashes"] = sorted(dreamed_known | set(dreamed_hashes))
+        kept_val = manifest["old_val_rows"] + [
+            _example_from_messages(ex["messages"]) for ex in val_rows
+        ]
+        manifest["old_val_rows"] = kept_val[-MAX_OLD_VAL_ROWS:]
+        manifest["cycles"] = [
+            c for c in manifest["cycles"] if c.get("cycle") != cycle_no
+        ]
+        manifest["cycles"].append(_cycle_summary(report))
+        manifest["cycles"].sort(key=lambda c: c.get("cycle", 0))
+        save_sleep_manifest(store, profile, project, manifest)
 
-    report = {
-        "stella_version": STELLA_VERSION,
-        "cycle": cycle_no,
-        "timestamp": utc_now(),
-        "status": replay["status"],
-        "real_rows": real_count,
-        "dreamed_rows": dreamed_count,
-        "steps": summary["steps"],
-        "final_loss": summary["final_loss"],
-        "old_loss_before": replay["old_loss_before"],
-        "old_loss_after": replay["old_loss_after"],
-        "new_loss": replay["new_loss"],
-        "old_delta_relative": replay["old_delta_relative"],
-        "threshold": threshold,
-        "old_val_rows": replay["old_val_rows"],
-        "new_val_rows": replay["new_val_rows"],
-        "new_val_in_sample": in_sample,
-        "rank": sleep_rank,
-        "trainable_params": summary["trainable_params"],
-        "ram_estimate_gb": summary["ram_estimate_gb"],
-        "resumed": resumed,
-    }
-    _atomic_write_json(cycle_dir / "report.json", report)
-
-    # Manifest: mark the real rows slept, bank the dreamed hashes,
-    # and keep this cycle's val rows as tomorrow's old val rows.
-    manifest["slept_hashes"] = sorted(slept | set(real_hashes))
-    manifest["dreamed_hashes"] = sorted(dreamed_known | set(dreamed_hashes))
-    kept_val = manifest["old_val_rows"] + [
-        _example_from_messages(ex["messages"]) for ex in val_rows
-    ]
-    manifest["old_val_rows"] = kept_val[-MAX_OLD_VAL_ROWS:]
-    manifest["cycles"] = [
-        c for c in manifest["cycles"] if c.get("cycle") != cycle_no
-    ]
-    manifest["cycles"].append(_cycle_summary(report))
-    manifest["cycles"].sort(key=lambda c: c.get("cycle", 0))
-    save_sleep_manifest(store, profile, project, manifest)
-
-    emit({"type": "done", "cycle": cycle_no, "status": replay["status"]})
-    return report
+        emit({"type": "done", "cycle": cycle_no, "status": replay["status"]})
+        return report
 
 
 # -- status ---------------------------------------------------------
