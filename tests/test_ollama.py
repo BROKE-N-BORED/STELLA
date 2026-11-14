@@ -8,11 +8,15 @@ import pytest
 
 from stella.ollama import (
     MODEL_CACHE,
+    SHOW_CACHE,
     ModelListCache,
+    ModelShowCache,
     OllamaError,
     chat_stream,
+    fetch_show,
     list_model_sizes,
     list_models,
+    parse_show_info,
 )
 
 
@@ -33,6 +37,40 @@ class FakeOllama(BaseHTTPRequestHandler):
         else:
             self.send_response(404)
             self.end_headers()
+
+    def do_POST(self):
+        # T165: /api/show answers for the installed tag, 404s for
+        # anything else — the server is up either way.
+        if self.path != "/api/show":
+            self.send_response(404)
+            self.end_headers()
+            return
+        length = int(self.headers.get("Content-Length") or 0)
+        try:
+            body = json.loads(self.rfile.read(length) or b"{}")
+        except ValueError:
+            body = {}
+        if body.get("model") != "lfm3:1.7b":
+            self.send_response(404)
+            self.end_headers()
+            return
+        payload = json.dumps({
+            "model": "lfm3:1.7b",
+            "size": 2000000000,
+            "details": {
+                "format": "gguf",
+                "family": "llama",
+                "parameter_size": "1.7B",
+                "quantization_level": "Q4_K_M",
+            },
+            "model_info": {"llama.context_length": 131072},
+            "capabilities": ["completion", "tools"],
+        }).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
 
     def log_message(self, *args):
         pass
@@ -335,3 +373,104 @@ def test_cache_different_urls_fetch_concurrently():
 
 def test_module_cache_singleton_is_a_cache():
     assert isinstance(MODEL_CACHE, ModelListCache)
+
+
+# -- v0.21.0: T165 — /api/show, cached like the model list --------
+
+
+def test_fetch_show_from_fake_server():
+    """T165: fetch_show parses size, quant, context, and
+    capabilities from a fake /api/show."""
+    server = ThreadingHTTPServer(("127.0.0.1", 0), FakeOllama)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}"
+        info = fetch_show("lfm3:1.7b", url)
+        assert info["size_bytes"] == 2000000000
+        assert info["quant"] == "Q4_K_M"
+        assert info["context"] == 131072
+        assert info["capabilities"] == ["completion", "tools"]
+        assert info["parameter_size"] == "1.7B"
+        assert info["family"] == "llama"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_fetch_show_unknown_tag_and_offline_return_none():
+    """T165: an unknown tag (404, server up) and a down server
+    both return None, never raise."""
+    server = ThreadingHTTPServer(("127.0.0.1", 0), FakeOllama)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}"
+        assert fetch_show("ghost:9b", url) is None
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert fetch_show("lfm3:1.7b", "http://127.0.0.1:9") is None
+
+
+def test_parse_show_info_defensive():
+    """T165: a missing or wrong-typed field reads as empty, never
+    a crash — the payload shape varies by backend and version."""
+    assert parse_show_info(None) is None
+    assert parse_show_info({}) == {
+        "size_bytes": None, "quant": "", "context": None,
+        "capabilities": [], "parameter_size": "", "family": "",
+    }
+    info = parse_show_info({
+        "size": "huge",
+        "details": {"quantization_level": 4},
+        "model_info": {"llama.context_length": "long"},
+        "capabilities": "completion",
+    })
+    assert info["size_bytes"] is None
+    assert info["quant"] == ""
+    assert info["context"] is None
+    assert info["capabilities"] == []
+
+
+def test_show_cache_refresh_seed_and_reset():
+    """T165: the show cache refreshes from a fake server, seeds
+    outright for tests, and resets."""
+    server = ThreadingHTTPServer(("127.0.0.1", 0), FakeOllama)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}"
+        cache = ModelShowCache()
+        assert not cache.loaded("lfm3:1.7b")
+        assert cache.info("lfm3:1.7b") is None
+        info, up = cache.refresh("lfm3:1.7b", url)
+        assert up is True
+        assert info["quant"] == "Q4_K_M"
+        assert cache.loaded("lfm3:1.7b")
+        assert cache.ollama_up("lfm3:1.7b") is True
+        assert cache.info("lfm3:1.7b")["context"] == 131072
+        # An unknown tag lands as loaded-but-empty, with Ollama up:
+        # "not installed" is not "down".
+        info, up = cache.refresh("ghost:9b", url)
+        assert up is True
+        assert info is None
+        assert cache.loaded("ghost:9b")
+        assert cache.info("ghost:9b") is None
+        # Offline: loaded, not up, no info.
+        info, up = cache.refresh("lfm3:1.7b", "http://127.0.0.1:9")
+        assert up is False
+        assert info is None
+    finally:
+        server.shutdown()
+        server.server_close()
+    cache.set_snapshot("seed:1b", {"quant": "Q8_0"}, ollama_up=True)
+    assert cache.info("seed:1b")["quant"] == "Q8_0"
+    cache.reset("seed:1b")
+    assert not cache.loaded("seed:1b")
+    cache.reset()
+    assert not cache.loaded("lfm3:1.7b")
+
+
+def test_module_show_cache_singleton_is_a_cache():
+    assert isinstance(SHOW_CACHE, ModelShowCache)

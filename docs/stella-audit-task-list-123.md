@@ -4254,6 +4254,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Origin:** audit #2 T16 + audit #4 T13 (settings-tooltips part; merged — one fix)
 - **Covers:** A2-U2, A2-U7; A4-U7, A4-D16 (settings-tooltips part)
 - **Effort:** S
+- **Status:** DONE in v0.21.0 (2026-11-14) — the Project window's Notes sit at the top, visible without scrolling (moved above Details; the notes editor is above the fold). The tooltips half is moot: no settings fields exist post-T16.
 - **Problem:** Two detail-panel polish flaws. (A2-U2) The Notes editor
   sits under Save project at the bottom of a scrolling panel; in the
   1100x680 window only the "Notes" header peeks out (visible in the
@@ -4277,6 +4278,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Origin:** audit #5 T17
 - **Covers:** A5-G6, A5-D16
 - **Effort:** M
+- **Status:** DONE in v0.21.0 (2026-11-14) — the Train panel has the terminal's options in the window: a step cap (default 0), per-run dataset and base overrides (cleared on switch, never written back), a GGUF quant choice (Q4_K_M default) and a checkpoint picker on Export GGUF.
 - **Problem:** Verified by reading the GUI: `--steps`, `--resume`,
   `--dataset`/`--base` overrides, `--quant`, and
   `--from-checkpoint` have no GUI equivalent. A window user cannot
@@ -4320,6 +4322,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Effort:** S
 - **Note:** Extended by T78 (Audit #9 R11).
 - **Depends on:** T43 (cached model list)
+- **Status:** DONE in v0.21.0 (2026-11-14) — profile rows show a tag-health marker from the T43 cache (installed/missing/down/no-tag unit states; live rows show "?" with Ollama down, "(no tag)" for a tag-less profile; T78's weights dot kept).
 - **Problem:** Nothing shows whether a profile's tag is actually
   installed. A tag removed from Ollama (`ollama rm`) leaves a
   profile pointing at a missing model with no sign — it looks
@@ -4343,6 +4346,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Effort:** S
 - **Note:** Extended by T78 (Audit #9 R11).
 - **Depends on:** T53 (status must be real before rows show it)
+- **Status:** DONE in v0.21.0 (2026-11-14) — project rows show the dataset file and the slug when two projects share a name; no settings words in rows (reconciliation in CHANGELOG — method/rank NOT shown, they are settings forbidden by T16).
 - **Problem:** Rows show display name + metamorph mode only: no
   status, no method, no rank, no dataset. Two projects with the same
   display name and mode are indistinguishable in the list (their
@@ -4360,6 +4364,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Origin:** audit #1 T14
 - **Covers:** A1-G3, A1-D9; A1-G5 (last-used); A1-W12 (project count, created/updated display)
 - **Effort:** M
+- **Status:** DONE in v0.21.0 (2026-11-14) — the Profile window shows what the profile points at (size, quant, context, capabilities from Ollama via a cached /api/show call), the dates, and a last-used date stamped when a training run starts (gated on update_status; sleep excluded). The real Ollama /api/show path was verified against a fake server only.
 - **Problem:** A profile knows only a tag string. No size, quant,
   context length, or capabilities (vision? tools?) are recorded or
   shown, though Ollama's `/api/show` provides them. The list row
@@ -4387,6 +4392,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Origin:** audit #1 T15
 - **Covers:** A1-W12 (profile notes)
 - **Effort:** S
+- **Status:** DONE in v0.21.0 (2026-11-14) — profiles have notes of their own, which travel in profile exports (round-trip through the window, rotating .1 backup, profile-notes.md in profile export).
 - **Problem:** Projects have `notes.md`, profiles do not. There is
   nowhere to write why a profile exists, what it is for, or what was
   learned about its base.
@@ -4404,6 +4410,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Origin:** audit #3 T20
 - **Covers:** A3-W15, A3-U3, A3-U6
 - **Effort:** S
+- **Status:** DONE in v0.21.0 (2026-11-14) — the README claim verified TRUE (weights ship), stale "config" dropped from the package list, export dialogs name the package in the picker title, Export disabled with no selection.
 - **Problem:** Three polish flaws. (A3-W15) `README.md:43-44`: "a
   finished fine-tune exports as a usable package (manifest,
   config, weights, checkpoints)". v0.1 exports no weights — the
@@ -4433,6 +4440,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Origin:** audit #4 T25
 - **Covers:** A4-U9, A4-D24
 - **Effort:** S
+- **Status:** DONE in v0.21.0 (2026-11-14) — F2 renames the picked row (one F2 shortcut), chat moved F2 to F3, double-click still opens (ruling in CHANGELOG).
 - **Problem:** Neither list responds to a double-click: no
   double-click to rename, no double-click to open, no
   double-click on a checkpoint to see it. Every action is a
@@ -4607,6 +4615,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Origin:** audit #7 T15
 - **Covers:** A7-W11, A7-D8, A7-D11
 - **Effort:** S
+- **Status:** DONE in v0.21.0 (2026-11-14) — int notes refused at both write points ("notes must be text, not int" — the update path takes metamorph={"notes":...}).
 - **Problem:** `create_project` (`model.py:314`) and
   `update_project` (`model.py:347-350`) validate the mode but never
   the notes: `notes: 123` and `notes: 456` are stored verbatim
@@ -4626,6 +4635,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Origin:** audit #3 T19
 - **Covers:** A3-W14
 - **Effort:** S
+- **Status:** DONE in v0.21.0 (2026-11-14) — exports report their size and refuse when the disk will not fit (size/disk helpers with headroom + refusal naming both sizes).
 - **Problem:** Export copies everything with no total size, no
   disk-space check, and no report of how big the package is. In
   v0.1 checkpoints are tiny, so this is unobservable — but v0.2
@@ -4648,6 +4658,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Covers:** A3-G6
 - **Effort:** S
 - **Depends on:** T118 (exported_at stamp)
+- **Status:** DONE in v0.21.0 (2026-11-14) — packages name the machine that made them (source_machine in both manifests), and the home keeps an import/export history log (history.jsonl) with provenance in the import preview.
 - **Problem:** No `exported_at`, no source machine, no record of
   what was exported where or imported from where. A package found
   on disk cannot say when it was made or from what.

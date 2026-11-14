@@ -2726,3 +2726,28 @@ def test_run_records_written_by_a_real_run(need_torch, tmp_path):
     ]
     assert len(started) == 1
     assert started[0]["settings"]["rank"] == 2
+
+
+# -- v0.21.0: T165 — training stamps last-used ----------------------
+
+
+def test_training_stamps_last_used(need_torch, tmp_path):
+    """T165: a real training run stamps the profile's last-used
+    when it starts; a run that never starts (no dataset) stamps
+    nothing."""
+    from stella.model import Store
+
+    store = _tiny_project(Store(tmp_path / "home"), tmp_path)
+    assert store.get_profile("tiny")["last_used"] == ""
+    train_project(
+        store, "tiny", "proof",
+        _model_loader=tiny_model_and_tokenizer,
+        _dtype="float32",
+    )
+    assert store.get_profile("tiny")["last_used"] != ""
+    # A refused run stamps nothing: the profile stays as it was.
+    store2 = _tiny_project(Store(tmp_path / "home2"), tmp_path)
+    store2.update_project("tiny", "proof", dataset_ref="ghost.jsonl")
+    with pytest.raises(StellaError):
+        train_project(store2, "tiny", "proof")
+    assert store2.get_profile("tiny")["last_used"] == ""

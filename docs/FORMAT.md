@@ -111,7 +111,11 @@ export.
   UTC ISO form. `profile.created` / `profile.updated` and
   `project.created` / `project.updated` are the records' own
   stamps, restored on import; a package without them imports as
-  before, with fresh stamps.
+  before, with fresh stamps. `source_machine` (v0.21.0, T179) is
+  the hostname of the machine that made the package, shown in the
+  import preview when present. `profile.last_used` (v0.21.0,
+  T165) is when a training run last started under the profile,
+  restored on import like the other stamps.
 - `files` (v0.18.0, T104) lists every file in the package except
   `manifest.json` itself, each with its size in bytes and its
   SHA-256 hex digest — the adapter, checkpoints, notes, probe
@@ -130,9 +134,13 @@ replaced by a `projects` list of project blocks, and each
 project's payload (weights, checkpoints, notes, probe results,
 sleep) lives under `projects/<slug>/`. Datasets are referenced,
 never bundled. A profile package with no projects carries an
-empty list. Import restores the profile and every project in
-one atomic step; it refuses while any of the package's projects
-already exist in that profile, naming them.
+empty list. The profile notes travel at the package root as
+`profile-notes.md` (v0.21.0, T166) when the profile has any; on
+import they are restored only when the profile is newly created
+— an existing profile keeps its own notes. Import restores the
+profile and every project in one atomic step; it refuses while
+any of the package's projects already exist in that profile,
+naming them.
 
 ## Import rules
 

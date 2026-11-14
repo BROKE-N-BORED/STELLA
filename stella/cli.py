@@ -169,24 +169,45 @@ def cmd_doctor(args) -> int:
 
 def cmd_export(args) -> int:
     store = _store()
+    # T178: the size before (the estimate) and after (the real
+    # package). The disk check inside export_project refuses
+    # before copying when it will not fit.
+    bundle = getattr(args, "bundle_dataset", False)
+    estimate = export_mod.estimate_export_size(
+        store, args.profile, args.project, bundle_dataset=bundle,
+    )
+    print(f"Package size: about {export_mod.format_size(estimate)}.")
     out = export_mod.export_project(
         store, args.profile, args.project, args.dir,
-        bundle_dataset=getattr(args, "bundle_dataset", False),
+        bundle_dataset=bundle,
         force=getattr(args, "force", False),
     )
     print(f"Exported to {out}")
+    print(
+        f"Package size: {export_mod.format_size(export_mod.package_size(out))}."
+    )
     return 0
 
 
 def cmd_export_profile(args) -> int:
     """Export a profile on its own (T86)."""
     store = _store()
+    # T178: the size before (the estimate) and after (the real
+    # package), as in cmd_export.
+    include = getattr(args, "with_projects", False)
+    estimate = export_mod.estimate_profile_export_size(
+        store, args.profile, include_projects=include,
+    )
+    print(f"Package size: about {export_mod.format_size(estimate)}.")
     out = export_mod.export_profile(
         store, args.profile, args.dir,
-        include_projects=getattr(args, "with_projects", False),
+        include_projects=include,
         force=getattr(args, "force", False),
     )
     print(f"Exported to {out}")
+    print(
+        f"Package size: {export_mod.format_size(export_mod.package_size(out))}."
+    )
     return 0
 
 

@@ -1065,3 +1065,128 @@ def test_clone_project_into_another_profile(store):
     store.clone_project("p1", "proj", "proj", target_profile="p2")
     assert store.get_project("p2", "proj")["dataset_ref"] == "data.jsonl"
     assert [p["name"] for p in store.list_projects("p1")] == ["proj"]
+
+
+# -- v0.21.0: T177 (notes type), T166 (profile notes), T165 ---------
+# -- (last-used), T179 (history log) --------------------------------
+
+
+def test_create_project_rejects_int_notes(store):
+    """T177: non-string notes are rejected at create_project."""
+    store.create_profile("p1")
+    with pytest.raises(StellaError, match="notes must be text"):
+        store.create_project("p1", "proj", metamorph_notes=123)
+    # None counts as absent, the import validator's convention.
+    data = store.create_project("p1", "proj", metamorph_notes=None)
+    assert data["metamorph"]["notes"] == ""
+
+
+def test_update_project_rejects_int_notes(store):
+    """T177: non-string notes are rejected at update_project."""
+    store.create_profile("p1")
+    store.create_project("p1", "proj")
+    with pytest.raises(StellaError, match="notes must be text"):
+        store.update_project(
+            "p1", "proj", metamorph={"mode": "morph", "notes": 456}
+        )
+    # A mode-only update leaves good notes alone.
+    store.update_project(
+        "p1", "proj", metamorph={"mode": "both", "notes": "why both"}
+    )
+    store.update_project("p1", "proj", metamorph={"mode": "morph"})
+    assert store.get_project("p1", "proj")["metamorph"]["notes"] == (
+        "why both"
+    )
+
+
+def test_profile_notes_round_trip(store):
+    """T166: profile notes write and read back; a profile with no
+    notes reads as empty."""
+    store.create_profile("p1")
+    assert store.read_profile_notes("p1") == ""
+    store.write_profile_notes("p1", "Why this profile exists.")
+    assert store.read_profile_notes("p1") == "Why this profile exists."
+    with pytest.raises(StellaError, match="no profile"):
+        store.write_profile_notes("ghost", "x")
+
+
+def test_profile_notes_keep_backup(store):
+    """T166: profile notes get the same rotating .1 backup as
+    project notes (T119)."""
+    store.create_profile("p1")
+    store.write_profile_notes("p1", "first version")
+    store.write_profile_notes("p1", "second version")
+    backup = store.profile_dir("p1") / "notes.md.1"
+    assert backup.read_text(encoding="utf-8") == "first version"
+    assert store.read_profile_notes("p1") == "second version"
+
+
+def test_profile_notes_survive_rename(store):
+    """T166: notes survive a profile rename — the file lives in
+    the profile folder, so the rename moves it along."""
+    store.create_profile("p1")
+    store.write_profile_notes("p1", "still here after the rename")
+    store.rename_profile("p1", "p2")
+    assert store.read_profile_notes("p2") == "still here after the rename"
+
+
+def test_create_profile_last_used_defaults_empty(store):
+    """T165: a new profile has never been used."""
+    data = store.create_profile("p1")
+    assert data["last_used"] == ""
+    assert store.get_profile("p1")["last_used"] == ""
+
+
+def test_touch_last_used_stamps_without_touching_updated(store):
+    """T165: touch_last_used stamps last_used and leaves `updated`
+    alone — using a profile is not editing it."""
+    store.create_profile("p1", updated="2026-01-01T00:00:00Z")
+    data = store.touch_last_used("p1")
+    assert data["last_used"] != ""
+    assert data["updated"] == "2026-01-01T00:00:00Z"
+    assert store.get_profile("p1")["last_used"] == data["last_used"]
+
+
+def test_history_records_exports_and_imports(store):
+    """T179: the home keeps an import/export history log."""
+    assert store.read_history() == []
+    store.record_history({
+        "kind": "export", "package": "project",
+        "profile": "p1", "project": "proj", "path": "/tmp/out",
+    })
+    store.record_history({
+        "kind": "import", "package": "profile",
+        "profile": "p1", "project": "", "path": "/tmp/in",
+    })
+    entries = store.read_history()
+    assert len(entries) == 2
+    assert entries[0]["kind"] == "export"
+    assert entries[0]["project"] == "proj"
+    assert entries[0]["when"] != ""
+    assert entries[1]["kind"] == "import"
+    assert entries[1]["package"] == "profile"
+
+
+def test_history_skips_bad_lines(store):
+    """T179: a hand-corrupted history line is skipped, never fatal."""
+    store.record_history({"kind": "export", "package": "project"})
+    log = store.home / "history.jsonl"
+    log.write_text(
+        log.read_text(encoding="utf-8") + "not json\n",
+        encoding="utf-8",
+    )
+    assert len(store.read_history()) == 1
+
+
+def test_history_trims_to_newest(store):
+    """T179: the log stays small — past 500 entries it trims to
+    the newest 200."""
+    for i in range(501):
+        store.record_history({
+            "kind": "export", "package": "project",
+            "profile": f"p{i}", "project": "", "path": "",
+        })
+    entries = store.read_history()
+    assert len(entries) == 200
+    assert entries[0]["profile"] == "p301"
+    assert entries[-1]["profile"] == "p500"

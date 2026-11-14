@@ -118,9 +118,10 @@ def test_tree_shows_role_and_tag(window):
     assert "lfm3:1.7b" in text
     child = window.tree.topLevelItem(0).child(0).text(0)
     assert "tool-calls" in child
-    # The tree label is the project name plus its status (T53);
-    # the dead metamorph-mode suffix is still gone.
-    assert child == "tool-calls (draft)"
+    # The tree label is the project name plus its status (T53)
+    # and its dataset file (T164); the dead metamorph-mode
+    # suffix is still gone.
+    assert child == "tool-calls (draft) [forge-traces.jsonl]"
 
 
 def test_empty_store_window(qapp, store, settings):
@@ -1376,7 +1377,7 @@ def test_tree_warns_on_string_metamorph(window, seeded, qapp):
     assert len(warned) == 1
     assert "broken" in warned[0]
     # The good project lists normally, with its status and no warning.
-    assert any(r == "tool-calls (draft)" for r in rows)
+    assert any(r == "tool-calls (draft) [forge-traces.jsonl]" for r in rows)
 
 
 # -- T1: GUI import handler ------------------------------------------
@@ -1658,6 +1659,8 @@ def test_tree_shows_damaged_project_row(window, seeded, qapp):
     window.refresh_tree()
     qapp.processEvents()
     child = window.tree.topLevelItem(0).child(0)
+    # The hand-fixed manifest carries no dataset, so the recovered
+    # row shows none either (T164: the bracket needs a dataset_ref).
     assert child.text(0) == "tool-calls (draft)"
     assert child.font(0).italic() is False
 
@@ -3136,7 +3139,7 @@ def test_tree_rows_carry_full_text_tooltips(window):
     top = window.tree.topLevelItem(0)
     assert top.toolTip(0).startswith(top.text(0))
     child = top.child(0)
-    assert child.toolTip(0) == "tool-calls (draft)"
+    assert child.toolTip(0) == "tool-calls (draft) [forge-traces.jsonl]"
 
 
 def test_profile_row_shows_health_badge(window, monkeypatch, qapp, seed_models):
@@ -3213,7 +3216,7 @@ def test_project_window_shows_status_and_mark_ready(window, seeded):
     assert win.status_label.text() == "ready"
     assert win.mark_ready_btn.isHidden()
     child = window.tree.topLevelItem(0).child(0)
-    assert child.text(0) == "tool-calls (ready)"
+    assert child.text(0) == "tool-calls (ready) [forge-traces.jsonl]"
     win.close()
 
 
@@ -3229,11 +3232,11 @@ def test_project_window_hides_mark_ready_when_not_draft(window, seeded):
 def test_tree_row_shows_status(window, seeded):
     # T53: the list row shows the status in plain words.
     child = window.tree.topLevelItem(0).child(0)
-    assert child.text(0) == "tool-calls (draft)"
+    assert child.text(0) == "tool-calls (draft) [forge-traces.jsonl]"
     seeded.update_project("lfm3-tool", "tool-calls", status="done")
     window.refresh_tree()
     child = window.tree.topLevelItem(0).child(0)
-    assert child.text(0) == "tool-calls (done)"
+    assert child.text(0) == "tool-calls (done) [forge-traces.jsonl]"
 
 
 def test_profile_window_base_edit_blank_for_tag(window, seeded, qapp):
@@ -3452,7 +3455,8 @@ def test_menu_shortcuts(window):
     assert window._menu_action_new_project.shortcut().toString() == "Ctrl+Shift+N"
     assert window._menu_action_run.shortcut().toString() == "Ctrl+G"
     assert window._menu_action_howto.shortcut().toString() == "F1"
-    assert window._menu_action_chat.shortcut().toString() == "F2"
+    # T168: F2 is Rename now; Chat moved to F3.
+    assert window._menu_action_chat.shortcut().toString() == "F3"
 
 
 def test_f1_opens_howto(window, qapp):
@@ -5707,7 +5711,7 @@ def test_tree_survives_corrupt_metamorph(
     else:
         assert warned == []
     # The good project lists normally, with its status and no warning.
-    assert any(r == "tool-calls (draft)" for r in rows)
+    assert any(r == "tool-calls (draft) [forge-traces.jsonl]" for r in rows)
 
 
 @pytest.mark.parametrize(
@@ -7266,3 +7270,522 @@ def test_export_preview_shows_estimate(window, qapp):
         assert dialog.export_btn is not None
     finally:
         dialog.close()
+
+
+# -- v0.21.0: T160-T168, T177-T179 (profiles/rows/provenance) ------
+
+
+@pytest.fixture()
+def seed_show():
+    """Seed the T165 /api/show cache for one tag, and stop real
+    fetches for the test. The cache is reset afterwards, so a
+    seed never leaks into the next test."""
+    from stella.ollama import SHOW_CACHE
+
+    def _seed(tag, info, ollama_up=True):
+        SHOW_CACHE.set_snapshot(tag, info, ollama_up=ollama_up)
+
+    yield _seed
+    SHOW_CACHE.reset()
+
+
+def _write_dataset_file(home, name="data.jsonl", rows=20):
+    """A valid 20-row dataset file in the home dir."""
+    path = home / name
+    path.write_text(
+        "".join(
+            json.dumps({"prompt": f"Q{i}?", "completion": f"A{i}."}) + "\n"
+            for i in range(rows)
+        )
+    )
+    return path
+
+
+def _make_checkpoint(store, profile, project, step, loss=1.0):
+    """A fake checkpoint dir list_checkpoints can read."""
+    d = (
+        store.project_dir(profile, project)
+        / "checkpoints" / f"step-{step}"
+    )
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "training_state.json").write_text(
+        json.dumps({"step": step, "loss": loss, "epoch": 0})
+    )
+    (d / "adapter_config.json").write_text("{}")
+
+
+def test_project_window_notes_visible_without_scrolling(window, qapp):
+    """T160: the Notes editor is visible without scrolling in the
+    default Project window — Notes moved above Details."""
+    from PySide6.QtWidgets import QScrollArea
+
+    win = window.open_project_window("lfm3-tool", "tool-calls")
+    win.show()
+    qapp.processEvents()
+    scroll = win.findChild(QScrollArea)
+    assert scroll is not None
+    viewport = scroll.viewport()
+    top = win.notes_edit.mapTo(viewport, win.notes_edit.rect().topLeft())
+    assert top.y() >= 0
+    assert top.y() + win.notes_edit.height() <= viewport.height()
+    win.close()
+
+
+def test_step_cap_defaults_to_full_run(window):
+    """T161: the step cap starts at 0 — the full run."""
+    assert window.train_step_cap_spin.value() == 0
+
+
+def test_go_applies_step_cap(window, monkeypatch, seeded, qapp):
+    """T161: Go with a step cap starts the run capped."""
+    import stella.gui as gui_mod
+    import stella.train as train_mod
+
+    _write_dataset_file(seeded.home)
+    seeded.update_project("lfm3-tool", "tool-calls", dataset_ref="data.jsonl")
+    monkeypatch.setattr(train_mod, "training_deps_missing", lambda: [])
+    monkeypatch.setattr(window, "_weights_offer", lambda profile: True)
+    monkeypatch.setattr(gui_mod.TrainWorker, "run", lambda self: None)
+    _select_session(window)
+    window.train_step_cap_spin.setValue(7)
+    window._go_train()
+    qapp.processEvents()
+    assert window._train_worker is not None
+    assert window._train_worker._max_steps == 7
+
+
+def test_run_dataset_override_reaches_worker(window, monkeypatch, seeded, qapp):
+    """T161: a run-override dataset is what the run is checked and
+    started on — the project's own dataset is untouched, even when
+    it does not resolve."""
+    import stella.gui as gui_mod
+    import stella.train as train_mod
+
+    _write_dataset_file(seeded.home, "override.jsonl")
+    monkeypatch.setattr(train_mod, "training_deps_missing", lambda: [])
+    monkeypatch.setattr(window, "_weights_offer", lambda profile: True)
+    monkeypatch.setattr(gui_mod.TrainWorker, "run", lambda self: None)
+    _select_session(window)
+    window.run_dataset_edit.setText("override.jsonl")
+    window.start_training()
+    qapp.processEvents()
+    assert window._train_worker is not None
+    assert window._train_worker._dataset_path == "override.jsonl"
+    assert seeded.get_project("lfm3-tool", "tool-calls")[
+        "dataset_ref"
+    ] == "forge-traces.jsonl"
+
+
+def test_run_base_override_skips_weights_offer(
+    window, monkeypatch, seeded, qapp
+):
+    """T161: a run-override base reaches the worker, and the
+    weights offer is skipped — the run starts from the override,
+    not the profile's weights."""
+    import stella.gui as gui_mod
+    import stella.train as train_mod
+
+    _write_dataset_file(seeded.home)
+    seeded.update_project("lfm3-tool", "tool-calls", dataset_ref="data.jsonl")
+    monkeypatch.setattr(train_mod, "training_deps_missing", lambda: [])
+    offered = []
+    monkeypatch.setattr(
+        window, "_weights_offer",
+        lambda profile: offered.append(profile) or True,
+    )
+    monkeypatch.setattr(gui_mod.TrainWorker, "run", lambda self: None)
+    _select_session(window)
+    window.run_base_edit.setText("somewhere/else-base")
+    window.start_training()
+    qapp.processEvents()
+    assert window._train_worker is not None
+    assert window._train_worker._base_ref == "somewhere/else-base"
+    assert offered == []
+
+
+def test_run_overrides_clear_on_project_switch(window, seeded):
+    """T161: the run overrides belong to the project they were
+    typed for — a switch clears them."""
+    _select_session(window)
+    window.run_dataset_edit.setText("x.jsonl")
+    window.run_base_edit.setText("y")
+    seeded.create_project("lfm3-tool", "second", dataset_ref="data.jsonl")
+    window.set_session("lfm3-tool", "second")
+    assert window.run_dataset_edit.text() == ""
+    assert window.run_base_edit.text() == ""
+
+
+def test_gguf_quant_combo_defaults_to_q4_k_m(window):
+    """T161: the GGUF quant picker offers every known quant and
+    starts on the CLI default."""
+    from stella.requant import DEFAULT_QUANT, KNOWN_QUANTS
+
+    assert window.gguf_quant_combo.currentText() == DEFAULT_QUANT
+    items = [
+        window.gguf_quant_combo.itemText(i)
+        for i in range(window.gguf_quant_combo.count())
+    ]
+    assert items == list(KNOWN_QUANTS)
+
+
+def test_gguf_checkpoint_picker_lists_checkpoints(window, seeded):
+    """T161: the GGUF checkpoint picker rides the T150 list — the
+    trained adapter first, then one entry per checkpoint."""
+    _make_checkpoint(seeded, "lfm3-tool", "tool-calls", 2)
+    _make_checkpoint(seeded, "lfm3-tool", "tool-calls", 5)
+    _select_session(window)
+    window.refresh_train_panel()
+    combo = window.gguf_checkpoint_combo
+    assert combo.count() == 3
+    assert combo.itemText(0) == "Trained adapter"
+    assert combo.itemData(0) is None
+    assert combo.itemText(1) == "Checkpoint step 2"
+    assert combo.itemData(1) == 2
+    assert combo.itemData(2) == 5
+
+
+def test_gguf_export_uses_picked_quant_and_checkpoint(
+    window, seeded, monkeypatch, tmp_path, qapp
+):
+    """T161: Export GGUF passes the picked quant and checkpoint to
+    the engine — the CLI's --quant / --from-checkpoint."""
+    import stella.gguf as gguf_mod
+    from PySide6.QtWidgets import QFileDialog
+
+    _make_checkpoint(seeded, "lfm3-tool", "tool-calls", 2)
+    _select_session(window)
+    window.refresh_train_panel()
+    window.gguf_quant_combo.setCurrentText("Q8_0")
+    window.gguf_checkpoint_combo.setCurrentIndex(1)
+    captured = {}
+
+    def fake_export(store, profile, project, dest, **kw):
+        captured.update(kw)
+        return {
+            "gguf": "x.gguf", "gguf_bytes": 123,
+            "ollama_create": "ollama create x",
+        }
+
+    monkeypatch.setattr(gguf_mod, "export_gguf", fake_export)
+    monkeypatch.setattr(
+        QFileDialog, "getExistingDirectory",
+        lambda *a, **k: str(tmp_path),
+    )
+    window.export_gguf_gui()
+    _wait_for_job(window, qapp)
+    assert captured["quant"] == "Q8_0"
+    assert captured["from_checkpoint"] == 2
+
+
+def test_tag_health_state_values():
+    """T163: the tag-health states, unit level — including the
+    not-loaded-yet state the window shows as no marker."""
+    from stella.gui import _tag_health_state
+
+    assert _tag_health_state("", [], True, True) == "no-tag"
+    assert _tag_health_state("x:1b", [], True, False) == "unknown"
+    assert _tag_health_state("x:1b", [], False, True) == "down"
+    assert _tag_health_state("x:1b", ["x:1b"], True, True) == "installed"
+    assert _tag_health_state("x:1b", ["y:1b"], True, True) == "missing"
+
+
+def test_profile_row_tag_health_markers(window, seed_models, seeded):
+    """T163: installed tags show a tick, removed tags a cross,
+    Ollama down a question mark, a tag-less profile 'no tag' —
+    from the cached model list, updating on refresh."""
+    def row_text():
+        return window.tree.topLevelItem(0).text(0)
+
+    seed_models(["lfm3:1.7b"], ollama_up=True)
+    window.refresh_tree()
+    assert "\u2713" in row_text()
+    seed_models(["other:1b"], ollama_up=True)
+    window.refresh_tree()
+    assert "\u2717" in row_text()
+    seed_models([], ollama_up=False)
+    window.refresh_tree()
+    assert "?" in row_text()
+    seeded.create_profile("notag")
+    window.refresh_tree()
+    texts = [
+        window.tree.topLevelItem(i).text(0)
+        for i in range(window.tree.topLevelItemCount())
+    ]
+    assert any("(no tag)" in text for text in texts)
+
+
+def test_project_row_shows_dataset_and_slug_on_collision(window, seeded):
+    """T164: rows show the dataset file; two projects sharing a
+    display name show their slugs (collision only); method and
+    rank never appear — they are settings (T16)."""
+    child = window.tree.topLevelItem(0).child(0)
+    assert "[forge-traces.jsonl]" in child.text(0)
+    assert "rank" not in child.text(0)
+    assert "morph" not in child.text(0)
+    assert "[tool-calls]" not in child.text(0)
+    seeded.create_project(
+        "lfm3-tool", "tool-calls-2", display_name="tool-calls"
+    )
+    window.refresh_tree()
+    rows = [
+        window.tree.topLevelItem(0).child(i).text(0)
+        for i in range(window.tree.topLevelItem(0).childCount())
+    ]
+    assert any("[tool-calls]" in row for row in rows)
+    assert any("[tool-calls-2]" in row for row in rows)
+
+
+def test_profile_row_shows_project_count(window):
+    """T165: the list row shows the project count."""
+    assert "(1 project)" in window.tree.topLevelItem(0).text(0)
+
+
+def test_profile_window_shows_facts(window, seeded, qapp):
+    """T165: the profile panel shows the project count and the
+    created/updated/last-used dates; never used says never, and a
+    profile never edited has no updated date to show."""
+    seeded.update_profile("lfm3-tool", role="fast")
+    win = window.open_profile_window("lfm3-tool")
+    qapp.processEvents()
+    text = win.profile_facts_label.text()
+    assert "1 project" in text
+    assert "Created 20" in text
+    assert "updated 20" in text
+    assert "last used never" in text
+    win.close()
+    seeded.create_profile("fresh")
+    win2 = window.open_profile_window("fresh")
+    qapp.processEvents()
+    text2 = win2.profile_facts_label.text()
+    assert "0 projects" in text2
+    assert "updated unknown" in text2
+    win2.close()
+
+
+def test_profile_window_shows_last_used_after_touch(window, seeded, qapp):
+    """T165: after a run stamps last-used, the panel shows the date."""
+    seeded.touch_last_used("lfm3-tool")
+    win = window.open_profile_window("lfm3-tool")
+    qapp.processEvents()
+    assert "last used 20" in win.profile_facts_label.text()
+    assert "never" not in win.profile_facts_label.text()
+    win.close()
+
+
+def test_profile_window_shows_model_info_from_cache(
+    window, seed_show, qapp
+):
+    """T165: size, quant, context, and capabilities from a cached
+    /api/show, in the profile panel."""
+    seed_show("lfm3:1.7b", {
+        "size_bytes": 2000000000, "quant": "Q4_K_M",
+        "context": 131072, "capabilities": ["completion", "tools"],
+        "parameter_size": "1.7B", "family": "llama",
+    })
+    win = window.open_profile_window("lfm3-tool")
+    qapp.processEvents()
+    text = win.model_info_label.text()
+    assert "1.9 GB" in text
+    assert "Q4_K_M" in text
+    assert "131,072 tokens" in text
+    assert "completion, tools" in text
+    assert "1.7B parameters" in text
+    win.close()
+
+
+def test_profile_window_model_info_unavailable_when_ollama_down(
+    window, seed_show, qapp
+):
+    """T165: with Ollama down, the metadata shows as unavailable,
+    not blank or wrong."""
+    seed_show("lfm3:1.7b", None, ollama_up=False)
+    win = window.open_profile_window("lfm3-tool")
+    qapp.processEvents()
+    text = win.model_info_label.text()
+    assert "unavailable" in text
+    assert "Ollama is not answering" in text
+    win.close()
+
+
+def test_profile_window_model_info_missing_tag(window, seed_show, qapp):
+    """T165: a tag Ollama does not have says so outright."""
+    seed_show("lfm3:1.7b", None, ollama_up=True)
+    win = window.open_profile_window("lfm3-tool")
+    qapp.processEvents()
+    assert "does not have" in win.model_info_label.text()
+    win.close()
+
+
+def test_profile_notes_round_trip_in_window(window, seeded, qapp):
+    """T166: profile notes save through the Save profile flow and
+    persist across a reopen."""
+    win = window.open_profile_window("lfm3-tool")
+    win.notes_edit.setPlainText("Why this profile exists.")
+    assert win.save() is True
+    win.close()
+    assert seeded.read_profile_notes("lfm3-tool") == (
+        "Why this profile exists."
+    )
+    win2 = window.open_profile_window("lfm3-tool")
+    assert win2.notes_edit.toPlainText() == "Why this profile exists."
+    win2.close()
+
+
+def test_profile_notes_edit_marks_window_modified(window, qapp):
+    """T166: editing the profile notes marks the window modified,
+    like any other field."""
+    win = window.open_profile_window("lfm3-tool")
+    assert not win.is_modified()
+    win.notes_edit.setPlainText("x")
+    assert win.is_modified()
+    win.notes_edit.setPlainText("")
+    assert not win.is_modified()
+    win.close()
+
+
+def test_export_dialog_title_names_package(
+    window, monkeypatch, tmp_path, qapp
+):
+    """T167: the export dialog names the package before the folder
+    is picked."""
+    from PySide6.QtWidgets import QFileDialog
+
+    _select_session(window)
+    titles = []
+
+    def fake_dir(parent, title, start):
+        titles.append(title)
+        return str(tmp_path)
+
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", fake_dir)
+    window.export_project()
+    _wait_for_job(window, qapp)
+    assert titles and "tool-calls-stella-export" in titles[0]
+    assert (tmp_path / "tool-calls-stella-export").is_dir()
+
+
+def test_export_profile_dialog_title_names_package(
+    window, monkeypatch, tmp_path, qapp
+):
+    """T167: the profile export dialog names its package too."""
+    from PySide6.QtWidgets import QFileDialog
+
+    _select_session(window)
+    titles = []
+
+    def fake_dir(parent, title, start):
+        titles.append(title)
+        return str(tmp_path)
+
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", fake_dir)
+    monkeypatch.setattr(
+        window, "_ask_include_projects", lambda slug: True
+    )
+    window.export_profile()
+    _wait_for_job(window, qapp)
+    assert titles and "lfm3-tool-stella-profile-export" in titles[0]
+    assert (tmp_path / "lfm3-tool-stella-profile-export").is_dir()
+
+
+def test_f2_renames_profile_row(window, monkeypatch, seeded, qapp):
+    """T168: F2 renames the picked tree row."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QInputDialog
+
+    window.tree.setCurrentItem(window.tree.topLevelItem(0))
+    qapp.processEvents()
+    monkeypatch.setattr(
+        QInputDialog, "getText", lambda *a, **k: ("renamed-prof", True)
+    )
+    QTest.keyClick(window, Qt.Key_F2)
+    qapp.processEvents()
+    assert seeded.get_profile("renamed-prof")["name"] == "renamed-prof"
+
+
+def test_tree_context_menu_offers_rename(window, monkeypatch, seeded):
+    """T168: the right-click menu on a row offers Rename; a
+    damaged row and empty space get no menu."""
+    from PySide6.QtWidgets import QInputDialog
+
+    assert window._tree_context_menu(None) is None
+    item = window.tree.topLevelItem(0).child(0)
+    menu = window._tree_context_menu(item)
+    assert menu is not None
+    actions = menu.actions()
+    assert [a.text() for a in actions] == ["Rename"]
+    monkeypatch.setattr(
+        QInputDialog, "getText", lambda *a, **k: ("renamed-proj", True)
+    )
+    actions[0].trigger()
+    assert seeded.get_project("lfm3-tool", "renamed-proj")["name"] == (
+        "renamed-proj"
+    )
+
+
+def test_double_click_row_still_opens_detail_window(window, qapp):
+    """T168 ruling: double-click keeps opening the detail window —
+    rename moved to F2 and the right-click menu instead."""
+    top = window.tree.topLevelItem(0)
+    window._on_tree_double_clicked(top, 0)
+    qapp.processEvents()
+    assert "lfm3-tool" in window._profile_windows
+    assert window._profile_windows["lfm3-tool"].isVisible()
+    child = top.child(0)
+    window._on_tree_double_clicked(child, 0)
+    qapp.processEvents()
+    assert ("lfm3-tool", "tool-calls") in window._project_windows
+    assert window._project_windows[
+        ("lfm3-tool", "tool-calls")
+    ].isVisible()
+
+
+def test_checkpoint_double_click_shows_detail(window, seeded):
+    """T168: double-clicking a checkpoint shows its detail, like a
+    single click does."""
+    _make_checkpoint(seeded, "lfm3-tool", "tool-calls", 2, loss=1.2345)
+    _select_session(window)
+    window.refresh_train_panel()
+    item = window.train_checkpoints.item(0)
+    assert item is not None
+    window.train_checkpoints.itemDoubleClicked.emit(item)
+    assert "Step 2" in window.checkpoint_detail_label.text()
+    assert "1.2345" in window.checkpoint_detail_label.text()
+
+
+def test_export_success_message_reports_size(
+    window, monkeypatch, tmp_path, qapp
+):
+    """T178: the export log line carries the estimated size before
+    the copy, and the success line the real package size after."""
+    from PySide6.QtWidgets import QFileDialog
+
+    _select_session(window)
+    monkeypatch.setattr(
+        QFileDialog, "getExistingDirectory",
+        lambda *a, **k: str(tmp_path),
+    )
+    window.export_project()
+    _wait_for_job(window, qapp)
+    log = window.train_log.toPlainText()
+    assert "Exporting project lfm3-tool/tool-calls (about " in log
+    assert any(
+        "Exported to " in line and "(" in line
+        for line in log.splitlines()
+    )
+
+
+def test_import_preview_dialog_shows_provenance(window, seeded, tmp_path):
+    """T179: the import preview shows when and where the package
+    was made."""
+    from stella import export as export_mod
+    from stella.gui import ImportPreviewDialog
+
+    out = export_mod.export_project(
+        seeded, "lfm3-tool", "tool-calls", tmp_path
+    )
+    summary = export_mod.preview_export(seeded, out)
+    dialog = ImportPreviewDialog(window, summary)
+    texts = [child.text() for child in dialog.findChildren(QLabel)]
+    assert any("Exported from" in text for text in texts)
+    dialog.close()

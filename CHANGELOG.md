@@ -1,5 +1,115 @@
 # Changelog
 
+## v0.21.0 — 2026-11-14
+
+The profiles/rows/provenance slice (audit tasks T160, T161, T163,
+T164, T165, T166, T167, T168, T177, T178, T179; T162 stays done in
+v0.9.0, T169 stays superseded by T19): the Train panel has the
+CLI-only options in the window (a step cap, per-run dataset and
+base overrides, a quant choice and a checkpoint picker on Export
+GGUF); rows carry more of the truth (a tag-health marker and the
+project count on profiles, the dataset and a slug disambiguator
+on projects); the Profile window shows what the profile points
+at (size, quant, context, capabilities from Ollama) plus the
+dates and a last-used stamp; profiles have notes of their own;
+exports report their size and refuse when the disk will not fit;
+and packages carry provenance, with an import/export history in
+the home.
+
+- T160 — Notes placement: the Project window's Notes section
+  moved above Details, so the running log is visible without
+  scrolling in the default window (probed: the editor was at
+  y=596 against a 425 px viewport, 0 px visible; now it spans
+  y=49-241, fully visible). The settings-tooltips half is MOOT:
+  T16 removed the settings form entirely, so there are no
+  settings fields left to tooltip — no tooltips were added, and
+  no settings UI was resurrected. The inline help labels already
+  explain every field that remains.
+- T161 — GUI parity for the CLI-only options: the Train panel has
+  a step cap (0 means the full run; a cap makes Go a short run,
+  Resume still runs to the run's own total), per-run dataset and
+  base overrides (this run only, never written back, cleared on
+  a project switch; the pre-train check runs against the override
+  dataset, and a base override skips the weights offer), and
+  Export GGUF has a quant picker (every known quant, Q4_K_M by
+  default) plus a checkpoint picker riding the T150 list
+  (trained adapter, or one entry per checkpoint). The engine
+  already took all four options; this is the window wiring.
+  Rank/lr/epochs/batch/seq stay under the hood (T16).
+- T163 — health badge per profile row: T78's weights dot stays
+  exactly as it was (green ready, amber not ready, grey Ollama
+  down); the remainder was the TAG side, which now shows as a
+  marker on the row from the cached model list (T43): installed
+  tick, missing cross, Ollama down question mark, and a distinct
+  "no tag" state for a profile that names no tag. The markers
+  relabel when the model-list refresh lands, so Refresh updates
+  them. The two signals answer different questions (weights ready
+  vs tag installed) and both stay.
+- T164 — richer project rows, RECONCILED: method and rank are
+  NOT shown — they are settings, and T16 forbids settings on any
+  screen, so the task's Fix (written before T16) is overruled on
+  that half. Status was already in rows (T53). What was built:
+  the dataset file in each row, and the slug as a disambiguator
+  when two projects in one profile share a display name
+  (collision only). Tests pin dataset + slug + status, not
+  method/rank.
+- T165 — show what the profile points at: model metadata from a
+  cached /api/show (same discipline as T43 — a background fetch
+  per tag, never on the UI thread, never per click) shows size,
+  quant, context length, capabilities, and parameter count in
+  the Profile window; with Ollama down it says unavailable, and
+  a tag Ollama does not have says so outright. The list row and
+  the panel both show the project count; the panel shows the
+  created/updated dates and a last-used date. The last-used
+  trigger is defined here: a real training run starting on a
+  project under the profile stamps it (sleep consolidation does
+  not); a run that never starts stamps nothing. Last-used travels
+  in exports and is restored on import.
+- T166 — profile-level notes: notes.md per profile (same pattern
+  as project notes: read_profile_notes/write_profile_notes on
+  the Store), edited in the Profile window and saved through the
+  existing Save profile flow, with the same rotating .1 backup
+  as project notes (T119). Profile export carries them as
+  profile-notes.md at the package root; import restores them
+  only for a newly created profile — an existing profile keeps
+  its own notes. Notes survive rename (the file lives in the
+  profile folder).
+- T167 — README wording + export/import UI polish: the README
+  claim was already true — weights DO ship in packages (T41,
+  v0.13.0), so no wording change was needed there (one adjacent
+  fix: the package list no longer names "config", which stopped
+  shipping in v0.13.0/T60 — the settings live in the manifest).
+  Export was already disabled until a project is selected (menu
+  action, via _refresh_menu_state, pinned by existing tests).
+  What was built: the export dialogs name the package
+  (<project>-stella-export / <profile>-stella-profile-export) in
+  the folder-picker title, before the folder is picked.
+- T168 — double-click does the obvious thing, RULING: double-click
+  on a profile/project row KEEPS opening the detail window — it
+  is the established multi-window pattern, and swapping it for
+  rename would have replaced live behavior. Rename becomes F2
+  (Chat moved to F3) plus a right-click context-menu Rename
+  action on rows. Checkpoint double-click shows its detail (the
+  same detail a single click shows).
+- T177 — notes type validated at both write points: create_project
+  and update_project reject non-string notes with a StellaError
+  (None counts as absent, the import validator's convention).
+  Only notes being written are checked — an unrelated update on
+  a project with old bad stored notes normalizes them instead of
+  failing the update.
+- T178 — size/disk awareness on export: the CLI prints the
+  estimated size before copying and the real package size after;
+  the window's export log line carries the estimate and the
+  success message the real size. The engine checks free disk
+  space against the estimate before copying and refuses (naming
+  both sizes) when the package will not fit.
+- T179 — provenance: every package manifest names its source
+  machine (hostname) next to T118's exported_at stamp, and the
+  home keeps an import/export history log (history.jsonl: what
+  was exported where, what was imported from where, when —
+  trimmed to the newest 200 entries past 500). The import
+  preview shows the provenance line when the package carries it.
+
 ## v0.20.0 — 2026-11-14
 
 The training-engine + checkpoints slice (audit tasks T150, T151,

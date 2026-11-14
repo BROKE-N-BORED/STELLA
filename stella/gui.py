@@ -85,6 +85,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QProgressBar,
@@ -121,7 +122,8 @@ from .model import (
     slug_from_model,
 )
 from .model_info import describe_model, fit_verdict, fits_this_pc
-from .ollama import MODEL_CACHE, ollama_url
+from .ollama import MODEL_CACHE, SHOW_CACHE, ollama_url
+from .requant import DEFAULT_QUANT, KNOWN_QUANTS
 from .provision import is_hf_repo_id
 from .style import (
     DISABLED,
@@ -219,6 +221,36 @@ def _health_icon(state: str) -> QIcon:
     icon = QIcon(pixmap)
     _HEALTH_ICONS[state] = icon
     return icon
+
+
+# The tag-health marker on a profile row (T163): whether the
+# profile's Ollama tag is actually installed, from the cached
+# model list (T43) — never a fetch. This is the TAG side of row
+# health; the dot (T78) is the WEIGHTS side, and both stay: a
+# row can have its weights ready while its tag is gone from
+# Ollama, and the two facts answer different questions.
+_TAG_HEALTH_MARKERS = {
+    "installed": " \u2713",  # the tag is installed
+    "missing": " \u2717",  # the tag was removed from Ollama
+    "down": " ?",  # Ollama is down, so the tag cannot be checked
+    "no-tag": " (no tag)",  # the profile names no tag at all
+    "unknown": "",  # the list has not loaded yet; the refresh fills it in
+}
+
+
+def _tag_health_state(tag, models, ollama_up, loaded) -> str:
+    """One profile tag's health state (T163): "installed",
+    "missing", "down", "no-tag", or "unknown". `models` is the
+    cached installed list, `ollama_up` / `loaded` the cache's own
+    flags — the badge never fetches. A tag-less profile is its
+    own state, not a missing one: nothing was ever pointed at."""
+    if not tag:
+        return "no-tag"
+    if not loaded:
+        return "unknown"
+    if not ollama_up:
+        return "down"
+    return "installed" if tag in models else "missing"
 
 
 def _tag_warnings(store, tag, *, exclude_slug=None):
@@ -585,6 +617,26 @@ class ModelListWorker(QThread):
         self.refreshed.emit(models, sizes, ollama_up)
 
 
+class ModelShowWorker(QThread):
+    """Fetch one tag's /api/show info off the UI thread (T165).
+
+    One refresh() call on the shared show cache; the result
+    arrives on the show_ready signal, on the UI thread. The tag
+    rides the signal so a window that retargeted while the fetch
+    was in flight can ignore a stale answer."""
+
+    show_ready = Signal(str, dict, bool)  # tag, info-or-empty, ollama_up
+
+    def __init__(self, tag, parent=None):
+        super().__init__(parent)
+        self._tag = tag
+        self._url = ollama_url()
+
+    def run(self):
+        info, ollama_up = SHOW_CACHE.refresh(self._tag, self._url)
+        self.show_ready.emit(self._tag, info or {}, ollama_up)
+
+
 class TrainWorker(QThread):
     """Runs train_project off the GUI thread. Only talks to the
     window through signals — never touches a widget directly."""
@@ -594,7 +646,8 @@ class TrainWorker(QThread):
     finished = Signal(bool, str)  # ok, message
 
     def __init__(self, store, profile, project, resume=False, force=False,
-                 max_steps=None, from_checkpoint=None, parent=None):
+                 max_steps=None, from_checkpoint=None, parent=None,
+                 dataset_path=None, base_ref=None):
         super().__init__(parent)
         self._store = store
         self._profile = profile
@@ -603,6 +656,10 @@ class TrainWorker(QThread):
         self._force = force
         self._max_steps = max_steps
         self._from_checkpoint = from_checkpoint
+        # T161: per-run overrides — a dataset / base for this run
+        # only, never written back to the project or profile.
+        self._dataset_path = dataset_path
+        self._base_ref = base_ref
         self._controller = TrainController()
 
     def request_stop(self):
@@ -668,6 +725,8 @@ class TrainWorker(QThread):
                 force=self._force,
                 max_steps=self._max_steps,
                 from_checkpoint=self._from_checkpoint,
+                dataset_path=self._dataset_path,
+                base_ref=self._base_ref,
                 on_event=self._event,
                 controller=self._controller,
             )
@@ -1383,6 +1442,18 @@ class ProfileWindow(QDialog):
         # could answer. It stays in profile.json for compatibility.
         layout.addLayout(form)
 
+        # What the profile points at (T165): the model's size,
+        # quant, context, and capabilities from a cached /api/show,
+        # plus the project count and the dates. The info loads in
+        # the background; until it lands the label says so, and
+        # with Ollama down it says unavailable, never blank.
+        self.model_info_label = QLabel("")
+        self.model_info_label.setWordWrap(True)
+        layout.addWidget(self.model_info_label)
+        self.profile_facts_label = QLabel("")
+        self.profile_facts_label.setWordWrap(True)
+        layout.addWidget(self.profile_facts_label)
+
         # Config and dependencies (T115): the first step toward
         # the profile's own clean environment — the values are
         # editable here and through update-profile, and
@@ -1424,6 +1495,22 @@ class ProfileWindow(QDialog):
         layout.addWidget(config_section)
         self.config_section = config_section
 
+        # Profile notes (T166): why this profile exists, what it
+        # is for, what was learned about its base. They save with
+        # the profile below — one Save path, not two.
+        notes_section = CollapsibleSection("Profile notes")
+        self.notes_edit = QPlainTextEdit()
+        self.notes_edit.setMinimumHeight(80)
+        notes_section.content_layout.addWidget(self.notes_edit)
+        notes_section.content_layout.addWidget(
+            _help_label(
+                "Why this profile exists, and what you learned "
+                "about its base model."
+            )
+        )
+        layout.addWidget(notes_section)
+        self.notes_section = notes_section
+
         self.save_btn = QPushButton("Save profile")
         self.save_btn.clicked.connect(self.save)
         outer.addWidget(self.save_btn)
@@ -1455,6 +1542,9 @@ class ProfileWindow(QDialog):
         self._snapshot = None
         self._loaded_base = ""
         self._loading = False
+        # The /api/show fetch worker (T165): one fetch at a time,
+        # tracked so close waits for it.
+        self._show_worker: ModelShowWorker | None = None
         for widget, signal in (
             (self.display_edit, self.display_edit.textChanged),
             (self.role_combo, self.role_combo.currentTextChanged),
@@ -1462,6 +1552,7 @@ class ProfileWindow(QDialog):
             (self.base_edit, self.base_edit.textChanged),
             (self.seat_combo, self.seat_combo.currentTextChanged),
             (self.config_edit, self.config_edit.textChanged),
+            (self.notes_edit, self.notes_edit.textChanged),
         ):
             signal.connect(self._on_edited)
         # The custom-role flag follows the role text (T116), and
@@ -1481,8 +1572,8 @@ class ProfileWindow(QDialog):
             self.display_edit, self.role_combo, self.seat_combo,
             self.tag_combo, self.base_edit, self.config_edit,
             self.deps_list, self.dep_add_edit, self.dep_add_btn,
-            self.dep_remove_btn, self.save_btn, rename_btn, clone_btn,
-            delete_btn, close_btn,
+            self.dep_remove_btn, self.notes_edit, self.save_btn,
+            rename_btn, clone_btn, delete_btn, close_btn,
         ])
 
     @property
@@ -1504,6 +1595,7 @@ class ProfileWindow(QDialog):
             "seat": self._seat_value(),
             "config": self.config_edit.toPlainText(),
             "deps": self._deps_values(),
+            "notes": self.notes_edit.toPlainText(),
         }
 
     def _seat_value(self) -> str:
@@ -1587,6 +1679,13 @@ class ProfileWindow(QDialog):
         if not self.maybe_save():
             event.ignore()
         else:
+            # A QThread destroyed while running aborts the app:
+            # wait for the show fetch (its timeout bounds it).
+            if (
+                self._show_worker is not None
+                and self._show_worker.isRunning()
+            ):
+                self._show_worker.wait(5000)
             super().closeEvent(event)
 
     def _load(self):
@@ -1632,6 +1731,109 @@ class ProfileWindow(QDialog):
         finally:
             self.tag_combo.blockSignals(False)
 
+    def _refresh_facts(self, p):
+        """The profile facts (T165): project count, created /
+        updated / last-used dates. Dates show the day only — the
+        full stamp lives in profile.json. A profile never trained
+        says "last used never", not a blank."""
+        try:
+            count = len(self._main.store.list_projects(self._slug))
+        except StellaError:
+            count = 0
+
+        def day(value):
+            return (value or "")[:10] or "unknown"
+
+        last = (p.get("last_used") or "")[:10]
+        self.profile_facts_label.setText(
+            f"{count} project{'s' if count != 1 else ''}. "
+            f"Created {day(p.get('created'))}, "
+            f"updated {day(p.get('updated'))}, "
+            f"last used {last if last else 'never'}."
+        )
+
+    def _refresh_model_info(self):
+        """The model info line (T165) for the current tag: from
+        the show cache when it has the tag, a background fetch
+        when it does not. Called on load, on save (the tag may
+        have changed), and when the model-list refresh lands —
+        never per keystroke, never on the UI thread."""
+        tag = self.tag_combo.currentText().strip()
+        if not tag:
+            self.model_info_label.setText(
+                "No tag set, so there is no model info to show."
+            )
+            return
+        if SHOW_CACHE.loaded(tag):
+            self._show_model_info(tag)
+            return
+        self.model_info_label.setText("Loading model info...")
+        if (
+            self._show_worker is not None
+            and self._show_worker.isRunning()
+        ):
+            return
+        worker = ModelShowWorker(tag, self)
+        worker.show_ready.connect(self._on_show_ready)
+        worker.finished.connect(self._on_show_worker_finished)
+        self._show_worker = worker
+        worker.start()
+
+    def _on_show_worker_finished(self):
+        if self._show_worker is self.sender():
+            self._show_worker = None
+
+    def _on_show_ready(self, tag, _info, _ollama_up):
+        # A stale answer (the tag changed mid-fetch) is ignored;
+        # the render reads the cache, so it always shows the
+        # newest stored info for the tag.
+        if tag != self.tag_combo.currentText().strip():
+            return
+        self._show_model_info(tag)
+
+    def _show_model_info(self, tag):
+        """Render the cached /api/show info for a tag (T165):
+        size, quant, context length, capabilities. Ollama down
+        shows as unavailable, never blank or wrong; a tag Ollama
+        does not have says so outright."""
+        if not SHOW_CACHE.loaded(tag):
+            self.model_info_label.setText("Loading model info...")
+            return
+        if not SHOW_CACHE.ollama_up(tag):
+            self.model_info_label.setText(
+                "Model info unavailable: Ollama is not answering."
+            )
+            return
+        info = SHOW_CACHE.info(tag)
+        if info is None:
+            self.model_info_label.setText(
+                f"Model info unavailable: Ollama does not have "
+                f"{tag!r} installed."
+            )
+            return
+        parts = []
+        size = info.get("size_bytes")
+        if size is not None:
+            parts.append(f"Size {_fmt_bytes(size)}")
+        quant = info.get("quant") or ""
+        if quant:
+            parts.append(f"quant {quant}")
+        context = info.get("context")
+        if context is not None:
+            parts.append(f"context {context:,} tokens")
+        params = info.get("parameter_size") or ""
+        if params:
+            parts.append(f"{params} parameters")
+        caps = info.get("capabilities") or []
+        if caps:
+            parts.append("can do: " + ", ".join(caps))
+        if not parts:
+            self.model_info_label.setText(
+                "Ollama has this model, but gave no details about it."
+            )
+            return
+        self.model_info_label.setText(", ".join(parts) + ".")
+
     def _load_inner(self):
         self._fill_tag_combo()
         try:
@@ -1643,6 +1845,9 @@ class ProfileWindow(QDialog):
             self.base_edit.setText("")
             self.config_edit.setPlainText("")
             self.deps_list.clear()
+            self.notes_edit.setPlainText("")
+            self.model_info_label.setText("")
+            self.profile_facts_label.setText("")
             return
         self.display_edit.setText(p.get("display_name", ""))
         self.role_combo.setCurrentText(p.get("role", ""))
@@ -1670,6 +1875,13 @@ class ProfileWindow(QDialog):
         base = p.get("base_ref", "")
         self._loaded_base = base if is_hf_repo_id(base) else ""
         self.base_edit.setText(self._loaded_base)
+        # T165: the facts and the model info for this profile's
+        # tag. T166: the profile notes, loaded with the form.
+        self._refresh_facts(p)
+        self.notes_edit.setPlainText(
+            self._main.store.read_profile_notes(self._slug)
+        )
+        self._refresh_model_info()
 
     def save(self):
         """Save the profile form. Returns True on success, False
@@ -1725,9 +1937,32 @@ class ProfileWindow(QDialog):
         except StellaError as exc:
             QMessageBox.warning(self, "Stella", str(exc))
             return False
+        # T166: the profile notes save through the same Save path.
+        # A notes failure after a profile save says so plainly —
+        # the profile is saved, the notes are not — and the save
+        # reports False so the prompt can offer to try again.
+        try:
+            self._main.store.write_profile_notes(
+                self._slug, self.notes_edit.toPlainText()
+            )
+        except StellaError as exc:
+            QMessageBox.warning(
+                self, "Stella",
+                f"Profile saved, but the notes did not save: {exc}",
+            )
+            return False
         self._main.refresh_tree()
         self._main.refresh_session()
         self._main._say(f"Saved profile {self._slug}.")
+        # T165: the tag may have changed — the model info follows
+        # it — and the save stamped a new updated date.
+        self._refresh_model_info()
+        try:
+            self._refresh_facts(
+                self._main.store.get_profile(self._slug)
+            )
+        except StellaError:
+            pass
         self._capture_snapshot()
         self._update_title()
         return True
@@ -1773,8 +2008,26 @@ class ProjectWindow(QDialog):
         layout.addWidget(self._load_note)
 
         # Details and Notes are collapsible sections (T80, entry
-        # 012): the form is short, but a collapsed Notes still
-        # leaves Save one glance away on a small screen.
+        # 012). Notes comes FIRST (T160): the running log is the
+        # field touched most during a fine-tune, and under the
+        # form it needed a scroll on every visit — at the top it
+        # is visible without scrolling in the default window.
+        notes_section = CollapsibleSection("Project notes")
+        self.notes_edit = QPlainTextEdit()
+        self.notes_edit.setMinimumHeight(100)
+        notes_section.content_layout.addWidget(self.notes_edit)
+        notes_section.content_layout.addWidget(
+            _help_label("Anything you want to remember about this fine-tune.")
+        )
+        # The notes area has its own save control (T2): notes can be
+        # saved without hunting for the project Save button, and the
+        # label says when the notes are edited but unsaved.
+        self.save_notes_btn = QPushButton("Save notes")
+        self.save_notes_btn.clicked.connect(self.save_notes)
+        notes_section.content_layout.addWidget(self.save_notes_btn)
+        layout.addWidget(notes_section)
+        self.notes_section = notes_section
+
         details = CollapsibleSection("Details")
         form = QFormLayout()
         self.display_edit = QLineEdit()
@@ -1824,7 +2077,7 @@ class ProjectWindow(QDialog):
             "",
             _help_label(
                 "Why this mode was picked for this project. The "
-                "running log lives in Project notes below."
+                "running log lives in Project notes above."
             ),
         )
         # Status (T53): read-only — training moves it on its own
@@ -1852,21 +2105,6 @@ class ProjectWindow(QDialog):
         layout.addWidget(details)
         self.details_section = details
 
-        notes_section = CollapsibleSection("Project notes")
-        self.notes_edit = QPlainTextEdit()
-        self.notes_edit.setMinimumHeight(100)
-        notes_section.content_layout.addWidget(self.notes_edit)
-        notes_section.content_layout.addWidget(
-            _help_label("Anything you want to remember about this fine-tune.")
-        )
-        # The notes area has its own save control (T2): notes can be
-        # saved without hunting for the project Save button, and the
-        # label says when the notes are edited but unsaved.
-        self.save_notes_btn = QPushButton("Save notes")
-        self.save_notes_btn.clicked.connect(self.save_notes)
-        notes_section.content_layout.addWidget(self.save_notes_btn)
-        layout.addWidget(notes_section)
-        self.notes_section = notes_section
         layout.addStretch(1)
 
         action_row = QHBoxLayout()
@@ -1917,10 +2155,10 @@ class ProjectWindow(QDialog):
         # Ctrl+S saves here (T82); Tab walks the form in visual order.
         QShortcut(QKeySequence("Ctrl+S"), self, self.save)
         _chain_tab_order([
+            self.notes_edit, self.save_notes_btn,
             self.display_edit, self.dataset_edit, self.dataset_browse_btn,
             self.metamorph_notes_edit, self.mark_ready_btn,
-            self.notes_edit,
-            self.save_notes_btn, self.save_btn, rename_btn, clone_btn,
+            self.save_btn, rename_btn, clone_btn,
             delete_btn, close_btn,
         ])
 
@@ -3728,6 +3966,10 @@ class MainWindow(QMainWindow):
             self.refresh_session()
         # Ctrl+S saves any open edit window (T82).
         QShortcut(QKeySequence("Ctrl+S"), self, self._save_open_windows)
+        # F2 renames the picked tree row (T168): double-click keeps
+        # opening the detail window, so rename lives on F2 and the
+        # right-click menu instead.
+        QShortcut(QKeySequence("F2"), self, self._rename_current_row)
 
     # -- layout -----------------------------------------------------
     def _build_ui(self):
@@ -3762,6 +4004,13 @@ class MainWindow(QMainWindow):
         self.tree.setColumnCount(1)
         self.tree.currentItemChanged.connect(self._on_tree_current_changed)
         self.tree.itemDoubleClicked.connect(self._on_tree_double_clicked)
+        # Right-click renames the row (T168): the menu is built per
+        # row, so a damaged row (which double-click repairs) gets
+        # no Rename.
+        self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(
+            self._on_tree_context_menu
+        )
         left_layout.addWidget(self.tree, 1)
         # The empty-list hint (T124): one line saying what to do
         # next, shown only when the tree has nothing to show —
@@ -3853,7 +4102,8 @@ class MainWindow(QMainWindow):
         self._menu_action_chat = help_menu.addAction(
             "Chat...", self.open_chat_window
         )
-        self._menu_action_chat.setShortcut("F2")
+        # F2 is Rename (T168); Chat moved to F3.
+        self._menu_action_chat.setShortcut("F3")
 
     def _refresh_menu_state(self):
         """Grey out the actions that cannot work yet (T19): New
@@ -4127,6 +4377,25 @@ class MainWindow(QMainWindow):
         run_btns.addWidget(self.train_estimate_btn)
         run_btns.addStretch(1)
         card_layout.addLayout(run_btns)
+        # The step cap (T161): Go stops the run after this many
+        # steps — a proof run with a number the user picks, instead
+        # of the fixed 5-step Proof run button. 0 means the full
+        # run. It applies to a fresh start only: Resume continues
+        # to the run's own total.
+        cap_row = QHBoxLayout()
+        cap_row.addWidget(QLabel("Step cap"))
+        self.train_step_cap_spin = QSpinBox()
+        self.train_step_cap_spin.setRange(0, 100000)
+        self.train_step_cap_spin.setValue(0)
+        self.train_step_cap_spin.setToolTip(
+            "Stop after this many steps. 0 means the full run."
+        )
+        cap_row.addWidget(self.train_step_cap_spin)
+        cap_row.addWidget(
+            _help_label("0 means the full run. A cap makes Go a short run.")
+        )
+        cap_row.addStretch(1)
+        card_layout.addLayout(cap_row)
         layout.addWidget(card)
 
         # -- train details, below, in collapsible sections ---------
@@ -4155,10 +4424,61 @@ class MainWindow(QMainWindow):
         layout.addWidget(dataset_section)
         self.dataset_section = dataset_section
 
+        # Run overrides (T161): a dataset and a base for THIS run
+        # only — the CLI's --dataset / --base, in the window. Blank
+        # means the project's dataset and the profile's base, and
+        # nothing here is ever written back to the project or the
+        # profile. The fields clear when the project changes, so a
+        # leftover override never follows the session.
+        overrides_section = CollapsibleSection("Run overrides")
+        override_form = QFormLayout()
+        self.run_dataset_edit = QLineEdit()
+        self.run_dataset_edit.setPlaceholderText(
+            "this run's dataset file (blank: the project's)"
+        )
+        self.run_dataset_browse_btn = QPushButton("Browse...")
+        self.run_dataset_browse_btn.clicked.connect(
+            self._browse_run_dataset
+        )
+        run_dataset_row = QWidget()
+        run_dataset_layout = QHBoxLayout(run_dataset_row)
+        run_dataset_layout.setContentsMargins(0, 0, 0, 0)
+        run_dataset_layout.addWidget(self.run_dataset_edit, 1)
+        run_dataset_layout.addWidget(self.run_dataset_browse_btn)
+        override_form.addRow("Dataset for this run", run_dataset_row)
+        override_form.addRow(
+            "",
+            _help_label(
+                "Only this run trains on this file. The project "
+                "keeps its own dataset."
+            ),
+        )
+        self.run_base_edit = QLineEdit()
+        self.run_base_edit.setPlaceholderText(
+            "this run's base model (blank: the profile's)"
+        )
+        override_form.addRow("Base for this run", self.run_base_edit)
+        override_form.addRow(
+            "",
+            _help_label(
+                "Only this run starts from this base: a Hugging "
+                "Face repo or a local folder. The profile keeps "
+                "its own base."
+            ),
+        )
+        overrides_section.content_layout.addLayout(override_form)
+        layout.addWidget(overrides_section)
+        self.overrides_section = overrides_section
+
         checkpoints_section = CollapsibleSection("Checkpoints")
         self.train_checkpoints = QListWidget()
         self.train_checkpoints.setMaximumHeight(90)
         self.train_checkpoints.itemClicked.connect(
+            self._on_checkpoint_selected
+        )
+        # T168: double-clicking a checkpoint shows its detail too —
+        # the same detail a single click shows.
+        self.train_checkpoints.itemDoubleClicked.connect(
             self._on_checkpoint_selected
         )
         checkpoints_section.content_layout.addWidget(self.train_checkpoints)
@@ -4204,6 +4524,30 @@ class MainWindow(QMainWindow):
         ckpt_btns.addWidget(self.checkpoint_prune_btn)
         ckpt_btns.addStretch(1)
         checkpoints_section.content_layout.addLayout(ckpt_btns)
+        # The GGUF options (T161): the quant, and which checkpoint
+        # to export from — the CLI's --quant / --from-checkpoint.
+        # The checkpoint picker rides the T150 list above: the
+        # trained adapter is the default, a picked checkpoint
+        # exports that checkpoint's adapter instead.
+        gguf_row = QHBoxLayout()
+        gguf_row.addWidget(QLabel("Quant"))
+        self.gguf_quant_combo = QComboBox()
+        self.gguf_quant_combo.addItems(list(KNOWN_QUANTS))
+        self.gguf_quant_combo.setCurrentText(DEFAULT_QUANT)
+        self.gguf_quant_combo.setToolTip(
+            "How small the GGUF file is. Q4_K_M is the usual "
+            "balance of size and quality."
+        )
+        gguf_row.addWidget(self.gguf_quant_combo)
+        gguf_row.addWidget(QLabel("From checkpoint"))
+        self.gguf_checkpoint_combo = QComboBox()
+        self.gguf_checkpoint_combo.addItem("Trained adapter")
+        self.gguf_checkpoint_combo.setToolTip(
+            "Export from a checkpoint's adapter instead of the "
+            "trained adapter."
+        )
+        gguf_row.addWidget(self.gguf_checkpoint_combo, 1)
+        checkpoints_section.content_layout.addLayout(gguf_row)
         export_btns = QHBoxLayout()
         self.train_export_gguf_btn = QPushButton("Export GGUF")
         self.train_export_gguf_btn.clicked.connect(self.export_gguf_gui)
@@ -4354,7 +4698,12 @@ class MainWindow(QMainWindow):
 
     # -- tree -------------------------------------------------------
     @staticmethod
-    def _profile_label(p):
+    def _profile_label(p, project_count=None, tag_state=None):
+        """A profile row: display name, [role], (tag), the project
+        count (T165), and the tag-health marker (T163). The count
+        and the marker are passed in — the label itself never
+        touches the store or the network, so refresh_tree stays
+        the one place that reads them."""
         label = p.get("display_name") or p["name"]
         role = p.get("role") or ""
         tag = p.get("ollama_tag") or p.get("base_ref") or ""
@@ -4362,16 +4711,33 @@ class MainWindow(QMainWindow):
             label += f" [{role}]"
         if tag:
             label += f" ({tag})"
+        if project_count is not None:
+            noun = "project" if project_count == 1 else "projects"
+            label += f" ({project_count} {noun})"
+        if tag_state:
+            label += _TAG_HEALTH_MARKERS.get(tag_state, "")
         return label
 
     @staticmethod
-    def _project_label(p):
+    def _project_label(p, show_slug=False):
+        """A project row (T164): display name, status (T53), and
+        the dataset file. Method and rank are NOT shown — they are
+        settings, and no settings appear on any screen (T16). When
+        two projects in one profile share a display name, the slug
+        disambiguates (collision only)."""
         label = p.get("display_name") or p.get("name") or "(unnamed project)"
+        if show_slug:
+            label += f" [{p.get('name', '')}]"
         # The status shows in the list row (T53): "Tool calls
         # (done)". A damaged row has no status to show.
         status = p.get("status")
         if status and not p.get("_damaged"):
             label += f" ({status})"
+        # The dataset, by file name: the full ref lives in the
+        # Project window, the row just says which file it trains on.
+        ref = p.get("dataset_ref") or ""
+        if ref and not p.get("_damaged"):
+            label += f" [{Path(ref).name or ref}]"
         # A broken metamorph block shows as a warning row (T39),
         # read through the shared reader — not a crash, not silent
         # normal. Every other project lists as usual.
@@ -4419,6 +4785,20 @@ class MainWindow(QMainWindow):
         if self._model_list_worker is self.sender():
             self._model_list_worker = None
 
+    def _profile_label_inputs(self, slug, p):
+        """(project_count, tag_state) for one profile row: the
+        count from the store, the tag state from the cached model
+        list (T43) — never a fetch. The health question is about
+        the Ollama tag only: a base ref is not a tag, so a profile
+        with a base but no tag is "no-tag"."""
+        try:
+            count = len(self.store.list_projects(slug))
+        except StellaError:
+            count = 0
+        models, _sizes, loaded, ollama_up, _at = MODEL_CACHE.snapshot()
+        tag = p.get("ollama_tag") or ""
+        return count, _tag_health_state(tag, models, ollama_up, loaded)
+
     def _on_model_list_refreshed(self, _models, _sizes, _ollama_up):
         """A background model-list refresh landed (T43): every
         surface that shows the list re-reads it from the cache —
@@ -4427,6 +4807,9 @@ class MainWindow(QMainWindow):
         self._refresh_tree_badges()
         for win in list(self._profile_windows.values()):
             win._fill_tag_combo(prefer_current=True)
+            # T165: the model info follows the refreshed list too —
+            # an Ollama that came back makes the metadata loadable.
+            win._refresh_model_info()
         if self._settings_window is not None:
             self._settings_window._on_models_refreshed()
         if self._chat_window is not None:
@@ -4458,12 +4841,28 @@ class MainWindow(QMainWindow):
         over Ollama down: training can start without Ollama. The
         tooltip carries the full row text plus the health line, so
         the badge is never a mystery. Separated from refresh_tree
-        so the Ollama check runs once per pass, not once per row."""
+        so the Ollama check runs once per pass, not once per row.
+
+        The tag-health marker (T163) is relabelled here too, so a
+        model-list refresh updates the markers without a full tree
+        rebuild: the row text follows the cache the moment the
+        refresh lands."""
         ollama_up = self._ollama_up_cached()
         for slug, item in self._tree_profiles.items():
             if item.data(0, Qt.UserRole + 1):
                 item.setIcon(0, QIcon())  # damaged: no badge
                 continue
+            try:
+                prof = self.store.get_profile(slug)
+            except StellaError:
+                prof = None
+            if prof is not None:
+                count, tag_state = self._profile_label_inputs(slug, prof)
+                self._set_tree_row(
+                    item,
+                    self._profile_label(prof, count, tag_state),
+                    False,
+                )
             try:
                 status = provision.weights_status(self.store, slug)
             except StellaError:
@@ -4506,7 +4905,8 @@ class MainWindow(QMainWindow):
             if damaged:
                 label = f"{slug} (damaged: {p.get('_error', 'bad file')})"
             else:
-                label = self._profile_label(p)
+                count, tag_state = self._profile_label_inputs(slug, p)
+                label = self._profile_label(p, count, tag_state)
             item = self._tree_profiles.get(slug)
             if item is None:
                 item = QTreeWidgetItem(self.tree, [label])
@@ -4516,6 +4916,12 @@ class MainWindow(QMainWindow):
             projects = {
                 pr["name"]: pr for pr in self.store.list_projects(slug)
             }
+            # T164: a display name shared by two projects in this
+            # profile is disambiguated by slug, collision only.
+            display_counts: dict[str, int] = {}
+            for pr in projects.values():
+                shown = pr.get("display_name") or pr.get("name") or ""
+                display_counts[shown] = display_counts.get(shown, 0) + 1
             for key in list(self._tree_projects):
                 if key[0] == slug and key[1] not in projects:
                     item.removeChild(self._tree_projects.pop(key))
@@ -4527,7 +4933,10 @@ class MainWindow(QMainWindow):
                         f"{pname} (damaged: {pr.get('_error', 'bad file')})"
                     )
                 else:
-                    pr_label = self._project_label(pr)
+                    shown = pr.get("display_name") or pr.get("name") or ""
+                    pr_label = self._project_label(
+                        pr, show_slug=display_counts.get(shown, 0) > 1
+                    )
                 child = self._tree_projects.get(key)
                 if child is None:
                     child = QTreeWidgetItem(item, [pr_label])
@@ -4599,6 +5008,9 @@ class MainWindow(QMainWindow):
         self.set_session(profile, project)
 
     def _on_tree_double_clicked(self, item, _column):
+        # T168 ruling: double-click KEEPS opening the detail window
+        # — it is the established multi-window pattern, and rename
+        # moved to F2 and the right-click menu instead.
         data = item.data(0, Qt.UserRole)
         if data is None:
             return
@@ -4610,6 +5022,61 @@ class MainWindow(QMainWindow):
             self.open_profile_window(profile)
         else:
             self.open_project_window(profile, project)
+
+    def _rename_current_row(self):
+        """Rename the picked tree row (T168): F2, and the
+        right-click menu. A profile row renames the profile, a
+        project row renames the project. Nothing picked means
+        nothing to rename. A damaged row cannot be renamed — its
+        manifest cannot be read, so double-click repairs it first.
+
+        Modal audit: this reaches QInputDialog.getText through the
+        existing rename methods — the same dialog the window's
+        Rename buttons already open. No new modal; tests stub
+        getText as the rename tests already do."""
+        item = self.tree.currentItem()
+        if item is None:
+            return
+        data = item.data(0, Qt.UserRole)
+        if data is None or item.data(0, Qt.UserRole + 1):
+            return
+        profile, project = data
+        if project is None:
+            self.rename_profile(profile)
+        else:
+            self.rename_project(profile, project)
+
+    def _tree_context_menu(self, item):
+        """The right-click menu for one tree row (T168): Rename,
+        for a healthy row. None for a damaged row or no row —
+        there is nothing to rename there. Factored out so tests
+        can read the menu without showing it."""
+        if item is None or item.data(0, Qt.UserRole + 1):
+            return None
+        data = item.data(0, Qt.UserRole)
+        if data is None:
+            return None
+        profile, project = data
+        menu = QMenu(self.tree)
+        rename = menu.addAction("Rename")
+        if project is None:
+            rename.triggered.connect(
+                lambda: self.rename_profile(profile)
+            )
+        else:
+            rename.triggered.connect(
+                lambda: self.rename_project(profile, project)
+            )
+        return menu
+
+    def _on_tree_context_menu(self, pos):
+        """Right-click on the tree (T168): show the row's menu at
+        the click. A click on empty space shows nothing."""
+        item = self.tree.itemAt(pos)
+        menu = self._tree_context_menu(item)
+        if menu is None:
+            return
+        menu.exec(self.tree.viewport().mapToGlobal(pos))
 
     def _repair_damaged(self, profile, project):
         """Repair for a damaged row (T3): open the broken manifest
@@ -5045,11 +5512,16 @@ class MainWindow(QMainWindow):
         except StellaError as exc:
             self._warn(str(exc))
             return
+        # T161: a run-override dataset counts as having examples —
+        # the run trains on it, not on the project's dataset.
         if not (proj.get("dataset_ref") or "").strip():
-            self.dataset_prompt_row.setVisible(True)
-            self._say("This job needs examples to learn from.")
-            return
-        self.start_training()
+            if not self.run_dataset_edit.text().strip():
+                self.dataset_prompt_row.setVisible(True)
+                self._say("This job needs examples to learn from.")
+                return
+        # T161: the step cap — 0 means the full run.
+        cap = self.train_step_cap_spin.value()
+        self.start_training(max_steps=cap if cap > 0 else None)
 
     def _go_sleep(self):
         """Sleep, after the same dataset check as Train."""
@@ -6094,8 +6566,13 @@ class MainWindow(QMainWindow):
         `bundle_dataset` copies the dataset into the package (T59);
         the delete path leaves it off — deleting a project does not
         delete the dataset file, so the reference still works."""
+        # T167: the dialog title names the package before the
+        # folder is picked — the user sees what will be created.
         dest = QFileDialog.getExistingDirectory(
-            self, "Export project to folder", str(Path.home())
+            self,
+            f"Export project to folder "
+            f"(package: {project}{export_mod.EXPORT_SUFFIX})",
+            str(Path.home()),
         )
         if not dest:
             return None
@@ -6191,7 +6668,12 @@ class MainWindow(QMainWindow):
                 ),
                 should_stop=ctx.is_cancelled,
             )
-            return f"Exported to {out}."
+            # T178: the success message carries the real package
+            # size, not just the path.
+            return (
+                f"Exported to {out} "
+                f"({export_mod.format_size(export_mod.package_size(out))})."
+            )
 
         def on_finished(ok, message):
             self.refresh_tree()
@@ -6216,8 +6698,13 @@ class MainWindow(QMainWindow):
         if self._job_already_running():
             return
         bundle = self._ask_bundle_dataset(profile, project)
+        # T167: the dialog title names the package before the
+        # folder is picked.
         dest = QFileDialog.getExistingDirectory(
-            self, "Export project to folder", str(Path.home())
+            self,
+            f"Export project to folder "
+            f"(package: {project}{export_mod.EXPORT_SUFFIX})",
+            str(Path.home()),
         )
         if not dest:
             return
@@ -6230,6 +6717,11 @@ class MainWindow(QMainWindow):
                 self._say("Export cancelled.")
                 return
             force = True
+        # T178: the log line that starts the job carries the
+        # estimated size; the success message carries the real one.
+        estimate = export_mod.estimate_export_size(
+            self.store, profile, project, bundle_dataset=bundle
+        )
         self._export_job(
             lambda on_progress, should_stop: export_mod.export_project(
                 self.store, profile, project, dest,
@@ -6237,7 +6729,8 @@ class MainWindow(QMainWindow):
                 on_progress=on_progress, should_stop=should_stop,
             ),
             "Exporting project",
-            f"Exporting project {profile}/{project}...",
+            f"Exporting project {profile}/{project} "
+            f"(about {export_mod.format_size(estimate)})...",
         )
         self.debug_log.action(
             f"project export started: {profile}/{project} to {dest}"
@@ -6297,8 +6790,13 @@ class MainWindow(QMainWindow):
         if include is None:
             self._say("Export cancelled.")
             return
+        # T167: the dialog title names the package before the
+        # folder is picked.
         dest = QFileDialog.getExistingDirectory(
-            self, "Export profile to folder", str(Path.home())
+            self,
+            f"Export profile to folder "
+            f"(package: {profile}{export_mod.PROFILE_EXPORT_SUFFIX})",
+            str(Path.home()),
         )
         if not dest:
             return
@@ -6311,6 +6809,11 @@ class MainWindow(QMainWindow):
                 self._say("Export cancelled.")
                 return
             force = True
+        # T178: the log line that starts the job carries the
+        # estimated size; the success message carries the real one.
+        estimate = export_mod.estimate_profile_export_size(
+            self.store, profile, include_projects=include
+        )
         self._export_job(
             lambda on_progress, should_stop: export_mod.export_profile(
                 self.store, profile, dest,
@@ -6318,7 +6821,8 @@ class MainWindow(QMainWindow):
                 on_progress=on_progress, should_stop=should_stop,
             ),
             "Exporting profile",
-            f"Exporting profile {profile}...",
+            f"Exporting profile {profile} "
+            f"(about {export_mod.format_size(estimate)})...",
         )
         self.debug_log.action(
             f"profile export started: {profile} to {dest}"
@@ -6724,6 +7228,12 @@ class MainWindow(QMainWindow):
             )
             self.checkpoint_disk_label.setText("")
             self.export_estimate_label.setText("")
+            # T161: no project, no overrides and no checkpoint
+            # picker — both belong to a project.
+            self.run_dataset_edit.setText("")
+            self.run_base_edit.setText("")
+            self.gguf_checkpoint_combo.clear()
+            self.gguf_checkpoint_combo.addItem("Trained adapter")
             return
         # A new project gets a fresh loss line; the same project
         # keeps its last progress (a finished run's final step/loss
@@ -6741,6 +7251,11 @@ class MainWindow(QMainWindow):
             points, total = self._last_run_curve(*key)
             self.loss_curve.set_points(points, total)
             self._reset_run_stats()
+            # T161: the run overrides belong to the project they
+            # were typed for — a switch clears them, so a leftover
+            # override never follows the session.
+            self.run_dataset_edit.setText("")
+            self.run_base_edit.setText("")
         from .train import list_checkpoints, list_runs
 
         checkpoints = list_checkpoints(
@@ -6770,6 +7285,18 @@ class MainWindow(QMainWindow):
             )
         else:
             self.checkpoint_disk_label.setText("No checkpoints yet.")
+        # T161: the GGUF checkpoint picker follows the same list —
+        # the trained adapter first, then one entry per checkpoint.
+        self.gguf_checkpoint_combo.blockSignals(True)
+        try:
+            self.gguf_checkpoint_combo.clear()
+            self.gguf_checkpoint_combo.addItem("Trained adapter")
+            for ck in checkpoints:
+                self.gguf_checkpoint_combo.addItem(
+                    f"Checkpoint step {ck['step']}", ck["step"]
+                )
+        finally:
+            self.gguf_checkpoint_combo.blockSignals(False)
         # The detail label follows the selection; a refresh clears
         # the list, so it goes back to the resting line.
         self.checkpoint_detail_label.setText(
@@ -7111,9 +7638,13 @@ class MainWindow(QMainWindow):
             return
         from .gguf import estimate_export, format_export_estimate
 
+        # T161: the estimate follows the picked quant, not the
+        # default — the size is the picked quant's size.
+        quant = self.gguf_quant_combo.currentText().strip() or DEFAULT_QUANT
         try:
             estimate = estimate_export(
-                self.store, self._current_profile, self._current_project
+                self.store, self._current_profile, self._current_project,
+                quant=quant,
             )
         except StellaError:
             self.export_estimate_label.setText("")
@@ -7182,7 +7713,20 @@ class MainWindow(QMainWindow):
             "examples). Start training when ready."
         )
 
-    def _dataset_preflight_ok(self, profile: str, project: str) -> bool:
+    def _browse_run_dataset(self):
+        """Pick the run-override dataset file (T161): a file
+        dialog, like the project's Pick dataset file — but this
+        choice lives only in the panel, never in the project."""
+        path, _selected = QFileDialog.getOpenFileName(
+            self, "Pick a dataset file for this run", str(Path.home())
+        )
+        if path:
+            self.run_dataset_edit.setText(path)
+
+    def _dataset_preflight_ok(
+        self, profile: str, project: str,
+        dataset_ref: str | None = None,
+    ) -> bool:
         """The pre-train dataset check (T83): True when the run may
         start. A failing check blocks the run with the errors
         named (a dialog + a log line + the status bar, so the
@@ -7202,7 +7746,13 @@ class MainWindow(QMainWindow):
         except StellaError as exc:
             self._warn(str(exc))
             return False
-        ref = proj.get("dataset_ref") or ""
+        # T161: a run-override dataset is the dataset this run is
+        # checked against — the stored ref only when no override
+        # was given.
+        if dataset_ref is None:
+            ref = proj.get("dataset_ref") or ""
+        else:
+            ref = dataset_ref
         if not ref.strip():
             message = (
                 "This project has no dataset set. Pick a dataset "
@@ -7268,12 +7818,21 @@ class MainWindow(QMainWindow):
 
     def start_training(self, resume: bool = False,
                        max_steps: int | None = None,
-                       from_checkpoint: int | None = None):
+                       from_checkpoint: int | None = None,
+                       dataset_path: str | None = None,
+                       base_ref: str | None = None):
         profile = self._selected_profile()
         project = self._selected_project()
         if not profile or not project:
             self._warn("Pick a project to train.")
             return
+        # T161: the run overrides — explicit args win, else the
+        # panel fields. Blank means no override: the project's
+        # dataset and the profile's base, as before.
+        if dataset_path is None:
+            dataset_path = self.run_dataset_edit.text().strip() or None
+        if base_ref is None:
+            base_ref = self.run_base_edit.text().strip() or None
         # One job at a time (T29): training refuses while sleep OR
         # any job-card job runs — a probe loading models beside a
         # training run is the OOM shape the slot exists to stop.
@@ -7330,15 +7889,19 @@ class MainWindow(QMainWindow):
         # Settings live in the store now (the project window saves
         # them); there is no form left to save from here. But the
         # weights may still be missing: offer the download first.
-        if not self._weights_offer(profile):
+        # T161: a base override skips the offer — the run starts
+        # from the override base, not the profile's weights, so
+        # the profile's download state is not the run's business.
+        if base_ref is None and not self._weights_offer(profile):
             return
         # The pre-train dataset check (T83), the last gate before
         # the worker starts: a failing check blocks the run with
         # the errors named, a tiny dataset asks to proceed. It
         # runs after the deps and weights checks, so a missing
         # training stack or missing weights is still reported
-        # first — the user fixes one thing at a time.
-        if not self._dataset_preflight_ok(profile, project):
+        # first — the user fixes one thing at a time. T161: the
+        # check runs against the override dataset when one is set.
+        if not self._dataset_preflight_ok(profile, project, dataset_path):
             return
         # The governing-seat warning (T116), after the dataset
         # check: a profile bound for a governing seat whose base
@@ -7350,6 +7913,7 @@ class MainWindow(QMainWindow):
         self._train_worker = TrainWorker(
             self.store, profile, project, resume=resume, force=force,
             max_steps=max_steps, from_checkpoint=from_checkpoint,
+            dataset_path=dataset_path, base_ref=base_ref,
         )
         self._train_worker.progress.connect(self._on_train_progress)
         self._train_worker.log.connect(self._train_log_line)
@@ -7659,12 +8223,18 @@ class MainWindow(QMainWindow):
         # one) and in the log line that starts the job. A metadata
         # read that fails just leaves it out; the export itself
         # still runs.
+        # T161: the quant and the checkpoint come from the pickers
+        # beside the button — the CLI's --quant / --from-checkpoint.
+        quant = self.gguf_quant_combo.currentText().strip() or DEFAULT_QUANT
+        from_checkpoint = self.gguf_checkpoint_combo.currentData()
         estimate_text = None
         try:
             from .gguf import estimate_export, format_export_estimate
 
             estimate_text = format_export_estimate(
-                estimate_export(self.store, profile, project)
+                estimate_export(
+                    self.store, profile, project, quant=quant
+                )
             )
         except StellaError:
             estimate_text = None
@@ -7701,6 +8271,8 @@ class MainWindow(QMainWindow):
 
             result = export_gguf(
                 self.store, profile, project, dest,
+                quant=quant,
+                from_checkpoint=from_checkpoint,
                 on_warning=ctx.log,  # T31: converter warning, before the merge
                 on_event=on_event,
                 should_stop=ctx.is_cancelled,

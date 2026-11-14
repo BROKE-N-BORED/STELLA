@@ -225,6 +225,208 @@ class ModelListCache:
             self._completed_ticket = self._ticket
 
 
+# -- /api/show: what a profile points at (T165) ---------------------
+# The same cache discipline as T43: the window never fetches on the
+# UI thread and never fetches per click — one background refresh
+# per tag, then every read serves from the cache.
+
+# model_info keys that carry the context length, in the order to
+# try them: the llama.cpp backends name it llama.context_length,
+# older payloads shorten it. The first int found wins.
+_SHOW_CONTEXT_KEYS = (
+    "llama.context_length",
+    "general.context_length",
+    "context_length",
+    "n_ctx",
+)
+
+
+def _fetch_show_payload(tag: str, url: str | None = None,
+                        timeout: float = TIMEOUT_SECONDS) -> tuple:
+    """One /api/show call. Returns (payload, ok): payload is the
+    parsed body (or None), ok is True when the server answered
+    with a readable payload. A server that answers 404 for an
+    unknown tag is UP with no payload — ([], True)-style, like
+    _fetch_tags — so the caller can tell "not installed" from
+    "Ollama down". Never raises."""
+    base = (url or ollama_url()).rstrip("/")
+    body = json.dumps({"model": tag}).encode("utf-8")
+    req = urllib.request.Request(
+        base + "/api/show",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError:
+        # The server answered: it is up, the tag is not installed
+        # (or the request was bad). Either way there is no info.
+        return None, True
+    except (urllib.error.URLError, OSError, ValueError, TimeoutError):
+        return None, False
+    if not isinstance(payload, dict):
+        return None, False
+    return payload, True
+
+
+def parse_show_info(payload: dict | None) -> dict | None:
+    """An /api/show payload as the plain fields the profile panel
+    shows: size_bytes, quant, context (tokens), capabilities,
+    parameter_size, family. None when there is no payload to read.
+    Every field is defensive: a missing or wrong-typed value reads
+    as empty, never a crash — Ollama's payload shape varies by
+    backend and version."""
+    if not isinstance(payload, dict):
+        return None
+    details = payload.get("details")
+    if not isinstance(details, dict):
+        details = {}
+    model_info = payload.get("model_info")
+    if not isinstance(model_info, dict):
+        model_info = {}
+    size = payload.get("size")
+    context = None
+    for key in _SHOW_CONTEXT_KEYS:
+        value = model_info.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            context = value
+            break
+    capabilities = payload.get("capabilities")
+    if not isinstance(capabilities, list):
+        capabilities = []
+    capabilities = [c for c in capabilities if isinstance(c, str)]
+    parameter_size = details.get("parameter_size")
+    family = details.get("family")
+    return {
+        "size_bytes": size if isinstance(size, int) else None,
+        "quant": (
+            details.get("quantization_level")
+            if isinstance(details.get("quantization_level"), str)
+            else ""
+        ),
+        "context": context,
+        "capabilities": capabilities,
+        "parameter_size": (
+            parameter_size if isinstance(parameter_size, str) else ""
+        ),
+        "family": family if isinstance(family, str) else "",
+    }
+
+
+def fetch_show(tag: str, url: str | None = None,
+               timeout: float = TIMEOUT_SECONDS) -> dict | None:
+    """One /api/show call, parsed — or None when Ollama is down,
+    the tag is not installed, or the payload is unreadable.
+    Never raises."""
+    payload, _ok = _fetch_show_payload(tag, url, timeout)
+    return parse_show_info(payload)
+
+
+class ModelShowCache:
+    """Per-tag /api/show results, cached (T165).
+
+    Same discipline as ModelListCache: reads never touch the
+    network, refreshes happen only on demand (a profile window
+    opening, the model-list Refresh landing), on a worker thread.
+    One entry per tag: the parsed info (or None when the fetch
+    found nothing), whether Ollama was up for it, and when it
+    was fetched. Refreshes of the same tag racing each other
+    make one fetch between them; different tags fetch
+    concurrently.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._entries: dict[str, dict] = {}
+        self._in_flight: dict[str, threading.Event] = {}
+
+    def info(self, tag: str) -> dict | None:
+        """The cached info for a tag, or None when nothing was
+        ever fetched for it (or the fetch found nothing). Never
+        touches the network."""
+        with self._lock:
+            entry = self._entries.get(tag)
+            return dict(entry["info"]) if entry and entry["info"] else None
+
+    def loaded(self, tag: str) -> bool:
+        """True once any refresh (or seed) has landed for this tag."""
+        with self._lock:
+            return tag in self._entries
+
+    def ollama_up(self, tag: str) -> bool:
+        """True when the last refresh for this tag reached Ollama.
+        False when nothing was ever fetched — the window shows
+        "not loaded yet" then, not "down"."""
+        with self._lock:
+            entry = self._entries.get(tag)
+            return bool(entry and entry["ollama_up"])
+
+    def refresh(self, tag: str, url: str | None = None,
+                timeout: float = TIMEOUT_SECONDS) -> tuple:
+        """Fetch the info for one tag now and store it. Returns
+        (info, ollama_up): info is the parsed dict, or None when
+        the fetch found nothing. A refresh that finds another
+        thread already fetching the same tag waits for it and
+        returns its result."""
+        url = (url or ollama_url()).rstrip("/")
+        key = f"{url}\n{tag}"
+        with self._lock:
+            event = self._in_flight.get(key)
+            if event is not None:
+                in_flight = True
+            else:
+                event = threading.Event()
+                self._in_flight[key] = event
+                in_flight = False
+        if in_flight:
+            event.wait(timeout + 5)
+            with self._lock:
+                entry = self._entries.get(tag)
+            if entry is None:
+                return None, False
+            return entry["info"], entry["ollama_up"]
+        try:
+            payload, ok = _fetch_show_payload(tag, url, timeout)
+            info = parse_show_info(payload)
+            with self._lock:
+                self._entries[tag] = {
+                    "info": info,
+                    "ollama_up": ok,
+                    "fetched_at": time.monotonic(),
+                }
+        finally:
+            with self._lock:
+                if self._in_flight.get(key) is event:
+                    del self._in_flight[key]
+            event.set()
+        return info, ok
+
+    def set_snapshot(self, tag: str, info, ollama_up: bool = True):
+        """Set the cached info for one tag outright. Tests seed
+        the cache this way; refresh() sets it from a real fetch."""
+        with self._lock:
+            self._entries[tag] = {
+                "info": dict(info) if info is not None else None,
+                "ollama_up": ollama_up,
+                "fetched_at": time.monotonic(),
+            }
+
+    def reset(self, tag: str | None = None):
+        """Drop the cached info — one tag, or all of it (tests)."""
+        with self._lock:
+            if tag is None:
+                self._entries.clear()
+            else:
+                self._entries.pop(tag, None)
+
+
+# The one show cache the window reads (T165): every profile panel
+# serves from here, and only a refresh ever fetches.
+SHOW_CACHE = ModelShowCache()
+
+
 # The one cache the window reads (T43): every combo fill and tag
 # check serves from here, and only a refresh ever fetches.
 MODEL_CACHE = ModelListCache()

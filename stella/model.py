@@ -6,6 +6,7 @@ Home layout (default ~/.stella, overridable with STELLA_HOME):
       profiles/
         <profile-slug>/
           profile.json        # manifest: role, Ollama tag, base ref, config
+          notes.md            # profile notes (T166), with notes.md.1 backup
           projects/
             <project-slug>/
               project.json    # manifest: dataset, settings, metamorph block
@@ -29,7 +30,7 @@ from pathlib import Path
 
 from .autoconfig import compute_settings, measure_pc
 
-STELLA_VERSION = "0.20.0"
+STELLA_VERSION = "0.21.0"
 
 # Slug: lowercase letters, digits, dash, underscore. Must start alnum.
 # No dots, no slashes — a slug can never climb out of its directory.
@@ -615,6 +616,7 @@ class Store:
         governing_seat: str = "",
         created: str | None = None,
         updated: str | None = None,
+        last_used: str | None = None,
     ) -> dict:
         slug = validate_slug(slug, "profile name")
         pdir = self.profile_dir(slug)
@@ -651,6 +653,13 @@ class Store:
             "created": (
                 created if isinstance(created, str) and created
                 else utc_now()
+            ),
+            # T165: when this profile was last used for a real
+            # training run ("" = never). Stamped by
+            # touch_last_used when a run starts; an import
+            # restores the original stamp like created/updated.
+            "last_used": (
+                last_used if isinstance(last_used, str) else ""
             ),
         }
         if isinstance(updated, str) and updated:
@@ -704,6 +713,17 @@ class Store:
         ):
             data["base_ref"] = fields["ollama_tag"]
         data["updated"] = utc_now()
+        _write_json(self.profile_dir(slug) / "profile.json", data)
+        return data
+
+    def touch_last_used(self, slug: str) -> dict:
+        """Stamp a profile as used now (T165). Called when a real
+        training run starts on a project under the profile — the
+        one trigger: a run that reaches the engine, not a click
+        or a preview. Only last_used changes; `updated` is left
+        alone, because using a profile is not editing it."""
+        data = self.get_profile(slug)
+        data["last_used"] = utc_now()
         _write_json(self.profile_dir(slug) / "profile.json", data)
         return data
 
@@ -897,6 +917,17 @@ class Store:
             raise StellaError(
                 f"metamorph mode must be one of {', '.join(METAMORPH_MODES)}"
             )
+        # T177: notes are text — a non-string (an int from a
+        # hand-edited manifest, say) is refused here, not stored
+        # for a future notes reader to trip over. None counts as
+        # absent, the same convention as the import validator.
+        if metamorph_notes is None:
+            metamorph_notes = ""
+        if not isinstance(metamorph_notes, str):
+            raise StellaError(
+                "notes must be text, not "
+                f"{type(metamorph_notes).__name__}"
+            )
         pdir = self.project_dir(profile, slug)
         if (pdir / "project.json").exists():
             raise StellaError(
@@ -976,9 +1007,28 @@ class Store:
                     if isinstance(old_block, dict)
                     else ""
                 )
+                # T177: the same notes-type check as create — a
+                # non-string is refused at both write points.
+                # None counts as absent, as in create_project.
+                # Only notes being WRITTEN are checked: stored
+                # notes from an old bad manifest are normalized
+                # to "" instead of failing an unrelated update.
+                if "notes" in value:
+                    new_notes = value["notes"]
+                    if new_notes is None:
+                        new_notes = ""
+                    if not isinstance(new_notes, str):
+                        raise StellaError(
+                            "notes must be text, not "
+                            f"{type(new_notes).__name__}"
+                        )
+                else:
+                    new_notes = (
+                        old_notes if isinstance(old_notes, str) else ""
+                    )
                 data["metamorph"] = {
                     "mode": mode,
-                    "notes": value.get("notes", old_notes),
+                    "notes": new_notes,
                 }
                 continue
             if key == "settings":
@@ -1146,3 +1196,84 @@ class Store:
         if notes.is_file():
             shutil.copy2(notes, pdir / "notes.md.1")
         notes.write_text(text, encoding="utf-8")
+
+    # -- profile notes (T166) ---------------------------------------
+    # The same pattern as project notes, one level up: why this
+    # profile exists, what it is for, what was learned about its
+    # base. The file lives in the profile dir, so a rename moves
+    # it along (rename renames the whole folder) and a delete
+    # trashes it with the profile.
+    def read_profile_notes(self, profile: str) -> str:
+        pdir = self.profile_dir(profile)
+        notes = pdir / "notes.md"
+        if not notes.is_file():
+            return ""
+        return notes.read_text(encoding="utf-8")
+
+    def write_profile_notes(self, profile: str, text: str) -> None:
+        pdir = self.profile_dir(profile)
+        if not (pdir / "profile.json").exists():
+            raise StellaError(f"no profile named {profile!r}")
+        notes = pdir / "notes.md"
+        # The same rotating single backup as project notes (T119).
+        if notes.is_file():
+            shutil.copy2(notes, pdir / "notes.md.1")
+        notes.write_text(text, encoding="utf-8")
+
+    # -- import/export history (T179) --------------------------------
+    # One JSON line per export/import in the home: what went where,
+    # and when. Small by design — the log is trimmed to the newest
+    # 200 entries whenever it grows past 500, so it never becomes
+    # a second database. A bad line is skipped on read, never fatal:
+    # the history is a record, not a gate.
+    HISTORY_FILE = "history.jsonl"
+    HISTORY_KEEP = 200
+    HISTORY_TRIM_AT = 500
+
+    def record_history(self, entry: dict) -> None:
+        """Append one history entry (T179): {"kind": "export" |
+        "import", "package": "project" | "profile", "profile",
+        "project" ("" for a profile package), "path"}. The time
+        is stamped here, so callers never format one."""
+        record = {
+            "when": utc_now(),
+            "kind": entry.get("kind", ""),
+            "package": entry.get("package", ""),
+            "profile": entry.get("profile", ""),
+            "project": entry.get("project", ""),
+            "path": str(entry.get("path", "")),
+        }
+        self.home.mkdir(parents=True, exist_ok=True)
+        log = self.home / self.HISTORY_FILE
+        with log.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record) + "\n")
+        try:
+            lines = log.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return
+        if len(lines) > self.HISTORY_TRIM_AT:
+            log.write_text(
+                "\n".join(lines[-self.HISTORY_KEEP:]) + "\n",
+                encoding="utf-8",
+            )
+
+    def read_history(self) -> list[dict]:
+        """Every history entry, oldest first (T179)."""
+        log = self.home / self.HISTORY_FILE
+        if not log.is_file():
+            return []
+        out = []
+        try:
+            lines = log.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return []
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(entry, dict):
+                out.append(entry)
+        return out

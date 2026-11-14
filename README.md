@@ -169,6 +169,33 @@ job, export it as a usable package.
   next; the splitter cannot lose a pane; and the dead
   `settings["notes"]` key is gone (old manifests migrate on
   read).
+- v0.20.0 checkpoints + run history (2026-11-14): checkpoints
+  are managed now, each row showing its step, loss, size, and
+  date, with resume from any checkpoint, delete, and pruning
+  down to the newest few with the space freed shown; past runs
+  list with their final losses and a click draws the run's loss
+  curve; the window says "Loading <model>..." while the base
+  loads instead of sitting silent; the export button shows what
+  the export will cost before you commit; training learns from
+  every assistant turn, not just the last, and accepts
+  tool-call traces; the train/check split stays stable as rows
+  are added; and big datasets validate without loading the
+  whole file into RAM.
+- v0.21.0 profiles/rows/provenance (2026-11-14): the Train panel
+  has the CLI's options in the window (a step cap, per-run dataset
+  and base overrides, a quant choice and a checkpoint picker on
+  Export GGUF); profile rows show a tag-health marker (installed,
+  missing, Ollama down, no tag) next to the weights dot, and the
+  project count; project rows show the dataset file and the slug
+  when two projects share a name; the Profile window shows what
+  the profile points at (size, quant, context, capabilities from
+  Ollama), the dates, and a last-used date stamped when a training
+  run starts; profiles have notes of their own, which travel in
+  profile exports; exports report their size and refuse when the
+  disk will not fit; packages name the machine that made them,
+  and the home keeps an import/export history log. F2 renames the
+  picked row (double-click still opens it), and the Project
+  window's Notes sit at the top, visible without scrolling.
 
 ## Install
 
@@ -260,7 +287,7 @@ nothing trains silently and nothing downloads on its own.
 - **Projects** — fine-tunes live inside a profile as projects: own
   dataset, training settings, checkpoints, notes, fully customizable.
 - **Export** — a finished fine-tune exports as a usable package
-  (manifest, config, trained adapter, checkpoints, probe results,
+  (manifest, trained adapter, checkpoints, probe results,
   sleep cycles) and imports back in.
 
 All Stella data lives in `~/.stella/` as plain JSON and Markdown, so
@@ -272,7 +299,8 @@ save loses nothing. To get the previous notes back, move the backup
 over the notes file: in the project's folder under `~/.stella/`
 (`profiles/<profile>/projects/<project>/`), rename `notes.md.1`
 to `notes.md`. Only the latest previous save is kept — each save
-replaces the backup.
+replaces the backup. Profile notes work the same way, in the
+profile's own folder (`profiles/<profile>/`).
 
 Which notes live where: a project has two notes surfaces. The
 **"Why this mode"** field in the Project window says why this

@@ -1618,3 +1618,157 @@ def test_old_package_without_governing_seat_imports(tmp_path):
     fresh = Store(tmp_path / "fresh-home")
     export_mod.import_export(fresh, out)
     assert fresh.get_profile("solo")["governing_seat"] == ""
+
+
+# -- v0.21.0: T166 (profile notes in export), T178 (size/disk), ----
+# -- T179 (provenance + history), T165 (last_used travels) ---------
+
+
+def test_profile_export_carries_notes_and_import_restores_them(tmp_path):
+    """T166: a profile export carries profile-notes.md, and an
+    import into a fresh home brings the notes back."""
+    src = Store(tmp_path / "src-home")
+    src.create_profile("solo", ollama_tag="lfm3:1.7b")
+    src.write_profile_notes("solo", "Why this profile exists.")
+    out = export_mod.export_profile(src, "solo", tmp_path)
+    assert (out / "profile-notes.md").is_file()
+    assert (out / "profile-notes.md").read_text() == (
+        "Why this profile exists."
+    )
+    fresh = Store(tmp_path / "fresh-home")
+    export_mod.import_export(fresh, out)
+    assert fresh.read_profile_notes("solo") == "Why this profile exists."
+
+
+def test_profile_import_keeps_local_notes_when_profile_exists(tmp_path):
+    """T166: importing a profile package over an existing profile
+    never overwrites the local notes with the package's."""
+    src = Store(tmp_path / "src-home")
+    src.create_profile("solo", ollama_tag="lfm3:1.7b")
+    src.write_profile_notes("solo", "the package notes")
+    out = export_mod.export_profile(src, "solo", tmp_path)
+    local = Store(tmp_path / "local-home")
+    local.create_profile("solo", ollama_tag="lfm3:1.7b")
+    local.write_profile_notes("solo", "my own notes")
+    export_mod.import_export(local, out)
+    assert local.read_profile_notes("solo") == "my own notes"
+
+
+def test_profile_export_without_notes_has_no_notes_file(tmp_path):
+    """T166: a profile with no notes exports no profile-notes.md —
+    absent notes stay absent, not an empty file."""
+    src = Store(tmp_path / "src-home")
+    src.create_profile("solo", ollama_tag="lfm3:1.7b")
+    out = export_mod.export_profile(src, "solo", tmp_path)
+    assert not (out / "profile-notes.md").exists()
+
+
+def test_export_refuses_when_disk_is_short(tmp_path, monkeypatch):
+    """T178: an export that will not fit is refused before
+    copying, naming the sizes — with a fake small filesystem."""
+    import shutil
+
+    src = Store(tmp_path / "src-home")
+    src.create_profile("p1")
+    src.create_project("p1", "proj")
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    fake_usage = shutil.disk_usage(dest)._replace(free=10)
+    monkeypatch.setattr(shutil, "disk_usage", lambda path: fake_usage)
+    with pytest.raises(StellaError, match="Not enough disk space"):
+        export_mod.export_project(src, "p1", "proj", dest)
+    assert not (dest / "proj-stella-export").exists()
+    with pytest.raises(StellaError, match="Not enough disk space"):
+        export_mod.export_profile(src, "p1", dest)
+    assert not (dest / "p1-stella-profile-export").exists()
+
+
+def test_export_size_estimate_and_package_size(tmp_path):
+    """T178: the estimate counts the payload, and the package size
+    is the real folder size after export."""
+    src = Store(tmp_path / "src-home")
+    src.create_profile("p1")
+    src.create_project("p1", "proj")
+    src.write_notes("p1", "proj", "x" * 1000)
+    estimate = export_mod.estimate_export_size(src, "p1", "proj")
+    assert estimate >= 1000
+    out = export_mod.export_project(src, "p1", "proj", tmp_path)
+    size = export_mod.package_size(out)
+    assert size >= estimate
+    assert size > 1000
+    assert export_mod.format_size(1500) == "1 KB"
+    assert export_mod.format_size(2_500_000_000) == "2.3 GB"
+
+
+def test_manifest_names_source_machine(tmp_path):
+    """T179: an exported package names the machine that made it."""
+    import socket
+
+    src = Store(tmp_path / "src-home")
+    src.create_profile("p1")
+    src.create_project("p1", "proj")
+    out = export_mod.export_project(src, "p1", "proj", tmp_path)
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert manifest["source_machine"] == socket.gethostname()
+    assert manifest["exported_at"] != ""
+    out2 = export_mod.export_profile(src, "p1", tmp_path)
+    manifest2 = json.loads((out2 / "manifest.json").read_text())
+    assert manifest2["source_machine"] == socket.gethostname()
+
+
+def test_history_logs_export_and_import(tmp_path):
+    """T179: exports and imports are recorded in the home's
+    history log, with where they went."""
+    src = Store(tmp_path / "src-home")
+    src.create_profile("p1")
+    src.create_project("p1", "proj")
+    out = export_mod.export_project(src, "p1", "proj", tmp_path)
+    entries = src.read_history()
+    assert len(entries) == 1
+    assert entries[0]["kind"] == "export"
+    assert entries[0]["package"] == "project"
+    assert entries[0]["profile"] == "p1"
+    assert entries[0]["project"] == "proj"
+    assert entries[0]["path"] == str(out)
+    fresh = Store(tmp_path / "fresh-home")
+    export_mod.import_export(fresh, out)
+    entries = fresh.read_history()
+    assert len(entries) == 1
+    assert entries[0]["kind"] == "import"
+    assert entries[0]["path"] == str(out)
+
+
+def test_preview_shows_provenance(tmp_path):
+    """T179: the import preview shows when and where the package
+    was made; a package without provenance shows no such line."""
+    src = Store(tmp_path / "src-home")
+    src.create_profile("p1")
+    src.create_project("p1", "proj")
+    out = export_mod.export_project(src, "p1", "proj", tmp_path)
+    summary = export_mod.preview_export(Store(tmp_path / "h2"), out)
+    assert summary["source_machine"] != ""
+    text = export_mod.format_preview(summary)
+    assert "Exported from " in text
+    assert " on 20" in text
+    # Strip the provenance and the line goes away (the manifest
+    # itself is not checksummed, so this simulates an old package).
+    manifest = json.loads((out / "manifest.json").read_text())
+    del manifest["source_machine"]
+    del manifest["exported_at"]
+    (out / "manifest.json").write_text(json.dumps(manifest))
+    summary = export_mod.preview_export(Store(tmp_path / "h3"), out)
+    assert "Exported from" not in export_mod.format_preview(summary)
+    assert "Exported on" not in export_mod.format_preview(summary)
+
+
+def test_last_used_travels_in_export(tmp_path):
+    """T165: last-used travels in the profile block and is
+    restored on import, like created/updated."""
+    src = Store(tmp_path / "src-home")
+    src.create_profile("p1", last_used="2026-11-13T10:00:00Z")
+    out = export_mod.export_profile(src, "p1", tmp_path)
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert manifest["profile"]["last_used"] == "2026-11-13T10:00:00Z"
+    fresh = Store(tmp_path / "fresh-home")
+    export_mod.import_export(fresh, out)
+    assert fresh.get_profile("p1")["last_used"] == "2026-11-13T10:00:00Z"

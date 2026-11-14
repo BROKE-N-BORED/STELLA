@@ -1946,3 +1946,32 @@ def test_cli_train_governing_seat_abliterated_no_warning(
     out = capsys.readouterr().out
     assert "bound for" not in out
     assert "abliterated base" not in out
+
+
+# -- v0.21.0: T178 — size/disk awareness on export ------------------
+
+
+def test_cli_export_reports_size_before_and_after(home, tmp_path):
+    """T178: the export prints the estimated size before copying
+    and the real package size after."""
+    _seed_cli_home(home)
+    dest = tmp_path / "exports"
+    res = run_cli(home, "export", "p1", "proj", str(dest))
+    assert res.returncode == 0
+    assert "Package size: about " in res.stdout
+    lines = [ln for ln in res.stdout.splitlines() if "Package size:" in ln]
+    assert len(lines) == 2
+    assert lines[0].startswith("Package size: about ")
+    assert lines[1].startswith("Package size: ")
+    assert "about" not in lines[1]
+    assert "Exported to " in res.stdout
+
+
+def test_cli_export_profile_reports_size(home, tmp_path):
+    """T178: export-profile reports the size the same way."""
+    _seed_cli_home(home)
+    dest = tmp_path / "exports"
+    res = run_cli(home, "export-profile", "p1", str(dest), "--with-projects")
+    assert res.returncode == 0
+    lines = [ln for ln in res.stdout.splitlines() if "Package size:" in ln]
+    assert len(lines) == 2

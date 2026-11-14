@@ -31,7 +31,11 @@ manifest with its sha256 and byte size (T104), and import verifies
 them before creating anything — a truncated checkpoint refuses the
 import, naming the file. The manifest also carries the original
 `created` / `updated` timestamps plus an `exported_at` stamp
-(T118), so an imported project keeps its history.
+(T118) and the source machine (T179), so an imported project
+keeps its history and a package found on disk can say which
+machine made it. Every export and import is recorded in the
+home's history log (`history.jsonl`, T179). A profile package
+also carries the profile notes as `profile-notes.md` (T166).
 
 Import reads a package back, verifies it (required keys, known
 metamorph mode, sane names), and recreates the profile (if missing)
@@ -58,6 +62,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import socket
 import tempfile
 from pathlib import Path
 
@@ -142,6 +147,96 @@ class _CopyProgress:
     def add(self, n: int) -> None:
         self.done += n
         self.report()
+
+
+def _source_machine() -> str:
+    """This PC's hostname (T179): the provenance stamp every
+    package carries, so a package found on disk can say which
+    machine made it. Empty when the hostname cannot be read —
+    provenance is a record, never a gate."""
+    try:
+        return socket.gethostname()
+    except OSError:
+        return ""
+
+
+def format_size(n: int) -> str:
+    """Bytes as plain words (T178): 81 MB, 3.4 GB."""
+    if n >= 1024**3:
+        return f"{n / 1024**3:.1f} GB"
+    if n >= 1024**2:
+        return f"{n / 1024**2:.0f} MB"
+    if n >= 1024:
+        return f"{n / 1024:.0f} KB"
+    return f"{n:,} bytes"
+
+
+def _record_history(store: Store, entry: dict) -> None:
+    """One import/export history line (T179), best effort: a
+    history write that fails (a read-only home, say) must never
+    fail the export or import it records."""
+    try:
+        store.record_history(entry)
+    except Exception:
+        pass
+
+
+def package_size(path: str | Path) -> int:
+    """The bytes a package folder holds (T178): the actual size
+    reported after an export."""
+    return _dir_bytes(Path(path).expanduser())
+
+
+def estimate_export_size(
+    store: Store, profile: str, project: str,
+    bundle_dataset: bool = False,
+) -> int:
+    """The bytes a project export will copy (T178): the estimate
+    reported before the export and checked against free disk."""
+    return _export_total_bytes(store, profile, project, bundle_dataset)
+
+
+def estimate_profile_export_size(
+    store: Store, profile: str, include_projects: bool = False,
+) -> int:
+    """The bytes a profile export will copy (T178)."""
+    total = 0
+    if include_projects:
+        for p in store.list_projects(profile):
+            if p.get("_damaged"):
+                continue
+            total += _export_total_bytes(store, profile, p["name"], False)
+    notes = store.profile_dir(profile) / "notes.md"
+    if notes.is_file():
+        total += notes.stat().st_size
+    return total
+
+
+# Headroom over the byte estimate for the disk check (T178): the
+# manifest, the README, and the placeholder notes are small but
+# real, and the estimate does not count them.
+_DISK_HEADROOM_BYTES = 1024 * 1024
+
+
+def check_disk_space(dest: str | Path, needed: int) -> None:
+    """Refuse an export that will not fit (T178): the free space
+    on the destination's disk must cover the estimated package
+    size plus headroom. Raises StellaError naming both sizes,
+    before anything is copied."""
+    dest = Path(dest).expanduser()
+    try:
+        free = shutil.disk_usage(dest).free
+    except OSError:
+        # An unreadable disk is not a reason to refuse: the copy
+        # itself will fail readably if the disk is really gone.
+        return
+    if free < needed + _DISK_HEADROOM_BYTES:
+        raise StellaError(
+            "Not enough disk space to export: the package needs "
+            f"about {format_size(needed + _DISK_HEADROOM_BYTES)}, "
+            f"but only {format_size(free)} is free on {dest}. "
+            "Free some space, or pick another folder."
+        )
 
 
 def _dir_bytes(path: Path) -> int:
@@ -342,6 +437,10 @@ def export_project(
     if dest.exists() and not dest.is_dir():
         raise StellaError(f"export destination is not a folder: {dest}")
     dest.mkdir(parents=True, exist_ok=True)
+    # T178: refuse before copying when the package will not fit.
+    check_disk_space(
+        dest, _export_total_bytes(store, profile, project, bundle_dataset)
+    )
     out = dest / (project + EXPORT_SUFFIX)
     if out.exists():
         if not force:
@@ -367,6 +466,11 @@ def export_project(
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise
+    # T179: the export is recorded in the home's history.
+    _record_history(store, {
+        "kind": "export", "package": "project",
+        "profile": profile, "project": project, "path": str(out),
+    })
     return out
 
 
@@ -477,6 +581,10 @@ def _profile_manifest_block(prof: dict) -> dict:
         block["created"] = prof["created"]
     if prof.get("updated"):
         block["updated"] = prof["updated"]
+    # T165: last-used travels with the profile, restored on import
+    # like the other stamps.
+    if prof.get("last_used"):
+        block["last_used"] = prof["last_used"]
     return block
 
 
@@ -537,6 +645,8 @@ def _build_package(
         # T118: when this package was made, and the original
         # timestamps inside the profile/project blocks.
         "exported_at": utc_now(),
+        # T179: which machine made it.
+        "source_machine": _source_machine(),
         "profile": _profile_manifest_block(prof),
         "project": _project_manifest_block(proj),
     }
@@ -622,6 +732,10 @@ def export_profile(
     if dest.exists() and not dest.is_dir():
         raise StellaError(f"export destination is not a folder: {dest}")
     dest.mkdir(parents=True, exist_ok=True)
+    # T178: refuse before copying when the package will not fit.
+    check_disk_space(
+        dest, estimate_profile_export_size(store, profile, include_projects)
+    )
     out = dest / (profile + PROFILE_EXPORT_SUFFIX)
     if out.exists():
         if not force:
@@ -642,6 +756,11 @@ def export_profile(
         _export_total_bytes(store, profile, p["name"], False)
         for p in projects
     )
+    # T166: the profile notes travel at the package root, so the
+    # progress total counts them too.
+    profile_notes_src = store.profile_dir(profile) / "notes.md"
+    if profile_notes_src.is_file():
+        total += profile_notes_src.stat().st_size
     progress = _CopyProgress(total, on_progress, should_stop)
     staging = Path(
         tempfile.mkdtemp(prefix=out.name + ".staging-", dir=str(dest))
@@ -652,6 +771,8 @@ def export_profile(
             "format": FORMAT_VERSION,
             "kind": PROFILE_PACKAGE_KIND,
             "exported_at": utc_now(),
+            # T179: which machine made it.
+            "source_machine": _source_machine(),
             "profile": _profile_manifest_block(prof),
             "projects": [
                 _project_manifest_block(
@@ -690,6 +811,14 @@ def export_profile(
                 store, profile, p["name"],
                 staging / "projects" / p["name"], progress,
             )
+        # T166: the profile notes travel at the package root as
+        # profile-notes.md — never as notes.md, which is a
+        # project's file in a project package. Absent when the
+        # profile has no notes.
+        if profile_notes_src.is_file():
+            _copy_file_counted(
+                profile_notes_src, staging / "profile-notes.md", progress
+            )
         if progress is not None:
             progress.check()
         manifest["files"] = _package_file_hashes(staging)
@@ -701,6 +830,11 @@ def export_profile(
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise
+    # T179: the export is recorded in the home's history.
+    _record_history(store, {
+        "kind": "export", "package": "profile",
+        "profile": profile, "project": "", "path": str(out),
+    })
     return out
 
 
@@ -771,6 +905,7 @@ def _validate_profile_block(prof: dict) -> None:
     _check_field(prof, "dependencies", "str-list", "profile")
     _check_field(prof, "created", "str", "profile")
     _check_field(prof, "updated", "str", "profile")
+    _check_field(prof, "last_used", "str", "profile")
 
 
 def _validate_kind(manifest: dict) -> str:
@@ -820,6 +955,7 @@ def _validate_schema(manifest: dict) -> None:
     present. Nothing downstream ever sees a manifest field this
     has not validated."""
     _check_field(manifest, "exported_at", "str", "manifest")
+    _check_field(manifest, "source_machine", "str", "manifest")
     prof = manifest.get("profile")
     if not isinstance(prof, dict):
         raise StellaError("export manifest is missing profile or project")
@@ -1179,6 +1315,9 @@ def preview_export(
         "base": prof.get("base_ref", ""),
         "stella_version": manifest.get("stella_version", ""),
         "exported_at": manifest.get("exported_at", ""),
+        # T179: which machine made the package ("" when unknown —
+        # packages written before v0.21.0 carry no stamp).
+        "source_machine": manifest.get("source_machine", ""),
         "profile_existed": profile_existed,
         "profile_diff": profile_diff,
         "base_installed": base_installed,
@@ -1264,6 +1403,21 @@ def preview_export(
     return summary
 
 
+def _provenance_line(summary: dict) -> str:
+    """The provenance line (T179): when and where the package was
+    made, from exported_at + source_machine. Empty when the
+    package carries neither (written before v0.18.0/v0.21.0)."""
+    when = (summary.get("exported_at") or "")[:10]
+    machine = summary.get("source_machine") or ""
+    if when and machine:
+        return f"Exported from {machine} on {when}."
+    if when:
+        return f"Exported on {when}."
+    if machine:
+        return f"Exported from {machine}."
+    return ""
+
+
 def format_preview(summary: dict) -> str:
     """The preview summary in plain words (T58), one line per
     fact — shared by the import dialog and the CLI, so both show
@@ -1279,6 +1433,9 @@ def format_preview(summary: dict) -> str:
     version = summary.get("stella_version")
     if version:
         lines.append(f"Made with Stella {version}.")
+    provenance = _provenance_line(summary)
+    if provenance:
+        lines.append(provenance)
     lines.append(f"Status: {summary.get('status', 'draft')}.")
     parts = []
     if summary["weights"]:
@@ -1326,6 +1483,9 @@ def _format_profile_preview(summary: dict) -> str:
     version = summary.get("stella_version")
     if version:
         lines.append(f"Made with Stella {version}.")
+    provenance = _provenance_line(summary)
+    if provenance:
+        lines.append(provenance)
     names = summary.get("projects", [])
     if names:
         lines.append(
@@ -1461,6 +1621,7 @@ def _create_profile_from_manifest(store, slug, prof) -> None:
         governing_seat=prof.get("governing_seat", ""),
         created=prof.get("created"),
         updated=prof.get("updated"),
+        last_used=prof.get("last_used"),
     )
 
 
@@ -1622,6 +1783,10 @@ def _import_total_bytes(package_root: Path, payload_dirs) -> int:
             if item.is_file():
                 total += item.stat().st_size
     total += _dir_bytes(package_root / "dataset")
+    # T166: the profile notes (profile packages only) count too.
+    notes = package_root / "profile-notes.md"
+    if notes.is_file():
+        total += notes.stat().st_size
     return total
 
 
@@ -1883,6 +2048,11 @@ def import_export(
             result["copy_of"] = project_slug
         if replaced_trash is not None:
             result["replaced_trash"] = str(replaced_trash)
+    # T179: the import is recorded in the home's history.
+    _record_history(store, {
+        "kind": "import", "package": "project",
+        "profile": slug, "project": created["name"], "path": str(path),
+    })
     return result
 
 
@@ -1976,6 +2146,15 @@ def import_profile_export(
         if not profile_existed:
             _create_profile_from_manifest(store, slug, prof)
             created_profile = True
+            # T166: the profile notes come back with a newly
+            # created profile. A profile that already existed
+            # keeps its own notes — the package's notes never
+            # overwrite local ones.
+            notes_src = path / "profile-notes.md"
+            if notes_src.is_file():
+                store.write_profile_notes(
+                    slug, notes_src.read_text(encoding="utf-8")
+                )
         elif choice == "take":
             merged_before = {
                 field: (local_block or {}).get(field, "")
@@ -2018,7 +2197,7 @@ def import_profile_export(
             except Exception:
                 pass
         raise
-    return {
+    result = {
         "profile": slug,
         "profile_existed": profile_existed,
         "profile_diff": profile_diff,
@@ -2028,3 +2207,9 @@ def import_profile_export(
         "datasets_missing": datasets_missing,
         "warnings": warnings,
     }
+    # T179: the import is recorded in the home's history.
+    _record_history(store, {
+        "kind": "import", "package": "profile",
+        "profile": slug, "project": "", "path": str(path),
+    })
+    return result

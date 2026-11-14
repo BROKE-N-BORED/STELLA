@@ -2465,6 +2465,15 @@ def train_project(
             # alongside the model, not just the model on its own.
             check_dataset_fit(dataset_bytes, pre_estimate)
 
+        # T165: the profile was just used — a real training run
+        # (not a sleep consolidation, which passes
+        # update_status=False) stamps last-used when the run
+        # starts. Every refusal above (bad dataset, no resume,
+        # missing deps, will-not-fit) happens before this line,
+        # so a run that never started never stamps.
+        if update_status:
+            store.touch_last_used(profile)
+
         # Load the base, then check the guard a second time with the
         # real param counts (belt and braces: the pre-load estimate
         # already refused anything that cannot fit).
