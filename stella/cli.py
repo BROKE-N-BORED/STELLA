@@ -23,6 +23,8 @@
                                           or forever with --purge)
     stella update-profile <name> [--role ...] [--tag ...]
                                           [--display ...] [--base ...]
+                                          [--config ...] [--dependencies ...]
+                                          [--governing-seat ...]
                                           change a profile
     stella show-profile <name>            show a profile's record
     stella rename-project <profile> <old> <new>
@@ -361,8 +363,41 @@ def cmd_update_profile(args) -> int:
         fields["display_name"] = args.display
     if args.base is not None:
         fields["base_ref"] = args.base
+    # T115: config and dependencies, reachable from the terminal.
+    # Bad JSON is refused with the parse error and nothing is
+    # written — the parse happens before the store call, so a
+    # bad --config cannot half-update the profile.
+    if getattr(args, "config", None) is not None:
+        import json
+
+        try:
+            config = json.loads(args.config)
+        except json.JSONDecodeError as exc:
+            print(f"stella: config is not valid JSON: {exc}", file=sys.stderr)
+            return 1
+        if not isinstance(config, dict):
+            print(
+                "stella: config must be a JSON object, not "
+                f"{type(config).__name__}",
+                file=sys.stderr,
+            )
+            return 1
+        fields["config"] = config
+    if getattr(args, "dependencies", None) is not None:
+        fields["dependencies"] = [
+            item.strip()
+            for item in args.dependencies.split(",")
+            if item.strip()
+        ]
+    # T116: the governing-seat marker. The store validates the
+    # seat name; a bad one is refused with the plain error.
+    if getattr(args, "governing_seat", None) is not None:
+        fields["governing_seat"] = args.governing_seat
     if not fields:
-        print("Nothing to change: pass --role, --tag, --display, or --base.")
+        print(
+            "Nothing to change: pass --role, --tag, --display, "
+            "--base, --config, --dependencies, or --governing-seat."
+        )
         return 0
     data = store.update_profile(args.name, **fields)
     print(f"Updated profile {data['name']!r}.")
@@ -375,6 +410,14 @@ def cmd_show_profile(args) -> int:
     projects = store.list_projects(args.name)
     print(f"Profile {prof['name']} ({prof.get('display_name', prof['name'])})")
     print(f"  role: {prof.get('role') or '-'}")
+    # T116: a custom role is flagged, and a governing-seat marker
+    # is shown, so the record says what the window says.
+    from .model import is_custom_role
+
+    if is_custom_role(prof.get("role")):
+        print("  role is custom (not one of the canonical seats)")
+    if prof.get("governing_seat"):
+        print(f"  governing seat: {prof['governing_seat']}")
     print(f"  tag: {prof.get('ollama_tag') or '-'}")
     print(f"  base: {prof.get('base_ref') or '-'}")
     config = prof.get("config") or {}
@@ -581,6 +624,19 @@ def cmd_train(args) -> int:
         )
         print(format_estimate(estimate))
         return 0
+    # Governing-seat warning (T116): a profile bound for a
+    # governing seat whose base is not abliterated warns here,
+    # naming the seat and the base. The CLI warns and proceeds
+    # (like the tiny-dataset warning above), so scripted runs
+    # never block on a prompt; the window asks instead.
+    from .model import governing_seat_warning
+
+    try:
+        warning = governing_seat_warning(store.get_profile(args.profile))
+    except StellaError:
+        warning = None
+    if warning:
+        print(f"Warning: {warning}")
     controller = TrainController()
     events = {"last": 0}
 
@@ -1341,7 +1397,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = _cmd("update-profile", "change a profile",
              "examples:\n"
              "  stella update-profile lfm3-tool --role fast "
-             "--tag lfm3:1.7b")
+             "--tag lfm3:1.7b\n"
+             "  stella update-profile lfm3-tool "
+             "--config '{\"key\": \"value\"}' --dependencies a,b")
     p.add_argument("name", help="profile name, e.g. lfm3-tool")
     p.add_argument("--role", default=None,
                    help="what this profile is for, in plain words")
@@ -1352,6 +1410,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--base", default=None,
                    help="Hugging Face repo or local folder of the base "
                    "weights")
+    p.add_argument("--config", default=None,
+                   help="profile config as a JSON object, e.g. "
+                   "'{\"key\": \"value\"}' (replaces the whole config)")
+    p.add_argument("--dependencies", default=None,
+                   help="dependencies as a comma-separated list, e.g. "
+                   "torch,transformers (replaces the whole list)")
+    p.add_argument("--governing-seat", default=None,
+                   help="the Forge governing seat this profile is bound "
+                   "for: driver, reviewer, tester, or fast (empty to "
+                   "clear it)")
     p.set_defaults(func=cmd_update_profile)
 
     p = _cmd("show-profile", "show a profile's record",

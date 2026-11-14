@@ -3258,6 +3258,7 @@ accounts for their findings.)
 - **Origin:** audit #2 T12
 - **Covers:** A2-W10, A2-D12; A7-W8, A7-U3, A7-D7
 - **Effort:** S
+- **Status:** DONE in v0.19.0 (2026-11-14) — mode is a read-only label + "Why this mode" notes (no picker resurrected; legacy settings["notes"] dropped on read AND healed on disk).
 - **Problem:** `metamorph.notes` has no UI (the combo edits mode
   only); `settings["notes"]` exists in the defaults but nothing
   reads or writes it; `notes.md` is the only notes surface the user
@@ -3288,6 +3289,7 @@ accounts for their findings.)
 - **Origin:** audit #1 T10
 - **Covers:** A1-W7, A1-D12; A1-G1 (first step)
 - **Effort:** M
+- **Status:** DONE in v0.19.0 (2026-11-14) — config and dependencies are editable in the window (scrolling form + pinned action row) and from the terminal (update-profile --config/--dependencies).
 - **Problem:** `config` and `dependencies` exist in the manifest and
   `update_profile` allows changing them, but no UI and no CLI
   reaches them — the only way to set them is hand-editing JSON. The
@@ -3310,6 +3312,7 @@ accounts for their findings.)
 - **Origin:** audit #1 T8
 - **Covers:** A1-W6, A1-G2, A1-D8
 - **Effort:** M
+- **Status:** DONE in v0.19.0 (2026-11-14) — roles come from one canonical list (CANONICAL_ROLES, 7), the seat combo defaults to "(not bound)", and a profile bound for a governing seat warns before training on a base that is not abliterated (warning fires on marker + stock base only; silent on role alone and for abliterated bases). The canonical roles list is UNCONFIRMED with Joshua, and abliterated detection is heuristic (tag/base markers heretic, uncensored, abliterat) — both noted in CHANGELOG.
 - **Problem:** There is no canonical seat list, so the rename plan
   (role names from System Test measurements) has nothing to land on,
   and nothing connects a profile's role to a Forge seat or to the
@@ -3400,6 +3403,7 @@ accounts for their findings.)
 - **Origin:** repo-audit verdict (R24)
 - **Covers:** R24
 - **Effort:** S
+- **Status:** DONE in v0.19.0 (2026-11-14) — delete dialogs name what they destroy (delete/purge text helpers).
 - **Problem:** The delete confirm dialogs say the delete "cannot
   be undone" but never say what is being destroyed — no
   profile/project name, no project count, no mention of
@@ -3420,6 +3424,7 @@ accounts for their findings.)
 - **Origin:** audit #1 T6
 - **Covers:** A1-W10, A1-D7
 - **Effort:** S
+- **Status:** DONE in v0.19.0 (2026-11-14) — profiles clone (the processor setting comes along, the governing-seat binding does not, no projects by default; clone_project gains target_profile).
 - **Problem:** Same base, second role means re-entering everything
   by hand. The common case — one base, two jobs (e.g. qwen3.5:2b as
   all-rounder AND as vision backup) — has no shortcut.
@@ -3437,6 +3442,7 @@ accounts for their findings.)
 - **Origin:** audit #1 T9 (dialog items split out to T11) + audit #4 T13 (row-tooltips part); extended by the repo-audit verdict (R15)
 - **Covers:** A1-U1, A1-U5, A1-D10 (tooltip/role part); A4-U1, A4-D16 (row-tooltips part); A1-W6 (control-consistency part); R15
 - **Effort:** M
+- **Status:** DONE in v0.19.0 (2026-11-14) — the role combo is editable with the canonical list and nothing selected by default (currentIndex -1).
 - **Problem:** Two verified UI flaws, plus a re-verification. (A1-U1) Long tags truncate in the profile list (`maternion/minicpm5-heretic:2b` shows as `matern...`, `qwen3-vl:2b-instru`) and there is no tooltip — the only `setToolTip` in the whole GUI is on the metamorph combo — so hovering tells you nothing. Audit #4 re-verified this (A4-U1): the MiniCPM5 row is 343px of text in a 250px pane with no tooltip, and a horizontal scrollbar is the only escape. The verdict re-verified (R15): long tags truncate in the 260 px profile pane. (A1-U5) Role is a combo in the dialog but a bare text field in the detail panel — same field, two controls, and the suggestions vanish the moment the profile exists. (The dialog items from this task — A1-U2, A1-U3 — moved to the P0 dialog task T11: audit #4 raised the dialog to P0.)
 - **Fix:** Set a tooltip on every profile list row showing the full display name, role, and tag (A4-D16, row part). Replace the detail panel's role text field with the same editable combo (canonical list from T116, plus custom entry).
 - **Done:** Hovering a truncated row shows the full tag; the detail panel's role field offers the same suggestions as the dialog. Tests: tooltip text present on rows, detail role combo offers the canonical list.
@@ -3469,6 +3475,7 @@ accounts for their findings.)
 - **Origin:** audit #4 T20
 - **Covers:** A4-U4, A4-U5, A4-D19
 - **Effort:** M
+- **Status:** DONE in v0.19.0 (2026-11-14) — empty lists say what to do next ("No profiles yet - New profile to start").
 - **Problem:** With an empty store, every action button is
   enabled: Start, Resume, Export GGUF, Run refusal probe,
   Export, Import, Rename, Delete. Clicking Rename/Delete/Save
@@ -3515,6 +3522,7 @@ accounts for their findings.)
 - **Origin:** audit #4 T18
 - **Covers:** A4-W15, A4-W16, A4-D14
 - **Effort:** S
+- **Status:** DONE in v0.19.0 (2026-11-14) — the splitter cannot lose a pane, even for a returning user (setChildrenCollapsible(False) re-asserted after restoreState — coordinator fix: restoreState brought back the saved collapsible flag).
 - **Problem:** `splitter.setSizes([260, 200, 640])` (`gui.py:270`)
   produced `[270, 273, 531]`: the middle pane cannot be 200px
   wide because its three buttons need ~273px, so the detail pane
@@ -3541,6 +3549,7 @@ accounts for their findings.)
 - **Covers:** A4-U6, A4-G1, A4-G2, A4-D20; A6-U5, A6-D14; R17, R18, R22 (shortcuts part)
 - **Effort:** M
 - **Note:** Extended by T82 (Audit #9 R15).
+- **Status:** DONE in v0.19.0 (2026-11-14) — window chrome: icon + geometry persistence + shortcuts pinned by tests (Ctrl+N/Ctrl+S/Ctrl+G/F1/F2 from v0.12.0).
 - **Problem:** Three chrome gaps. (A4-U6) No window icon:
   `windowIcon().isNull()` is true; the title bar shows Qt's
   default icon, although the gold-star icon ships in `assets/`

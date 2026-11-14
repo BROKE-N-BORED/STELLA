@@ -1,5 +1,86 @@
 # Changelog
 
+## v0.19.0 — 2026-11-14
+
+The profiles/roles/chrome slice (audit tasks T114, T115, T116,
+T120, T121, T122, T124, T126, T127): profiles clone, roles come
+from one canonical list with a governing-seat marker and a
+pre-train warning, config and dependencies are editable in the
+window and from the terminal, the project window carries the
+"Why this mode" notes, delete dialogs name what they destroy,
+empty lists say what to do next, and the splitter cannot lose a
+pane.
+
+- T114 — the three notes are one surface each, in the right
+  place: `settings["notes"]` is dropped (it lived in the
+  defaults but nothing ever read or wrote it; old manifests
+  drop it when they are read, and old packages import with it
+  dropped), the Project window shows the stored mode with a
+  "Why this mode" notes field under it (the mode picker stays
+  gone — it was deliberately removed in v0.8 — and the word
+  stays out of visible text), and `notes.md` stays the running
+  log, now headed "Project notes". The CLI flags
+  (`--metamorph-notes` on create-project and update-project)
+  already landed in v0.18; the README now says which notes
+  live where.
+- T115 — config and dependencies are reachable: the profile
+  window has a JSON text area for config and an editable list
+  for dependencies, validated on save (bad JSON is refused
+  with the parse error and nothing is written), and
+  `update-profile` takes `--config` and `--dependencies` too.
+  The profile window's form scrolls now (T80's pattern, as in
+  the project window): the added section made the window
+  taller than a small screen, which squeezed every help label
+  to two lines. This is the first step toward the profile's
+  own clean environment only — full environment management is
+  T182, hard-gated on Joshua's decision.
+- T116 — one canonical role list (driver, reviewer, vision,
+  fast, tester, all-rounder, utility), offered by the role
+  field everywhere it appears; roles outside it are still
+  allowed but flagged as custom. The list is UNCONFIRMED with
+  Joshua (no approver was awake — it is the roster's seat
+  vocabulary). A profile can be marked as bound for a Forge
+  governing seat (driver, reviewer, tester, fast — the T90
+  set): a bound profile with a stock base warns before any
+  training starts, naming the seat and the base (the window
+  asks, the CLI warns and proceeds), and its probe runs as a
+  gate the same way a governing role does. "Abliterated" has
+  no stored flag, so it is detected heuristically from the
+  tag/base name markers (heretic, uncensored, abliterat).
+- T120 — delete dialogs name the item (display name + slug),
+  count what goes with it (projects, checkpoints, notes), and
+  state where it goes (the trash) or that it is permanent
+  (purge, including the item count on Empty trash).
+- T121 — clone profile: the Profile window's Clone button
+  (and `Store.clone_profile`) copies tag, base, role,
+  processor, config, and dependencies under a new name, with
+  zero projects by default and an offer to copy the projects
+  too. The processor is copied verbatim (its meaning is
+  undecided, T128); the governing-seat marker is not copied —
+  a binding is per profile.
+- T122 — every profile list row already carried its full text
+  as a tooltip (T78: display name, role, tag), pinned by a
+  test; the detail panel's role text field is now the same
+  editable combo as the canonical list, with custom entry.
+- T124 — the button half was already done (the v0.4
+  restructure disables the actions with nothing to act on, in
+  the refresh pass); the remainder lands here: an empty store
+  shows "No profiles yet - New profile to start" under the
+  tree, and a profile with no projects shows "No projects
+  yet - New project to start".
+- T126 — the splitter keeps honest minimums (tree 200px,
+  session 480px) and refuses to collapse a pane, so a drag
+  cannot lose a list. The non-collapsible flag is re-asserted
+  after the saved splitter state is restored, because the
+  restore brings back the old collapsible flag too — without
+  that, a returning user's pre-v0.19.0 saved state would have
+  re-enabled collapsing (found by the coordinator's drive).
+- T127 — the window icon, geometry/splitter/session
+  persistence, and the shortcuts (Ctrl+N, Ctrl+S, Ctrl+G, F1,
+  F2) were already in place from earlier versions; this
+  version pins them with an icon test, including the
+  missing-file guard.
+
 ## v0.18.0 — 2026-11-14
 
 The export/import/clone slice (audit tasks T86, T87, T88, T89,

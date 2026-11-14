@@ -29,7 +29,7 @@ from pathlib import Path
 
 from .autoconfig import compute_settings, measure_pc
 
-STELLA_VERSION = "0.18.0"
+STELLA_VERSION = "0.19.0"
 
 # Slug: lowercase letters, digits, dash, underscore. Must start alnum.
 # No dots, no slashes — a slug can never climb out of its directory.
@@ -39,6 +39,83 @@ MAX_SLUG_LEN = 64
 # MetaMorphAi modes (structure only in v0.1 — no codec yet).
 METAMORPH_MODES = ("morph", "compress", "both")
 DEFAULT_METAMORPH_MODE = "morph"
+
+# Canonical roles / Forge seats (T116): the one seat vocabulary,
+# shared with Forge — the role field offers this list everywhere
+# it appears, and the rename plan lands on it. The list is the
+# roster's seat vocabulary; it is UNCONFIRMED with Joshua (no
+# approver was awake when it landed — see the CHANGELOG), so a
+# role outside it is still allowed, just flagged as custom.
+CANONICAL_ROLES = (
+    "driver", "reviewer", "vision", "fast", "tester",
+    "all-rounder", "utility",
+)
+
+# Forge's governing seats (T116, reusing v0.16.0's T90 set): the
+# seats whose models must NOT regain refusals — driver, reviewer,
+# tester, fast. probe.GOVERING_ROLES is this same tuple; the
+# governing-seat marker on a profile may only name one of these.
+GOVERNING_SEATS = ("driver", "reviewer", "tester", "fast")
+
+# Tag/base markers that say a base is abliterated (T116): a
+# heuristic, because "abliterated" has no stored flag — the tag
+# or base ref carries it ("minicpm5-heretic", "uncensored",
+# "abliterated"). Matched as substrings, lowercased, against the
+# tag and the base ref.
+ABLITERATED_MARKERS = ("heretic", "uncensored", "abliterat")
+
+
+def is_custom_role(role) -> bool:
+    """True when a role is set but is not one of the canonical
+    seats (T116): still allowed, just flagged as custom. A blank
+    role is not custom — it is unset."""
+    if not isinstance(role, str):
+        return False
+    role = role.strip().lower()
+    return bool(role) and role not in CANONICAL_ROLES
+
+
+def looks_abliterated(profile: dict) -> bool:
+    """True when the base looks abliterated (T116): one of the
+    ABLITERATED_MARKERS appears in the tag or the base ref. A
+    heuristic — there is no stored abliteration flag, so a base
+    that is abliterated without saying so in its name reads as
+    stock, and the warning fires. That direction is the safe one:
+    a warning that needn't have fired is an annoyance, a warning
+    that didn't fire when it should breaks the seat."""
+    text = " ".join(
+        str((profile or {}).get(key) or "")
+        for key in ("ollama_tag", "base_ref")
+    ).lower()
+    return any(marker in text for marker in ABLITERATED_MARKERS)
+
+
+def governing_seat_warning(profile: dict) -> str | None:
+    """The pre-train warning for a governing-seat profile (T116),
+    or None when no warning is due. Fires only when a governing
+    seat is MARKED on the profile (the governing_seat field) and
+    the base is not abliterated — a governing ROLE alone does not
+    warn here (the probe gates governing roles at probe time, T90;
+    the marker is the explicit binding). The text names the seat
+    and the base."""
+    seat = str((profile or {}).get("governing_seat") or "").strip().lower()
+    if seat not in GOVERNING_SEATS:
+        return None
+    if looks_abliterated(profile):
+        return None
+    base = (
+        (profile or {}).get("base_ref")
+        or (profile or {}).get("ollama_tag")
+        or "not set"
+    )
+    return (
+        f"This profile is bound for the {seat} seat in Code Forge, "
+        "which needs an abliterated base, but its base is "
+        f"{base} (no abliteration marker in the tag or base ref). "
+        "Training on a stock base for a governing seat teaches it "
+        "to refuse ordinary work."
+    )
+
 
 # Training methods. "full" is listed so old projects still show it,
 # but it does not run on this PC (train.py always trains LoRA).
@@ -124,7 +201,10 @@ DEFAULT_SETTINGS = {
     "val_fraction": 0.1,
     "warmup_steps": 5,
     "seed": 42,
-    "notes": "",
+    # T114: the old "notes" key is gone — it lived in the
+    # defaults but nothing read or wrote it (the metamorph
+    # notes and notes.md are the real notes). validate_settings
+    # drops it from old manifests on sight, never persisting it.
     # T34: hand-supplied LoRA target layers for architectures the
     # auto-detection does not recognize. Empty means "find them
     # yourself" — the normal case; a non-empty list is used as-is.
@@ -250,9 +330,9 @@ def validate_settings(settings: dict) -> dict:
             cleaned[key] = value
             continue
         if key == "notes":
-            if not isinstance(value, str):
-                raise StellaError(f"notes must be text, not {value!r}")
-            cleaned[key] = value
+            # T114: the dead settings key, dropped on sight — an
+            # old manifest (or an old package) carrying it
+            # migrates by being read, never persisted again.
             continue
         if key == "target_modules":
             # T34: a list of layer leaf names, or empty for
@@ -277,7 +357,7 @@ def validate_settings(settings: dict) -> dict:
         if rule is None:
             raise StellaError(
                 f"there is no setting called {key!r}. The settings are: "
-                f"{', '.join(sorted(SETTING_RULES))}, method, notes, "
+                f"{', '.join(sorted(SETTING_RULES))}, method, "
                 "target_modules"
             )
         kind, low, high = rule
@@ -342,6 +422,22 @@ def _read_json(path: Path) -> dict:
     if not isinstance(data, dict):
         raise StellaError(f"{path.name} must hold a JSON object")
     return data
+
+
+def _migrate_project_file(data: dict, manifest: Path) -> None:
+    """T114 migration: drop the dead settings["notes"] key from an
+    old manifest, in memory and on disk. Only writes when the key
+    is actually there, so a migrated manifest is never rewritten.
+    The write is best effort — a failure leaves the in-memory
+    record clean (and the next update persists it), so a write
+    problem never turns a healthy project into a damaged row."""
+    settings = data.get("settings")
+    if isinstance(settings, dict) and "notes" in settings:
+        del settings["notes"]
+        try:
+            _write_json(manifest, data)
+        except StellaError:
+            pass
 
 
 class Store:
@@ -516,6 +612,7 @@ class Store:
         config: dict | None = None,
         processor: str = "",
         dependencies: list | None = None,
+        governing_seat: str = "",
         created: str | None = None,
         updated: str | None = None,
     ) -> dict:
@@ -523,6 +620,12 @@ class Store:
         pdir = self.profile_dir(slug)
         if (pdir / "profile.json").exists():
             raise StellaError(f"profile {slug!r} already exists")
+        seat = (governing_seat or "").strip().lower()
+        if seat and seat not in GOVERNING_SEATS:
+            raise StellaError(
+                f"governing seat must be one of "
+                f"{', '.join(GOVERNING_SEATS)}, not {governing_seat!r}"
+            )
         data = {
             "stella_version": STELLA_VERSION,
             "kind": "profile",
@@ -534,6 +637,11 @@ class Store:
             "processor": processor or "",
             "config": dict(config or {}),
             "dependencies": list(dependencies or []),
+            # T116: the governing seat this profile is bound for,
+            # when set ("" means not bound). A bound profile warns
+            # before training unless its base is abliterated, and
+            # its probe runs as a gate (T90).
+            "governing_seat": seat,
             # T118: an import restores the original timestamps
             # instead of stamping fresh ones, so an imported
             # profile keeps its history. Anything else creates
@@ -561,12 +669,25 @@ class Store:
             "processor",
             "config",
             "dependencies",
+            "governing_seat",
         }
         old_tag = data.get("ollama_tag", "")
         old_base = data.get("base_ref", "")
         for key, value in fields.items():
             if key not in allowed:
                 raise StellaError(f"cannot change {key!r} on a profile")
+            if key == "governing_seat":
+                # T116: the marker names a governing seat, or ""
+                # for not bound. Anything else is refused, not
+                # stored — a typo'd seat would silently never warn.
+                seat = (value or "").strip().lower() if isinstance(value, str) else ""
+                if value not in ("", None) and seat not in GOVERNING_SEATS:
+                    raise StellaError(
+                        "governing seat must be one of "
+                        f"{', '.join(GOVERNING_SEATS)}, not {value!r}"
+                    )
+                data[key] = seat
+                continue
             data[key] = value
         # T54 sync rule (interim, until Joshua decides drop vs
         # define): changing the tag updates base_ref unless the
@@ -636,6 +757,57 @@ class Store:
             raise StellaError(f"no profile named {slug!r}")
         self._destroy_profile(slug)
 
+    def clone_profile(
+        self, slug: str, new_slug: str, *, copy_projects: bool = False
+    ) -> dict:
+        """Copy a profile under a new name (T121): the same tag,
+        base, role, processor, config, and dependencies, under
+        its own name, with zero projects by default. The
+        processor value is copied VERBATIM — its meaning is
+        undecided (T128, hard-gated), so the clone never
+        interprets it. The governing-seat marker is NOT copied:
+        a binding is per profile, and the new profile's seat is
+        the user's call. With copy_projects, each project is
+        cloned too (T112's clone: same dataset/settings/mode, no
+        checkpoints, fresh notes). The original is untouched. A
+        name that already exists is refused, like any other
+        create."""
+        slug = validate_slug(slug, "profile name")
+        new_slug = validate_slug(new_slug, "new profile name")
+        src = self.get_profile(slug)
+        # A custom display name travels; a default one (equal to
+        # the slug) becomes the new slug instead of lying about
+        # which profile it is — the same rule as clone_project.
+        display = src.get("display_name", slug)
+        if display == slug:
+            display = ""
+        data = self.create_profile(
+            new_slug,
+            ollama_tag=src.get("ollama_tag", ""),
+            role=src.get("role", ""),
+            display_name=display,
+            base_ref=src.get("base_ref", ""),
+            config=dict(src.get("config") or {}),
+            processor=src.get("processor", ""),
+            dependencies=list(src.get("dependencies") or []),
+        )
+        if copy_projects:
+            try:
+                for proj in self.list_projects(slug):
+                    if proj.get("_damaged"):
+                        continue
+                    self.clone_project(
+                        slug, proj["name"], proj["name"],
+                        target_profile=new_slug,
+                    )
+            except BaseException:
+                # A failed project copy leaves nothing behind:
+                # the half-cloned profile is destroyed, so a
+                # clone either lands whole or not at all.
+                self._destroy_profile(new_slug)
+                raise
+        return data
+
     # -- projects ---------------------------------------------------
     def list_projects(self, profile: str) -> list[dict]:
         slug = validate_slug(profile, "profile name")
@@ -648,6 +820,14 @@ class Store:
             if d.is_dir() and manifest.is_file():
                 try:
                     entry = _read_json(manifest)
+                    # T114 migration: an old manifest's dead
+                    # settings["notes"] key is dropped here, in
+                    # memory and on disk. It runs BEFORE the
+                    # status normalization below, so the
+                    # migration write never persists the new
+                    # status word early (T53 keeps that
+                    # in-memory-only until the next real write).
+                    _migrate_project_file(entry, manifest)
                     # Legacy statuses read as their current word
                     # (T53), in memory only.
                     if "status" in entry:
@@ -678,6 +858,9 @@ class Store:
         data.setdefault("name", project)
         data.setdefault("profile", validate_slug(profile, "profile name"))
         data.setdefault("status", "draft")
+        # T114 migration: an old manifest's dead settings["notes"]
+        # key is dropped here, in memory and on disk.
+        _migrate_project_file(data, manifest)
         # A legacy status reads as its current word (T53): a
         # v0.1-v0.12 "trained" project is "done" now. The file on
         # disk is untouched — the next write persists the new word.
@@ -883,7 +1066,8 @@ class Store:
         self._destroy_project(profile, project)
 
     def clone_project(
-        self, profile: str, project: str, new_slug: str
+        self, profile: str, project: str, new_slug: str,
+        target_profile: str | None = None,
     ) -> dict:
         """Copy a project under a new name (T112): the same
         dataset, settings, and metamorph mode (notes included —
@@ -893,10 +1077,16 @@ class Store:
         exists is refused, like any other create. When the
         dataset file lives inside the source project (a bundled
         import), the file is copied into the clone too, so the
-        clone's dataset ref still resolves."""
+        clone's dataset ref still resolves. `target_profile`
+        (T121) clones into a different profile — a profile clone
+        copying its projects — instead of the source profile."""
         profile = validate_slug(profile, "profile name")
         project = validate_slug(project, "project name")
         new_slug = validate_slug(new_slug, "new project name")
+        dst_profile = validate_slug(
+            target_profile if target_profile is not None else profile,
+            "profile name",
+        )
         src = self.get_project(profile, project)
         block = src.get("metamorph")
         metamorph_notes = (
@@ -911,7 +1101,7 @@ class Store:
         if display == project:
             display = ""
         data = self.create_project(
-            profile,
+            dst_profile,
             new_slug,
             display_name=display,
             dataset_ref=src.get("dataset_ref", ""),
@@ -925,10 +1115,10 @@ class Store:
             if src_file.is_file():
                 shutil.copy2(
                     src_file,
-                    self.project_dir(profile, new_slug) / ref,
+                    self.project_dir(dst_profile, new_slug) / ref,
                 )
         self.write_notes(
-            profile,
+            dst_profile,
             new_slug,
             f"# {data.get('display_name', new_slug)}\n\n"
             f"Cloned from {project}.\n",

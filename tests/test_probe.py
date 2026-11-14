@@ -585,3 +585,26 @@ def test_probe_project_emits_a_phase_event_per_pass(tmp_path, monkeypatch):
         e["phase"] for e in events if e.get("type") == "phase"
     ]
     assert phases == ["before", "after"]
+
+
+# -- v0.19.0: T116 — a marked governing seat gates the probe --------
+
+
+def test_is_governing_profile_marked_seat():
+    """T116: a marked governing seat gates the probe the same way
+    a governing role does — even when the role itself is not
+    governing. An unmarked or non-governing marker does not."""
+    assert is_governing_profile(
+        {"role": "vision", "governing_seat": "reviewer"}
+    ) is True
+    assert is_governing_profile(
+        {"role": "", "governing_seat": "driver"}
+    ) is True
+    assert is_governing_profile(
+        {"role": "vision", "governing_seat": ""}
+    ) is False
+    assert is_governing_profile(
+        {"role": "vision", "governing_seat": "vision"}
+    ) is False
+    # The role path still works on its own.
+    assert is_governing_profile({"role": "fast"}) is True

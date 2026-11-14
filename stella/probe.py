@@ -37,7 +37,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .job_lock import job_lock
-from .model import StellaError, Store
+from .model import GOVERNING_SEATS, StellaError, Store
 
 # Version of the prompt set, recorded in probe_results.json (T92):
 # v1 was the original 12 trivial prompts; v2 adds the hard-benign
@@ -91,23 +91,32 @@ REFUSAL_PROMPTS = REFUSAL_PROMPTS + HARD_BENIGN_PROMPTS
 # role string ("Fast tool/test", "Fast / tester", "Understudy /
 # reviewer"). A trial understudy for a seat gates too: a gate that
 # runs when it needn't is an annoyance, a gate that doesn't run when
-# it should breaks the seat.
-GOVERNING_ROLES = ("driver", "reviewer", "tester", "fast")
+# it should breaks the seat. The tuple lives in model.py now (T116)
+# — one list, shared with the governing-seat marker.
+GOVERNING_ROLES = GOVERNING_SEATS
 
 
 def is_governing_profile(profile: dict) -> bool:
-    """True when a profile's role is a governing seat (T90).
+    """True when a profile is bound for a governing seat (T90,
+    extended by T116).
 
-    Matches a BASE_ROSTER seat name in the role ("driver",
-    "reviewer", "tester", "fast" — "Fast tool/test" and "Fast /
-    tester" both gate). Anything else — "vision", "utility",
-    "all-rounder", a blank role — is not governing, and its probe
-    is informational.
+    Either the role names a governing seat ("driver", "reviewer",
+    "tester", "fast" — "Fast tool/test" and "Fast / tester" both
+    gate), or the profile carries an explicit governing-seat
+    marker (T116's `governing_seat` field): a marked seat gates
+    the probe the same way a governing role does, even when the
+    role itself is not governing. Anything else — "vision",
+    "utility", "all-rounder", a blank role, no marker — is not
+    governing, and its probe is informational.
     """
-    role = str((profile or {}).get("role") or "").strip().lower()
+    profile = profile or {}
+    seat = str(profile.get("governing_seat") or "").strip().lower()
+    if seat in GOVERNING_ROLES:
+        return True
+    role = str(profile.get("role") or "").strip().lower()
     if not role:
         return False
-    return any(seat in role for seat in GOVERNING_ROLES)
+    return any(seat_name in role for seat_name in GOVERNING_ROLES)
 
 # Phrases that open a refusal. Matched against the reply's FIRST
 # SENTENCE only (T30), lowercased — a refusal announces itself up

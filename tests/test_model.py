@@ -827,3 +827,241 @@ def test_purge_profile_and_project_delete_forever(store):
         store.purge_profile("ghost")
     with pytest.raises(StellaError, match="no project"):
         store.purge_project("p1", "ghost")
+
+
+# -- v0.19.0: T114, T116, T121 ----------------------------------------
+
+
+def test_settings_notes_dropped_from_new_projects(store):
+    """T114 Done: settings["notes"] is gone from new manifests."""
+    from stella.model import DEFAULT_SETTINGS
+
+    assert "notes" not in DEFAULT_SETTINGS
+    store.create_profile("p1")
+    data = store.create_project("p1", "proj")
+    assert "notes" not in data["settings"]
+    on_disk = json.loads(
+        (
+            store.home / "profiles" / "p1" / "projects" / "proj"
+            / "project.json"
+        ).read_text()
+    )
+    assert "notes" not in on_disk["settings"]
+
+
+def test_settings_notes_migrated_from_old_manifest(store):
+    """T114 Done: migration removes the dead key from an existing
+    manifest, in memory and on disk."""
+    store.create_profile("p1")
+    store.create_project("p1", "proj")
+    manifest = (
+        store.home / "profiles" / "p1" / "projects" / "proj"
+        / "project.json"
+    )
+    data = json.loads(manifest.read_text())
+    data["settings"]["notes"] = "a note from before the drop"
+    manifest.write_text(json.dumps(data))
+    got = store.get_project("p1", "proj")
+    assert "notes" not in got["settings"]
+    again = json.loads(manifest.read_text())
+    assert "notes" not in again["settings"]
+
+
+def test_settings_notes_migrated_by_list_projects(store):
+    """T114: the list path migrates too, not just get_project."""
+    store.create_profile("p1")
+    store.create_project("p1", "proj")
+    manifest = (
+        store.home / "profiles" / "p1" / "projects" / "proj"
+        / "project.json"
+    )
+    data = json.loads(manifest.read_text())
+    data["settings"]["notes"] = "stale"
+    manifest.write_text(json.dumps(data))
+    listed = store.list_projects("p1")
+    assert "notes" not in listed[0]["settings"]
+    assert "notes" not in json.loads(manifest.read_text())["settings"]
+
+
+def test_validate_settings_drops_legacy_notes():
+    """T114: a settings dict carrying the old key validates, with
+    the key dropped — old packages import instead of failing."""
+    from stella.model import validate_settings
+
+    cleaned = validate_settings({"notes": "old", "rank": 8})
+    assert cleaned == {"rank": 8}
+
+
+def test_canonical_roles_list():
+    """T116 Done: one canonical role/seat list, the roster's seat
+    vocabulary."""
+    from stella.model import CANONICAL_ROLES
+
+    assert CANONICAL_ROLES == (
+        "driver", "reviewer", "vision", "fast", "tester",
+        "all-rounder", "utility",
+    )
+
+
+def test_is_custom_role():
+    """T116: a role outside the canonical list is custom; a
+    canonical role or a blank one is not."""
+    from stella.model import is_custom_role
+
+    assert is_custom_role("drvier") is True
+    assert is_custom_role("judge") is True
+    assert is_custom_role("fast") is False
+    assert is_custom_role(" Fast ") is False
+    assert is_custom_role("") is False
+    assert is_custom_role(None) is False
+
+
+def test_looks_abliterated_heuristic():
+    """T116: the abliteration heuristic reads the tag/base name
+    markers — there is no stored flag."""
+    from stella.model import looks_abliterated
+
+    assert looks_abliterated(
+        {"ollama_tag": "maternion/minicpm5-heretic:2b"}
+    ) is True
+    assert looks_abliterated({"base_ref": "x/uncensored-7b"}) is True
+    assert looks_abliterated({"base_ref": "x/abliterated-7b"}) is True
+    assert looks_abliterated({"ollama_tag": "lfm3:1.7b"}) is False
+    assert looks_abliterated({"base_ref": "LiquidAI/LFM3-1.7B"}) is False
+    assert looks_abliterated({}) is False
+
+
+def test_governing_seat_warning():
+    """T116 Done: marking a profile for a governing seat with a
+    stock base produces a warning naming the seat and the base;
+    an abliterated base, an unmarked profile, or a governing
+    role alone does not warn."""
+    from stella.model import governing_seat_warning
+
+    warning = governing_seat_warning(
+        {"governing_seat": "driver", "base_ref": "LiquidAI/LFM3-1.7B"}
+    )
+    assert warning is not None
+    assert "driver" in warning
+    assert "LiquidAI/LFM3-1.7B" in warning
+    # An abliterated base does not warn.
+    assert governing_seat_warning(
+        {"governing_seat": "driver", "ollama_tag": "x-heretic:2b"}
+    ) is None
+    # No marker, no warning — a governing role alone does not
+    # warn here (the probe gates governing roles at probe time).
+    assert governing_seat_warning(
+        {"role": "driver", "base_ref": "LiquidAI/LFM3-1.7B"}
+    ) is None
+    assert governing_seat_warning(
+        {"governing_seat": "", "base_ref": "LiquidAI/LFM3-1.7B"}
+    ) is None
+    # A non-governing seat value never warns.
+    assert governing_seat_warning(
+        {"governing_seat": "vision", "base_ref": "x"}
+    ) is None
+
+
+def test_governing_seat_stored_and_validated(store):
+    """T116: the marker is stored on create and update, and a
+    seat that is not governing is refused, not stored."""
+    data = store.create_profile("p1", governing_seat="reviewer")
+    assert data["governing_seat"] == "reviewer"
+    assert store.get_profile("p1")["governing_seat"] == "reviewer"
+    with pytest.raises(StellaError, match="governing seat"):
+        store.create_profile("p2", governing_seat="vision")
+    with pytest.raises(StellaError, match="governing seat"):
+        store.update_profile("p1", governing_seat="bogus")
+    updated = store.update_profile("p1", governing_seat="")
+    assert updated["governing_seat"] == ""
+    # The seat name normalizes to lowercase.
+    updated = store.update_profile("p1", governing_seat="Driver")
+    assert updated["governing_seat"] == "driver"
+
+
+def test_clone_profile_copies_fields(store):
+    """T121 Done: the clone has the same tag, base, role,
+    processor, config, and dependencies under its own name, with
+    zero projects; the original is untouched. The processor is
+    copied verbatim (T128: its meaning is undecided). The
+    governing-seat marker is NOT copied — a binding is per
+    profile."""
+    store.create_profile(
+        "p1", ollama_tag="lfm3:1.7b", role="fast",
+        display_name="LFM3 Tool Seat", base_ref="LiquidAI/LFM3-1.7B",
+        processor="some-processor-value", config={"ctx": 8192},
+        dependencies=["torch", "peft"], governing_seat="driver",
+    )
+    store.create_project("p1", "proj")
+    clone = store.clone_profile("p1", "p2")
+    assert clone["name"] == "p2"
+    assert clone["display_name"] == "LFM3 Tool Seat"
+    assert clone["ollama_tag"] == "lfm3:1.7b"
+    assert clone["role"] == "fast"
+    assert clone["base_ref"] == "LiquidAI/LFM3-1.7B"
+    assert clone["processor"] == "some-processor-value"
+    assert clone["config"] == {"ctx": 8192}
+    assert clone["dependencies"] == ["torch", "peft"]
+    assert clone["governing_seat"] == ""
+    assert store.list_projects("p2") == []
+    # The original is untouched, projects and all.
+    assert [p["name"] for p in store.list_projects("p1")] == ["proj"]
+    assert store.get_profile("p1")["governing_seat"] == "driver"
+
+
+def test_clone_profile_default_display_name_becomes_new_slug(store):
+    """T121: a default display name (equal to the slug) becomes
+    the new slug instead of lying about which profile it is."""
+    store.create_profile("p1")
+    clone = store.clone_profile("p1", "p2")
+    assert clone["display_name"] == "p2"
+
+
+def test_clone_profile_copies_projects_when_asked(store):
+    """T121: with copy_projects, each project is cloned too —
+    same dataset/settings/mode, no checkpoints, fresh notes."""
+    store.create_profile("p1", ollama_tag="lfm3:1.7b")
+    store.create_project(
+        "p1", "proj", dataset_ref="data.jsonl",
+        metamorph_mode="both", metamorph_notes="why both",
+    )
+    (store.home / "profiles" / "p1" / "projects" / "proj"
+     / "checkpoints" / "step-10").mkdir(parents=True)
+    store.clone_profile("p1", "p2", copy_projects=True)
+    copied = store.get_project("p2", "proj")
+    assert copied["dataset_ref"] == "data.jsonl"
+    assert copied["metamorph"]["mode"] == "both"
+    assert copied["metamorph"]["notes"] == "why both"
+    ckpts = (
+        store.home / "profiles" / "p2" / "projects" / "proj"
+        / "checkpoints"
+    )
+    assert list(ckpts.iterdir()) == []
+    assert "Cloned from proj" in store.read_notes("p2", "proj")
+    # The source keeps its checkpoint.
+    src_ckpts = (
+        store.home / "profiles" / "p1" / "projects" / "proj"
+        / "checkpoints"
+    )
+    assert [d.name for d in src_ckpts.iterdir()] == ["step-10"]
+
+
+def test_clone_profile_collision_rejected(store):
+    """T121 Done: a clone-name collision is rejected."""
+    store.create_profile("p1")
+    store.create_profile("p2")
+    with pytest.raises(StellaError, match="already exists"):
+        store.clone_profile("p1", "p2")
+    with pytest.raises(StellaError, match="no profile"):
+        store.clone_profile("ghost", "p3")
+
+
+def test_clone_project_into_another_profile(store):
+    """T121: clone_project's target_profile clones into a
+    different profile instead of the source one."""
+    store.create_profile("p1")
+    store.create_profile("p2")
+    store.create_project("p1", "proj", dataset_ref="data.jsonl")
+    store.clone_project("p1", "proj", "proj", target_profile="p2")
+    assert store.get_project("p2", "proj")["dataset_ref"] == "data.jsonl"
+    assert [p["name"] for p in store.list_projects("p1")] == ["proj"]

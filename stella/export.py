@@ -468,6 +468,10 @@ def _profile_manifest_block(prof: dict) -> dict:
         "processor": prof.get("processor", ""),
         "config": prof.get("config", {}),
         "dependencies": prof.get("dependencies", []),
+        # T116: the governing-seat marker travels with the
+        # profile, so an exported and re-imported profile keeps
+        # its binding (and its pre-train warning).
+        "governing_seat": prof.get("governing_seat", ""),
     }
     if prof.get("created"):
         block["created"] = prof["created"]
@@ -762,6 +766,7 @@ def _validate_profile_block(prof: dict) -> None:
     """The schema check for the profile block (T1)."""
     for key in ("display_name", "role", "ollama_tag", "base_ref", "processor"):
         _check_field(prof, key, "str", "profile")
+    _check_field(prof, "governing_seat", "str", "profile")
     _check_field(prof, "config", "dict", "profile")
     _check_field(prof, "dependencies", "str-list", "profile")
     _check_field(prof, "created", "str", "profile")
@@ -1453,6 +1458,7 @@ def _create_profile_from_manifest(store, slug, prof) -> None:
         config=prof.get("config", {}),
         processor=prof.get("processor", ""),
         dependencies=prof.get("dependencies", []),
+        governing_seat=prof.get("governing_seat", ""),
         created=prof.get("created"),
         updated=prof.get("updated"),
     )

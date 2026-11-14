@@ -1794,3 +1794,155 @@ def test_cli_export_gguf_create_runs_ollama_create(
     assert "ollama create p1-proj" in out  # still printed
     assert "Created in Ollama as p1-proj." in out
     assert seen == [("p1-proj", str(modelfile))]
+
+
+# -- v0.19.0: T114, T115, T116 ----------------------------------------
+
+
+def test_cli_create_project_metamorph_notes_flag(home):
+    """T114 Done: the --metamorph-notes flag sets the notes at
+    creation (and update-project sets them later); show-project
+    prints them."""
+    from stella.model import Store
+
+    run_cli(home, "create-profile", "p1")
+    res = run_cli(
+        home, "create-project", "p1", "proj",
+        "--metamorph", "both", "--metamorph-notes", "squeeze it down",
+    )
+    assert res.returncode == 0
+    proj = Store(home).get_project("p1", "proj")
+    assert proj["metamorph"]["notes"] == "squeeze it down"
+    assert proj["metamorph"]["mode"] == "both"
+    res = run_cli(home, "show-project", "p1", "proj")
+    assert "squeeze it down" in res.stdout
+    res = run_cli(
+        home, "update-project", "p1", "proj",
+        "--metamorph-notes", "changed my mind",
+    )
+    assert res.returncode == 0
+    proj = Store(home).get_project("p1", "proj")
+    assert proj["metamorph"]["notes"] == "changed my mind"
+    assert proj["metamorph"]["mode"] == "both"
+
+
+def test_cli_update_profile_config_and_dependencies(home):
+    """T115 Done: config and dependencies are reachable through
+    update-profile, and show-profile prints them."""
+    _seed_cli_home(home)
+    res = run_cli(
+        home, "update-profile", "p1",
+        "--config", '{"ctx": 8192, "flag": true}',
+        "--dependencies", "torch, transformers",
+    )
+    assert res.returncode == 0
+    res = run_cli(home, "show-profile", "p1")
+    assert "ctx" in res.stdout
+    assert "8192" in res.stdout
+    assert "torch, transformers" in res.stdout
+
+
+def test_cli_update_profile_bad_config_json_refused(home):
+    """T115: bad JSON is refused with the parse error, and the
+    old config stays — nothing is written."""
+    from stella.model import Store
+
+    _seed_cli_home(home)
+    run_cli(home, "update-profile", "p1", "--config", '{"keep": true}')
+    res = run_cli(home, "update-profile", "p1", "--config", '{"keep": ')
+    assert res.returncode == 1
+    assert "not valid JSON" in res.stderr
+    assert Store(home).get_profile("p1")["config"] == {"keep": True}
+    res = run_cli(home, "update-profile", "p1", "--config", "[1, 2]")
+    assert res.returncode == 1
+    assert "must be a JSON object" in res.stderr
+    assert Store(home).get_profile("p1")["config"] == {"keep": True}
+
+
+def test_cli_update_profile_governing_seat(home):
+    """T116: the governing-seat marker is set through
+    update-profile and shown by show-profile; a seat that is
+    not governing is refused."""
+    _seed_cli_home(home)
+    res = run_cli(home, "update-profile", "p1", "--governing-seat", "driver")
+    assert res.returncode == 0
+    res = run_cli(home, "show-profile", "p1")
+    assert "governing seat: driver" in res.stdout
+    res = run_cli(home, "update-profile", "p1", "--governing-seat", "vision")
+    assert res.returncode == 1
+    assert "governing seat" in res.stderr
+
+
+def test_cli_show_profile_flags_custom_role(home):
+    """T116: a custom role is flagged in show-profile; a
+    canonical role is not."""
+    _seed_cli_home(home)
+    res = run_cli(home, "show-profile", "p1")
+    assert "custom" not in res.stdout
+    run_cli(home, "update-profile", "p1", "--role", "drvier")
+    res = run_cli(home, "show-profile", "p1")
+    assert "role: drvier" in res.stdout
+    assert "custom" in res.stdout
+
+
+def test_cli_train_governing_seat_warning(home, monkeypatch, capsys):
+    """T116: training a profile bound for a governing seat on a
+    stock base warns on the CLI, naming the seat and the base —
+    and proceeds (the CLI warns, the window asks)."""
+    import stella.cli as cli_mod
+    import stella.train as train_mod
+    from stella.model import Store
+
+    monkeypatch.setenv("STELLA_HOME", str(home))
+    monkeypatch.setattr(
+        train_mod, "train_project",
+        lambda *a, **k: {
+            "steps": 3, "final_loss": 5.5, "final_val_loss": 5.0,
+            "trainable_params": 12345, "ram_estimate_gb": 4.2,
+        },
+    )
+    store = Store(home)
+    store.create_profile(
+        "p1", base_ref="test/tiny-model", governing_seat="driver"
+    )
+    store.create_project(
+        "p1", "proj", dataset_ref="sample-tool-calls.jsonl"
+    )
+    code = cli_mod.main(["train", "p1", "proj"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "Warning: " in out
+    assert "driver" in out
+    assert "test/tiny-model" in out
+
+
+def test_cli_train_governing_seat_abliterated_no_warning(
+    home, monkeypatch, capsys
+):
+    """T116: the same bound seat on an abliterated base warns
+    about nothing."""
+    import stella.cli as cli_mod
+    import stella.train as train_mod
+    from stella.model import Store
+
+    monkeypatch.setenv("STELLA_HOME", str(home))
+    monkeypatch.setattr(
+        train_mod, "train_project",
+        lambda *a, **k: {
+            "steps": 3, "final_loss": 5.5, "final_val_loss": 5.0,
+            "trainable_params": 12345, "ram_estimate_gb": 4.2,
+        },
+    )
+    store = Store(home)
+    store.create_profile(
+        "p1", ollama_tag="minicpm5-heretic:2b",
+        base_ref="test/tiny-model", governing_seat="driver",
+    )
+    store.create_project(
+        "p1", "proj", dataset_ref="sample-tool-calls.jsonl"
+    )
+    code = cli_mod.main(["train", "p1", "proj"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "bound for" not in out
+    assert "abliterated base" not in out

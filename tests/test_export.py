@@ -1582,3 +1582,39 @@ def test_import_progress_reports_bytes(seeded, tmp_path):
     assert seen
     assert seen[-1][0] == seen[-1][1]
     assert seen[-1][1] > 0
+
+
+# -- v0.19.0: T116 — the governing-seat marker travels with the profile --
+
+
+def test_export_profile_governing_seat_round_trip(tmp_path):
+    """T116: a profile export carries the governing-seat marker,
+    and the import brings it back — the binding (and its
+    pre-train warning) survives the round trip."""
+    src = Store(tmp_path / "src-home")
+    src.create_profile(
+        "solo", ollama_tag="lfm3:1.7b", role="fast",
+        governing_seat="driver",
+    )
+    out = export_mod.export_profile(src, "solo", tmp_path)
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert manifest["profile"]["governing_seat"] == "driver"
+    src.delete_profile("solo")
+    export_mod.import_export(src, out)
+    assert src.get_profile("solo")["governing_seat"] == "driver"
+
+
+def test_old_package_without_governing_seat_imports(tmp_path):
+    """T116: a package written before the marker existed imports
+    fine — the marker just reads as unbound. (The manifest
+    itself is not checksummed, so deleting the key from it
+    simulates an old package exactly.)"""
+    src = Store(tmp_path / "src-home")
+    src.create_profile("solo", ollama_tag="lfm3:1.7b", role="fast")
+    out = export_mod.export_profile(src, "solo", tmp_path)
+    manifest = json.loads((out / "manifest.json").read_text())
+    del manifest["profile"]["governing_seat"]
+    (out / "manifest.json").write_text(json.dumps(manifest))
+    fresh = Store(tmp_path / "fresh-home")
+    export_mod.import_export(fresh, out)
+    assert fresh.get_profile("solo")["governing_seat"] == ""

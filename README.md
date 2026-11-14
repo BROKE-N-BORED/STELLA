@@ -154,6 +154,21 @@ job, export it as a usable package.
   the CLI can rename, delete, update, and show profiles and
   projects; a second Ctrl+C exits a run at once; and project
   notes keep a rotating backup (notes.md.1).
+- v0.19.0 profiles/roles/chrome (2026-11-14): profiles clone
+  (Profile window > Clone, with an offer to copy the projects
+  too); the role field is a combo over one canonical seat list
+  (driver, reviewer, vision, fast, tester, all-rounder,
+  utility — unconfirmed with Joshua, so other roles are still
+  allowed and flagged as custom); a profile can be bound for a
+  Forge governing seat, and a bound profile warns before
+  training unless its base is abliterated; config and
+  dependencies are editable in the profile window and through
+  `update-profile`; the project window shows the stored mode
+  with a "Why this mode" notes field; delete dialogs name the
+  item and count what goes with it; empty lists say what to do
+  next; the splitter cannot lose a pane; and the dead
+  `settings["notes"]` key is gone (old manifests migrate on
+  read).
 
 ## Install
 
@@ -231,12 +246,17 @@ nothing trains silently and nothing downloads on its own.
   reference, config, processor/tokenizer, dependencies. The base stays
   clean and untouched — Stella only ever points at it, never modifies
   it. Each profile carries a friendly **role** name (driver, reviewer,
-  vision…) so the roster reads by job, not by cryptic tag. The Ollama
-  tag stays the identifier underneath. For training, a profile also
-  carries a **base ref**: the Hugging Face repo of the base weights
-  (e.g. `LiquidAI/LFM3-1.7B`), or a local folder of HF weights.
-  Training never starts from a GGUF or an Ollama tag — fine-tuning
-  needs transformers weights.
+  vision…) so the roster reads by job, not by cryptic tag — the role
+  field offers one canonical seat list (driver, reviewer, vision,
+  fast, tester, all-rounder, utility), and a role outside it is kept
+  and flagged as custom. A profile can also be **bound for a Forge
+  governing seat** (driver, reviewer, tester, fast): a bound profile
+  warns before training unless its base is abliterated, and its
+  refusal probe runs as a gate. The Ollama tag stays the identifier
+  underneath. For training, a profile also carries a **base ref**: the
+  Hugging Face repo of the base weights (e.g. `LiquidAI/LFM3-1.7B`),
+  or a local folder of HF weights. Training never starts from a GGUF
+  or an Ollama tag — fine-tuning needs transformers weights.
 - **Projects** — fine-tunes live inside a profile as projects: own
   dataset, training settings, checkpoints, notes, fully customizable.
 - **Export** — a finished fine-tune exports as a usable package
@@ -253,6 +273,17 @@ over the notes file: in the project's folder under `~/.stella/`
 (`profiles/<profile>/projects/<project>/`), rename `notes.md.1`
 to `notes.md`. Only the latest previous save is kept — each save
 replaces the backup.
+
+Which notes live where: a project has two notes surfaces. The
+**"Why this mode"** field in the Project window says why this
+project's morph/compress mode was picked (set at creation with
+`stella create-project --metamorph-notes`, or later with
+`stella update-project --metamorph-notes`); it lives in the
+project manifest. **Project notes** (`notes.md`) is the running
+log of the fine-tune — anything worth remembering as the work
+goes on. The old `settings["notes"]` key is gone: it lived in
+the defaults but nothing ever read or wrote it, and old
+manifests drop it when they are read.
 
 ## Training (v0.2)
 
@@ -424,13 +455,13 @@ After install, `stella` works in a terminal:
 
 `stella create-profile <name> [--tag <ollama-tag>] [--role <role>] [--display <name>] [--base <hf-repo>]`
 
-`stella create-project <profile> <name> [--display <name>] [--dataset <file>] [--template <name>] [--metamorph morph|compress|both] [--rank N] [--epochs N] [--learning-rate F] [--batch-size N]`
+`stella create-project <profile> <name> [--display <name>] [--dataset <file>] [--template <name>] [--metamorph morph|compress|both] [--metamorph-notes <why>] [--rank N] [--epochs N] [--learning-rate F] [--batch-size N]`
 
 `stella rename-profile <old> <new>`
 
 `stella delete-profile <name> [--purge]`
 
-`stella update-profile <name> [--role <role>] [--tag <tag>] [--display <name>] [--base <hf-repo>]`
+`stella update-profile <name> [--role <role>] [--tag <tag>] [--display <name>] [--base <hf-repo>] [--config <json>] [--dependencies <a,b>] [--governing-seat <seat>]`
 
 `stella show-profile <name>`
 
@@ -438,7 +469,7 @@ After install, `stella` works in a terminal:
 
 `stella delete-project <profile> <name> [--purge]`
 
-`stella update-project <profile> <name> [--display <name>] [--dataset <file>] [--metamorph morph|compress|both] [--rank N] [--epochs N] [--learning-rate F] [--batch-size N]`
+`stella update-project <profile> <name> [--display <name>] [--dataset <file>] [--metamorph morph|compress|both] [--metamorph-notes <why>] [--rank N] [--epochs N] [--learning-rate F] [--batch-size N]`
 
 `stella show-project <profile> <name>`
 

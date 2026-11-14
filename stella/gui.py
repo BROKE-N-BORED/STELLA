@@ -107,9 +107,14 @@ from .chat_agent import ChatAgent
 from .debug_log import DebugLogger, check_ollama
 from .howto import topic_text, topic_titles
 from .model import (
+    CANONICAL_ROLES,
+    GOVERNING_SEATS,
     STELLA_VERSION,
     StellaError,
     Store,
+    governing_seat_warning,
+    is_custom_role,
+    metamorph_mode,
     metamorph_problem,
     slug_from_model,
 )
@@ -150,6 +155,15 @@ def _help_label(text):
     label.setStyleSheet("color: #9a9a9a; font-size: 11px;")
     label.setWordWrap(True)
     return label
+
+
+def _displayed_name(display, slug):
+    """A profile/project name for a dialog (T120): the display
+    name plus the slug when they differ, just the slug when they
+    are the same."""
+    if display and display != slug:
+        return f"{display!r} ({slug})"
+    return f"{slug!r}"
 
 
 def _weights_label(status):
@@ -1228,16 +1242,50 @@ class ProfileWindow(QDialog):
         self._slug = slug
         self.setWindowTitle(f"Profile: {slug}")
         self.setMinimumWidth(480)
-        layout = QVBoxLayout(self)
+        self.resize(480, 680)
+
+        # The form scrolls and the action row stays pinned under
+        # it (T80's pattern, as in the project window): with the
+        # config section the form is taller than a small screen,
+        # and a dialog taller than the screen falls back to its
+        # minimum size hint — which squeezes every help label to
+        # two lines. The scroll area keeps every label whole.
+        outer = QVBoxLayout(self)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        body = QWidget()
+        layout = QVBoxLayout(body)
+        scroll.setWidget(body)
+        outer.addWidget(scroll, 1)
 
         form = QFormLayout()
         self.display_edit = QLineEdit()
-        self.role_edit = QLineEdit()
-        self.role_edit.setPlaceholderText("driver, reviewer, vision...")
+        # Role (T116/T122): an editable combo offering the
+        # canonical seats, with custom entry still allowed — a
+        # typed role outside the list is kept, and flagged as
+        # custom underneath. Nothing is selected by default:
+        # the combo starts blank and only the load fills it.
+        self.role_combo = QComboBox()
+        self.role_combo.setEditable(True)
+        self.role_combo.addItems(list(CANONICAL_ROLES))
+        self.role_combo.setCurrentIndex(-1)
+        self.role_combo.lineEdit().setPlaceholderText(
+            "driver, reviewer, vision..."
+        )
+        self.custom_role_note = _help_label(
+            "Custom role: not one of the canonical seats."
+        )
+        self.custom_role_note.setVisible(False)
         self.tag_combo = QComboBox()
         self.tag_combo.setEditable(True)
         self.base_edit = QLineEdit()
         self.base_edit.setPlaceholderText("LiquidAI/LFM3-1.7B")
+        # Governing seat (T116): the seat this profile is bound
+        # for, when set. Only the four governing seats are
+        # offered; "(not bound)" is the unset state.
+        self.seat_combo = QComboBox()
+        self.seat_combo.addItem("(not bound)")
+        self.seat_combo.addItems(list(GOVERNING_SEATS))
         form.addRow("Display name", self.display_edit)
         form.addRow(
             "",
@@ -1245,12 +1293,22 @@ class ProfileWindow(QDialog):
                 "Just a label for the list. It already says the model's name."
             ),
         )
-        form.addRow("Role", self.role_edit)
+        form.addRow("Role", self.role_combo)
+        form.addRow("", self.custom_role_note)
         form.addRow(
             "",
             _help_label(
                 "Only matters if Code Forge uses this profile as a seat "
                 "(driver, reviewer...). Leave blank otherwise."
+            ),
+        )
+        form.addRow("Governing seat", self.seat_combo)
+        form.addRow(
+            "",
+            _help_label(
+                "Set only when this model will fill a Forge "
+                "governing seat. A bound profile warns before "
+                "training on a stock base."
             ),
         )
         form.addRow("Ollama tag", self.tag_combo)
@@ -1276,22 +1334,66 @@ class ProfileWindow(QDialog):
         # could answer. It stays in profile.json for compatibility.
         layout.addLayout(form)
 
+        # Config and dependencies (T115): the first step toward
+        # the profile's own clean environment — the values are
+        # editable here and through update-profile, and
+        # show-profile prints them. Full environment management
+        # is T182, not this: nothing here installs or runs
+        # anything.
+        config_section = CollapsibleSection("Config and dependencies")
+        config_section.content_layout.addWidget(QLabel("Config (JSON)"))
+        self.config_edit = QPlainTextEdit()
+        self.config_edit.setMinimumHeight(80)
+        self.config_edit.setPlaceholderText('{\n  "key": "value"\n}')
+        config_section.content_layout.addWidget(self.config_edit)
+        config_section.content_layout.addWidget(
+            _help_label(
+                "Training config for this profile, as a JSON object. "
+                "Bad JSON is refused on save, with the error named."
+            )
+        )
+        config_section.content_layout.addWidget(QLabel("Dependencies"))
+        self.deps_list = QListWidget()
+        self.deps_list.setMinimumHeight(70)
+        config_section.content_layout.addWidget(self.deps_list)
+        dep_row = QHBoxLayout()
+        self.dep_add_edit = QLineEdit()
+        self.dep_add_edit.setPlaceholderText("package name")
+        self.dep_add_edit.returnPressed.connect(self._add_dependency)
+        dep_row.addWidget(self.dep_add_edit, 1)
+        self.dep_add_btn = QPushButton("Add")
+        self.dep_add_btn.clicked.connect(self._add_dependency)
+        dep_row.addWidget(self.dep_add_btn)
+        self.dep_remove_btn = QPushButton("Remove")
+        self.dep_remove_btn.clicked.connect(self._remove_dependency)
+        self.dep_remove_btn.setEnabled(False)
+        dep_row.addWidget(self.dep_remove_btn)
+        config_section.content_layout.addLayout(dep_row)
+        config_section.content_layout.addWidget(
+            _help_label("One package per row. Nothing is installed from here.")
+        )
+        layout.addWidget(config_section)
+        self.config_section = config_section
+
         self.save_btn = QPushButton("Save profile")
         self.save_btn.clicked.connect(self.save)
-        layout.addWidget(self.save_btn)
+        outer.addWidget(self.save_btn)
 
         btns = QHBoxLayout()
         rename_btn = QPushButton("Rename")
         rename_btn.clicked.connect(lambda: self._main.rename_profile(self._slug))
+        clone_btn = QPushButton("Clone")
+        clone_btn.clicked.connect(lambda: self._main.clone_profile(self._slug))
         delete_btn = QPushButton("Delete")
         delete_btn.clicked.connect(lambda: self._main.delete_profile(self._slug))
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.close)
         btns.addWidget(rename_btn)
+        btns.addWidget(clone_btn)
         btns.addWidget(delete_btn)
         btns.addStretch(1)
         btns.addWidget(close_btn)
-        layout.addLayout(btns)
+        outer.addLayout(btns)
         layout.addStretch(1)
 
         # Dirty tracking (T2): a snapshot of the loaded values, so
@@ -1306,18 +1408,32 @@ class ProfileWindow(QDialog):
         self._loading = False
         for widget, signal in (
             (self.display_edit, self.display_edit.textChanged),
-            (self.role_edit, self.role_edit.textChanged),
+            (self.role_combo, self.role_combo.currentTextChanged),
             (self.tag_combo, self.tag_combo.currentTextChanged),
             (self.base_edit, self.base_edit.textChanged),
+            (self.seat_combo, self.seat_combo.currentTextChanged),
+            (self.config_edit, self.config_edit.textChanged),
         ):
             signal.connect(self._on_edited)
+        # The custom-role flag follows the role text (T116), and
+        # Remove follows the dependency selection (T115).
+        self.role_combo.currentTextChanged.connect(
+            self._refresh_custom_role_note
+        )
+        self.deps_list.currentItemChanged.connect(
+            lambda *_a: self.dep_remove_btn.setEnabled(
+                self.deps_list.currentItem() is not None
+            )
+        )
         self._load()
         # Ctrl+S saves here (T82); Tab walks the form in visual order.
         QShortcut(QKeySequence("Ctrl+S"), self, self.save)
         _chain_tab_order([
-            self.display_edit, self.role_edit, self.tag_combo,
-            self.base_edit, self.save_btn, rename_btn, delete_btn,
-            close_btn,
+            self.display_edit, self.role_combo, self.seat_combo,
+            self.tag_combo, self.base_edit, self.config_edit,
+            self.deps_list, self.dep_add_edit, self.dep_add_btn,
+            self.dep_remove_btn, self.save_btn, rename_btn, clone_btn,
+            delete_btn, close_btn,
         ])
 
     @property
@@ -1333,10 +1449,51 @@ class ProfileWindow(QDialog):
     def _current_values(self):
         return {
             "display": self.display_edit.text(),
-            "role": self.role_edit.text(),
+            "role": self.role_combo.currentText(),
             "tag": self.tag_combo.currentText(),
             "base": self.base_edit.text(),
+            "seat": self._seat_value(),
+            "config": self.config_edit.toPlainText(),
+            "deps": self._deps_values(),
         }
+
+    def _seat_value(self) -> str:
+        """The governing-seat marker as stored (T116): "" when the
+        combo shows "(not bound)", else the seat name."""
+        text = self.seat_combo.currentText()
+        return "" if text == "(not bound)" else text
+
+    def _deps_values(self) -> list:
+        """The dependency rows as a plain list (T115)."""
+        return [
+            self.deps_list.item(i).text()
+            for i in range(self.deps_list.count())
+        ]
+
+    def _refresh_custom_role_note(self):
+        """The custom-role flag (T116): a role outside the
+        canonical list is kept, and visibly marked custom."""
+        self.custom_role_note.setVisible(
+            is_custom_role(self.role_combo.currentText())
+        )
+
+    def _add_dependency(self):
+        """Add one dependency row (T115): a blank or duplicate
+        name is ignored, not added twice."""
+        name = self.dep_add_edit.text().strip()
+        if not name or name in self._deps_values():
+            return
+        self.deps_list.addItem(name)
+        self.dep_add_edit.setText("")
+        self._on_edited()
+
+    def _remove_dependency(self):
+        """Remove the selected dependency row (T115)."""
+        item = self.deps_list.currentItem()
+        if item is None:
+            return
+        self.deps_list.takeItem(self.deps_list.row(item))
+        self._on_edited()
 
     def _capture_snapshot(self):
         self._snapshot = self._current_values()
@@ -1432,11 +1589,27 @@ class ProfileWindow(QDialog):
             p = self._main.store.get_profile(self._slug)
         except StellaError:
             self.display_edit.setText("")
-            self.role_edit.setText("")
+            self.role_combo.setCurrentText("")
+            self.seat_combo.setCurrentText("(not bound)")
             self.base_edit.setText("")
+            self.config_edit.setPlainText("")
+            self.deps_list.clear()
             return
         self.display_edit.setText(p.get("display_name", ""))
-        self.role_edit.setText(p.get("role", ""))
+        self.role_combo.setCurrentText(p.get("role", ""))
+        self._refresh_custom_role_note()
+        seat = p.get("governing_seat", "") or ""
+        self.seat_combo.setCurrentText(seat if seat else "(not bound)")
+        # Config (T115): pretty JSON when there is any, blank
+        # when there is none — blank saves back as {}.
+        config = p.get("config") or {}
+        self.config_edit.setPlainText(
+            json.dumps(config, indent=2, sort_keys=True) if config else ""
+        )
+        self.deps_list.clear()
+        for dep in p.get("dependencies") or []:
+            self.deps_list.addItem(str(dep))
+        self.dep_remove_btn.setEnabled(False)
         # The Base ref field shows a repo, never a tag as if it
         # were one (T79): a stored value that is not a Hugging
         # Face repo id (no slash) shows blank, with the placeholder
@@ -1452,6 +1625,27 @@ class ProfileWindow(QDialog):
     def save(self):
         """Save the profile form. Returns True on success, False
         when nothing was saved (T2: the prompt needs the answer)."""
+        # Config first (T115): bad JSON is refused with the parse
+        # error and NOTHING is written — the parse happens before
+        # the store call, so a bad config cannot half-save the
+        # form. Blank means an empty config.
+        config_text = self.config_edit.toPlainText().strip()
+        if not config_text:
+            config = {}
+        else:
+            try:
+                config = json.loads(config_text)
+            except json.JSONDecodeError as exc:
+                QMessageBox.warning(
+                    self, "Stella", f"Config is not valid JSON: {exc}"
+                )
+                return False
+            if not isinstance(config, dict):
+                QMessageBox.warning(
+                    self, "Stella",
+                    "Config must be a JSON object, not a list or a value.",
+                )
+                return False
         # Soft tag check (T12): warn when the tag is not installed
         # or already used by another profile, and let the user
         # proceed anyway. Cancelling saves nothing.
@@ -1463,8 +1657,11 @@ class ProfileWindow(QDialog):
             return False
         fields = {
             "display_name": self.display_edit.text().strip(),
-            "role": self.role_edit.text().strip(),
+            "role": self.role_combo.currentText().strip(),
             "ollama_tag": self.tag_combo.currentText().strip(),
+            "config": config,
+            "dependencies": self._deps_values(),
+            "governing_seat": self._seat_value(),
         }
         # T54: only pass base_ref when the user changed what the
         # field showed — otherwise the store's sync rule decides:
@@ -1558,6 +1755,29 @@ class ProjectWindow(QDialog):
         self.dataset_info.setWordWrap(True)
         self.dataset_info.setVisible(False)
         form.addRow("", self.dataset_info)
+        # Why this mode (T114): the metamorph notes — why this
+        # morph/compress choice. The mode itself is shown, not
+        # picked here: the mode picker was deliberately removed
+        # in v0.8 (a control that does nothing gets no control),
+        # and the mode is set at creation or by update-project.
+        # The row says "Mode", not "MetaMorph mode" (T71: the word
+        # "metamorph" never appears in a visible string — the
+        # codec does not exist yet, so the window makes no
+        # metamorph promise). The running log of the fine-tune
+        # lives in Project notes below; these notes say why the
+        # mode was picked.
+        self.metamorph_mode_label = QLabel("")
+        form.addRow("Mode", self.metamorph_mode_label)
+        self.metamorph_notes_edit = QPlainTextEdit()
+        self.metamorph_notes_edit.setMinimumHeight(60)
+        form.addRow("Why this mode", self.metamorph_notes_edit)
+        form.addRow(
+            "",
+            _help_label(
+                "Why this mode was picked for this project. The "
+                "running log lives in Project notes below."
+            ),
+        )
         # Status (T53): read-only — training moves it on its own
         # (training, paused, done, failed), GGUF export sets
         # exported, and Mark ready is the one move the user makes
@@ -1583,7 +1803,7 @@ class ProjectWindow(QDialog):
         layout.addWidget(details)
         self.details_section = details
 
-        notes_section = CollapsibleSection("Notes")
+        notes_section = CollapsibleSection("Project notes")
         self.notes_edit = QPlainTextEdit()
         self.notes_edit.setMinimumHeight(100)
         notes_section.content_layout.addWidget(self.notes_edit)
@@ -1634,6 +1854,7 @@ class ProjectWindow(QDialog):
         for signal in (
             self.display_edit.textChanged,
             self.dataset_edit.textChanged,
+            self.metamorph_notes_edit.textChanged,
             self.notes_edit.textChanged,
         ):
             signal.connect(self._on_edited)
@@ -1648,7 +1869,7 @@ class ProjectWindow(QDialog):
         QShortcut(QKeySequence("Ctrl+S"), self, self.save)
         _chain_tab_order([
             self.display_edit, self.dataset_edit, self.dataset_browse_btn,
-            self.mark_ready_btn,
+            self.metamorph_notes_edit, self.mark_ready_btn,
             self.notes_edit,
             self.save_notes_btn, self.save_btn, rename_btn, clone_btn,
             delete_btn, close_btn,
@@ -1678,6 +1899,7 @@ class ProjectWindow(QDialog):
         return {
             "display": self.display_edit.text(),
             "dataset": self.dataset_edit.text(),
+            "metamorph_notes": self.metamorph_notes_edit.toPlainText(),
             "notes": self.notes_edit.toPlainText(),
         }
 
@@ -1707,9 +1929,10 @@ class ProjectWindow(QDialog):
         if self.is_modified():
             title += " *"
         self.setWindowTitle(title)
-        # The Notes section header marks unsaved notes (T2).
+        # The Project notes section header marks unsaved notes (T2).
         self.notes_section.set_title(
-            "Notes (modified)" if self._notes_modified() else "Notes"
+            "Project notes (modified)" if self._notes_modified()
+            else "Project notes"
         )
 
     def maybe_save(self):
@@ -1788,6 +2011,16 @@ class ProjectWindow(QDialog):
             dataset = ""
             bad.append("dataset")
         self.dataset_edit.setText(dataset)
+        # Why this mode (T114): the stored mode as a label, and
+        # the metamorph notes — why this mode was picked. A
+        # non-text notes value falls back to blank like the rest.
+        self.metamorph_mode_label.setText(metamorph_mode(p))
+        block = p.get("metamorph")
+        mm_notes = block.get("notes", "") if isinstance(block, dict) else ""
+        if not isinstance(mm_notes, str):
+            mm_notes = ""
+            bad.append("why this mode")
+        self.metamorph_notes_edit.setPlainText(mm_notes)
         # Status (T53): read-only label, from the stored project;
         # Mark ready only shows for a draft.
         status = p.get("status", "draft")
@@ -1889,6 +2122,12 @@ class ProjectWindow(QDialog):
                 self._project,
                 display_name=self.display_edit.text().strip(),
                 dataset_ref=self.dataset_edit.text().strip(),
+                # T114: the metamorph notes save with the project.
+                # The mode is not passed, so update_project keeps
+                # the stored mode — only the notes change.
+                metamorph={
+                    "notes": self.metamorph_notes_edit.toPlainText(),
+                },
             )
             self._main.store.write_notes(
                 self._profile,
@@ -1996,14 +2235,54 @@ class TrashDialog(QDialog):
         box.setEscapeButton(QMessageBox.No)
         return box.exec() == QMessageBox.Yes
 
+    def _purge_counts(self, name):
+        """What a trashed item holds (T120): (projects,
+        checkpoints, noted) counted from the folder, so the purge
+        dialog names what is about to be destroyed forever. A
+        trashed project counts as one project; a trashed profile
+        counts every project inside it."""
+        folder = self._main.store.trash_dir / name
+        projects = 0
+        checkpoints = 0
+        noted = 0
+        if not folder.is_dir():
+            return projects, checkpoints, noted
+        for manifest in folder.rglob("project.json"):
+            projects += 1
+            pdir = manifest.parent
+            ckpts = pdir / "checkpoints"
+            if ckpts.is_dir():
+                checkpoints += sum(
+                    1 for d in ckpts.iterdir() if d.is_dir()
+                )
+            if (pdir / "notes.md").is_file():
+                noted += 1
+        return projects, checkpoints, noted
+
     def _purge_selected(self):
         item = self.list_widget.currentItem()
         if item is None:
             return
         name = item.data(Qt.UserRole)
         label = item.text()
+        projects, checkpoints, noted = self._purge_counts(name)
+        goes = []
+        if projects > 1:
+            goes.append(f"{projects} projects")
+        if checkpoints:
+            goes.append(
+                f"{checkpoints} checkpoint"
+                f"{'s' if checkpoints != 1 else ''}"
+            )
+        if noted:
+            goes.append(
+                "notes"
+                if noted == 1
+                else f"notes for {noted} projects"
+            )
+        detail = f" That destroys {', '.join(goes)}." if goes else ""
         if not self._confirm_purge(
-            f"Delete {label} forever? This cannot be undone."
+            f"Delete {label} forever?{detail} This cannot be undone."
         ):
             return
         try:
@@ -2015,8 +2294,10 @@ class TrashDialog(QDialog):
         self._refresh()
 
     def _empty_trash(self):
+        count = len(self._main.store.list_trash())
         if not self._confirm_purge(
-            "Delete everything in the trash forever? "
+            f"Delete everything in the trash forever "
+            f"({count} item{'s' if count != 1 else ''})? "
             "This cannot be undone."
         ):
             return
@@ -3228,6 +3509,21 @@ def _import_message(result: dict) -> str:
     return message
 
 
+def _stella_icon(path: Path | None = None) -> QIcon:
+    """The window icon (T127): the shipped star art, guarded —
+    a missing file gives a null icon instead of a crash, so the
+    window still opens on a tree without the asset. `path` is a
+    test hook for the missing-file branch."""
+    icon_path = (
+        path
+        if path is not None
+        else Path(__file__).resolve().parent.parent / "assets" / "stella.png"
+    )
+    if icon_path.exists():
+        return QIcon(str(icon_path))
+    return QIcon()
+
+
 class MainWindow(QMainWindow):
     def __init__(self, store: Store | None = None, settings=None):
         super().__init__()
@@ -3252,9 +3548,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(
             f"STELLA {STELLA_VERSION}: fine-tune models on your PC"
         )
-        icon_path = Path(__file__).resolve().parent.parent / "assets" / "stella.png"
-        if icon_path.exists():
-            self.setWindowIcon(QIcon(str(icon_path)))
+        self.setWindowIcon(_stella_icon())
         self.resize(1100, 680)
         self.setMinimumSize(900, 540)
         self._current_profile: str | None = None
@@ -3336,6 +3630,10 @@ class MainWindow(QMainWindow):
         splitter_state = self.settings.value("splitter")
         if splitter_state is not None:
             self.splitter.restoreState(splitter_state)
+        # T126: restoreState brings back the saved collapsible
+        # flag too, so a state saved before v0.19.0 would re-enable
+        # collapsing the panes. Re-assert it after the restore.
+        self.splitter.setChildrenCollapsible(False)
         # The one startup fetch (T43): the model list loads in the
         # background before the first refresh_tree, so the health
         # badges read the cache instead of making their own fetch.
@@ -3404,6 +3702,13 @@ class MainWindow(QMainWindow):
         self.tree.currentItemChanged.connect(self._on_tree_current_changed)
         self.tree.itemDoubleClicked.connect(self._on_tree_double_clicked)
         left_layout.addWidget(self.tree, 1)
+        # The empty-list hint (T124): one line saying what to do
+        # next, shown only when the tree has nothing to show —
+        # an empty store, or a profile with no projects.
+        self.tree_hint = QLabel("")
+        self.tree_hint.setWordWrap(True)
+        self.tree_hint.setVisible(False)
+        left_layout.addWidget(self.tree_hint)
         self.splitter.addWidget(left)
 
         # Main area: the current training session (scrollable).
@@ -3419,6 +3724,13 @@ class MainWindow(QMainWindow):
         # before they truncate, and every row carries its full text
         # as a tooltip besides.
         self.splitter.setSizes([340, 760])
+        # Honest minimums (T126): the panes cannot be dragged
+        # away — the tree keeps room for a readable row, the
+        # session keeps room for the hero tile — and the splitter
+        # refuses to collapse a pane entirely.
+        left.setMinimumWidth(200)
+        self.session_scroll.setMinimumWidth(480)
+        self.splitter.setChildrenCollapsible(False)
         self.statusBar().showMessage("Stella ready.")
 
     def _build_menu_bar(self):
@@ -4095,7 +4407,25 @@ class MainWindow(QMainWindow):
         if vbar is not None:
             vbar.setValue(scroll)
         self._refresh_tree_badges()
+        self._refresh_tree_hint()
         self._sync_tree_selection()
+
+    def _refresh_tree_hint(self):
+        """The empty-list hint (T124): one line under the tree
+        saying what to do next, when the tree has nothing to
+        show — an empty store, or a profile with no projects.
+        Hidden the moment there is something to look at."""
+        if not self._tree_profiles:
+            text = "No profiles yet - New profile to start"
+        elif self._current_profile and not any(
+            key[0] == self._current_profile
+            for key in self._tree_projects
+        ):
+            text = "No projects yet - New project to start"
+        else:
+            text = ""
+        self.tree_hint.setText(text)
+        self.tree_hint.setVisible(bool(text))
 
     def _sync_tree_selection(self):
         """Select the tree row matching the current session (or
@@ -4302,6 +4632,7 @@ class MainWindow(QMainWindow):
         self.refresh_train_panel()
         self._refresh_estimate()
         self._refresh_checklist()
+        self._refresh_tree_hint()
 
     def _refresh_estimate(self):
         """The pre-train estimate label (T84): fit + time for the
@@ -5291,6 +5622,53 @@ class MainWindow(QMainWindow):
         else:
             self.refresh_tree()
 
+    def clone_profile(self, slug=None):
+        """Clone a profile (T121): the same tag, base, role,
+        processor, config, and dependencies under a new name, no
+        projects by default. When the profile has projects, the
+        user is asked whether to copy them too (each copy starts
+        with no checkpoints and fresh notes, like a project
+        clone). The session moves to the clone.
+
+        Modal audit: the copy-projects question only appears when
+        the source has projects, and the only caller is the
+        Profile window's Clone button — no existing test reaches
+        it. The new tests stub the question."""
+        slug = slug or self._current_profile
+        if not slug:
+            return
+        text, ok = QInputDialog.getText(
+            self, "Clone profile",
+            f"Name for the copy of {slug!r} "
+            "(lowercase, dashes ok):",
+        )
+        if not ok or not text.strip():
+            return
+        copy_projects = False
+        if self.store.list_projects(slug):
+            answer = QMessageBox.question(
+                self,
+                "Copy the projects too?",
+                f"Profile {slug!r} has projects. Copy them into the "
+                "new profile as well? Each copy starts with no "
+                "checkpoints and fresh notes.",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            copy_projects = answer == QMessageBox.Yes
+        try:
+            data = self.store.clone_profile(
+                slug, text.strip(), copy_projects=copy_projects
+            )
+        except StellaError as exc:
+            self._warn(str(exc))
+            return
+        self.debug_log.action(
+            f"profile cloned: {slug} to {data['name']}"
+        )
+        self.set_session(data["name"], None)
+        self._say(f"Cloned {slug} as {data['name']}.")
+
     def _delete_confirm_with_export(self, title, text, export_label):
         """A destructive confirmation that defaults to No, and where
         Escape leaves things untouched (U23/U31) — with an "Export
@@ -5314,6 +5692,89 @@ class MainWindow(QMainWindow):
             return "yes"
         return "no"
 
+    def _project_counts(self, profile, project):
+        """What a project carries (T120): (checkpoints, has_notes).
+        Checkpoints are the folders under checkpoints/; notes means
+        a notes.md file exists."""
+        pdir = self.store.project_dir(profile, project)
+        ckpts = pdir / "checkpoints"
+        count = 0
+        if ckpts.is_dir():
+            count = sum(1 for d in ckpts.iterdir() if d.is_dir())
+        return count, (pdir / "notes.md").is_file()
+
+    def _delete_profile_text(self, slug):
+        """The profile delete dialog's text (T120): the item's
+        display name + slug, what goes with it (projects,
+        checkpoints, notes), and where it goes (the trash)."""
+        try:
+            prof = self.store.get_profile(slug)
+            display = prof.get("display_name") or slug
+        except StellaError:
+            display = slug
+        projects = self.store.list_projects(slug)
+        n_projects = len(projects)
+        checkpoints = 0
+        noted = 0
+        for proj in projects:
+            count, has_notes = self._project_counts(slug, proj["name"])
+            checkpoints += count
+            noted += 1 if has_notes else 0
+        text = f"Move profile {_displayed_name(display, slug)}"
+        if n_projects:
+            text += (
+                f" and its {n_projects} project"
+                f"{'s' if n_projects != 1 else ''}"
+            )
+        text += " to the trash?"
+        goes = []
+        if checkpoints:
+            goes.append(
+                f"{checkpoints} checkpoint"
+                f"{'s' if checkpoints != 1 else ''}"
+            )
+        if noted:
+            goes.append(
+                f"notes for {noted} project"
+                f"{'s' if noted != 1 else ''}"
+            )
+        if goes:
+            text += f" That includes {', '.join(goes)}."
+        text += (
+            " You can move it back later, or delete it forever from "
+            "Trash in the File menu."
+        )
+        return text
+
+    def _delete_project_text(self, profile, project):
+        """The project delete dialog's text (T120): the item's
+        display name + slug, what goes with it (checkpoints,
+        notes), and where it goes (the trash)."""
+        try:
+            proj = self.store.get_project(profile, project)
+            display = proj.get("display_name") or project
+        except StellaError:
+            display = project
+        count, has_notes = self._project_counts(profile, project)
+        text = (
+            f"Move project {_displayed_name(display, project)} "
+            f"in profile {profile!r} to the trash?"
+        )
+        goes = []
+        if count:
+            goes.append(
+                f"{count} checkpoint{'s' if count != 1 else ''}"
+            )
+        if has_notes:
+            goes.append("its notes")
+        if goes:
+            text += f" That includes {', '.join(goes)}."
+        text += (
+            " You can move it back later, or delete it forever from "
+            "Trash in the File menu."
+        )
+        return text
+
     def delete_profile(self, slug=None):
         slug = slug or self._current_profile
         if not slug:
@@ -5321,9 +5782,7 @@ class MainWindow(QMainWindow):
         while True:
             answer = self._delete_confirm_with_export(
                 "Delete profile",
-                f"Move profile {slug!r} and all its projects to the "
-                "trash? You can move it back later, or delete it "
-                "forever from Trash in the File menu.",
+                self._delete_profile_text(slug),
                 "Export all projects first",
             )
             if answer == "export":
@@ -5462,9 +5921,7 @@ class MainWindow(QMainWindow):
         while True:
             answer = self._delete_confirm_with_export(
                 "Delete project",
-                f"Move project {project!r} to the trash? You can "
-                "move it back later, or delete it forever from "
-                "Trash in the File menu.",
+                self._delete_project_text(profile, project),
                 "Export this project first",
             )
             if answer == "export":
@@ -6357,6 +6814,36 @@ class MainWindow(QMainWindow):
                 return False
         return True
 
+    def _governing_seat_ok(self, profile: str) -> bool:
+        """The governing-seat warning (T116): True when training
+        may start. A profile bound for a governing seat whose base
+        is not abliterated warns first, naming the seat and the
+        base; anything else starts without a word.
+
+        Modal audit: this question only appears when the profile
+        carries a governing-seat marker AND a stock base — every
+        existing test that reaches start_training uses unmarked
+        profiles, so none of them meets it. The new tests stub
+        the question."""
+        try:
+            prof = self.store.get_profile(profile)
+        except StellaError:
+            return True
+        warning = governing_seat_warning(prof)
+        if warning is None:
+            return True
+        answer = QMessageBox.question(
+            self,
+            "Train a governing seat on a stock base?",
+            warning + " Train anyway?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            self._say("Training not started.")
+            return False
+        return True
+
     def start_training(self, resume: bool = False,
                        max_steps: int | None = None):
         profile = self._selected_profile()
@@ -6429,6 +6916,13 @@ class MainWindow(QMainWindow):
         # training stack or missing weights is still reported
         # first — the user fixes one thing at a time.
         if not self._dataset_preflight_ok(profile, project):
+            return
+        # The governing-seat warning (T116), after the dataset
+        # check: a profile bound for a governing seat whose base
+        # is not abliterated warns, naming the seat and the base.
+        # It runs last, so a blocked run never asks a question
+        # about a run that cannot start.
+        if not self._governing_seat_ok(profile):
             return
         self._train_worker = TrainWorker(
             self.store, profile, project, resume=resume, force=force,

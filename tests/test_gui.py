@@ -318,9 +318,9 @@ def test_geometry_remembered(qapp, seeded, settings):
 def test_profile_window_save_writes_through(window, seeded):
     win = window.open_profile_window("lfm3-tool")
     assert win.display_edit.text() == "LFM3 Tool Seat"
-    assert win.role_edit.text() == "fast"
+    assert win.role_combo.currentText() == "fast"
     assert win.tag_combo.currentText() == "lfm3:1.7b"
-    win.role_edit.setText("reviewer")
+    win.role_combo.setCurrentText("reviewer")
     win.save()
     assert seeded.get_profile("lfm3-tool")["role"] == "reviewer"
     assert "reviewer" in window.tree.topLevelItem(0).text(0)
@@ -1755,7 +1755,7 @@ def test_profile_window_close_prompts_and_saves(window, seeded, monkeypatch, qap
     prof_win = window.open_profile_window("lfm3-tool")
     qapp.processEvents()
     assert not prof_win.is_modified()
-    prof_win.role_edit.setText("reviewer")
+    prof_win.role_combo.setCurrentText("reviewer")
     assert prof_win.is_modified()
     assert prof_win.windowTitle().endswith("*")
     monkeypatch.setattr(
@@ -1770,12 +1770,12 @@ def test_notes_marker_and_save_notes_only(window, seeded, monkeypatch, qapp):
 
     proj_win = window.open_project_window("lfm3-tool", "tool-calls")
     qapp.processEvents()
-    assert proj_win.notes_section.title == "Notes"
+    assert proj_win.notes_section.title == "Project notes"
     proj_win.notes_edit.setPlainText("just the notes")
     proj_win.display_edit.setText("Renamed in the form")
-    assert proj_win.notes_section.title == "Notes (modified)"
+    assert proj_win.notes_section.title == "Project notes (modified)"
     assert proj_win.save_notes() is True
-    assert proj_win.notes_section.title == "Notes"
+    assert proj_win.notes_section.title == "Project notes"
     assert "just the notes" in seeded.read_notes("lfm3-tool", "tool-calls")
     # Save notes touches only the notes: the display-name edit is
     # still unsaved (and the window still shows it as modified).
@@ -6452,3 +6452,540 @@ def test_create_in_ollama_button(
     assert "Created in Ollama as lfm3-tool-tool-calls." in (
         window.statusBar().currentMessage()
     )
+
+
+# -- v0.19.0: T114, T115, T116, T120, T121, T122, T124, T126, T127 ---
+
+
+def test_project_window_metamorph_notes_save_through(window, seeded):
+    """T114 Done: the Why this mode notes are editable in the
+    project window and persist; the stored mode shows as a label
+    (no mode picker — the word stays out of visible text, T71)."""
+    win = window.open_project_window("lfm3-tool", "tool-calls")
+    assert win.metamorph_mode_label.text() == "both"
+    assert win.metamorph_notes_edit.toPlainText() == ""
+    assert win.notes_section.title == "Project notes"
+    win.metamorph_notes_edit.setPlainText("both, the traces compress well")
+    assert win.save() is True
+    proj = seeded.get_project("lfm3-tool", "tool-calls")
+    assert proj["metamorph"]["notes"] == "both, the traces compress well"
+    assert proj["metamorph"]["mode"] == "both"
+    win.close()
+    win2 = window.open_project_window("lfm3-tool", "tool-calls")
+    assert win2.metamorph_notes_edit.toPlainText() == (
+        "both, the traces compress well"
+    )
+    assert win2.metamorph_mode_label.text() == "both"
+    win2.close()
+
+
+def test_profile_window_config_save_through(window, seeded):
+    """T115 Done: edit config JSON in the profile window, save,
+    reopen — the values persist."""
+    win = window.open_profile_window("lfm3-tool")
+    assert win.config_edit.toPlainText() == ""
+    win.config_edit.setPlainText('{"key": "value", "n": 3}')
+    assert win.save() is True
+    assert seeded.get_profile("lfm3-tool")["config"] == {
+        "key": "value", "n": 3,
+    }
+    win.close()
+    win2 = window.open_profile_window("lfm3-tool")
+    assert '"key": "value"' in win2.config_edit.toPlainText()
+    win2.close()
+
+
+def test_profile_window_config_bad_json_refused(
+    window, seeded, monkeypatch
+):
+    """T115 Done: invalid JSON is refused with a readable error
+    and the old values stay — nothing is written."""
+    from PySide6.QtWidgets import QMessageBox
+
+    seeded.update_profile("lfm3-tool", config={"keep": True})
+    win = window.open_profile_window("lfm3-tool")
+    warned = []
+    monkeypatch.setattr(
+        QMessageBox, "warning", lambda *a, **k: warned.append(a[2])
+    )
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.Discard
+    )
+    win.config_edit.setPlainText('{"key": ')
+    assert win.save() is False
+    assert warned and "not valid JSON" in warned[0]
+    assert seeded.get_profile("lfm3-tool")["config"] == {"keep": True}
+    win.close()
+
+
+def test_profile_window_dependencies_editable(window, seeded):
+    """T115: the dependency list adds and removes rows, and
+    saves through."""
+    win = window.open_profile_window("lfm3-tool")
+    win.dep_add_edit.setText("torch")
+    win._add_dependency()
+    win.dep_add_edit.setText("transformers")
+    win._add_dependency()
+    assert win._deps_values() == ["torch", "transformers"]
+    # A duplicate is ignored, not added twice.
+    win.dep_add_edit.setText("torch")
+    win._add_dependency()
+    assert win._deps_values() == ["torch", "transformers"]
+    assert win.save() is True
+    assert seeded.get_profile("lfm3-tool")["dependencies"] == [
+        "torch", "transformers",
+    ]
+    win.deps_list.setCurrentRow(0)
+    win._remove_dependency()
+    assert win.save() is True
+    assert seeded.get_profile("lfm3-tool")["dependencies"] == [
+        "transformers",
+    ]
+    win.close()
+
+
+def test_profile_window_role_combo_offers_canonical_list(window):
+    """T116/T122 Done: the detail panel's role field is an
+    editable combo offering the canonical list."""
+    from stella.model import CANONICAL_ROLES
+
+    win = window.open_profile_window("lfm3-tool")
+    items = [
+        win.role_combo.itemText(i) for i in range(win.role_combo.count())
+    ]
+    assert items == list(CANONICAL_ROLES)
+    assert win.role_combo.isEditable()
+    assert win.role_combo.currentText() == "fast"
+    win.close()
+
+
+def test_profile_window_custom_role_flagged(window, qapp):
+    """T116 Done: a role outside the canonical list is kept and
+    visibly marked custom."""
+    win = window.open_profile_window("lfm3-tool")
+    assert not win.custom_role_note.isVisible()
+    win.role_combo.setCurrentText("drvier")
+    qapp.processEvents()
+    assert win.custom_role_note.isVisible()
+    assert "Custom role" in win.custom_role_note.text()
+    win.role_combo.setCurrentText("driver")
+    assert not win.custom_role_note.isVisible()
+    win.role_combo.setCurrentText("fast")
+    win.close()
+
+
+def test_profile_window_governing_seat_saves(window, seeded):
+    """T116: the governing-seat marker is set in the profile
+    window and persists."""
+    win = window.open_profile_window("lfm3-tool")
+    assert win.seat_combo.currentText() == "(not bound)"
+    win.seat_combo.setCurrentText("driver")
+    assert win.save() is True
+    assert seeded.get_profile("lfm3-tool")["governing_seat"] == "driver"
+    win.close()
+    win2 = window.open_profile_window("lfm3-tool")
+    assert win2.seat_combo.currentText() == "driver"
+    win2.close()
+
+
+def _bound_seat_session(window, seeded, **overrides):
+    """A session on a profile bound for a governing seat, with a
+    valid sample dataset — ready to train except for the
+    warning."""
+    kwargs = {
+        "ollama_tag": "lfm3:1.7b",
+        "base_ref": "LiquidAI/LFM3-1.7B",
+        "governing_seat": "driver",
+    }
+    kwargs.update(overrides)
+    seeded.create_profile("seat-tool", **kwargs)
+    seeded.create_project(
+        "seat-tool", "tool-calls", dataset_ref="sample-tool-calls.jsonl"
+    )
+    window.refresh_tree()
+    window.set_session("seat-tool", "tool-calls")
+
+
+def test_start_training_governing_seat_no_stops_start(
+    window, seeded, monkeypatch, qapp
+):
+    """T116 Done: a bound seat on a stock base warns before
+    training, naming the seat and the base — and No stops the
+    start."""
+    from PySide6.QtWidgets import QMessageBox
+
+    _bound_seat_session(window, seeded)
+    asked = []
+    monkeypatch.setattr(
+        QMessageBox, "question",
+        lambda *a, **k: asked.append(a[2]) or QMessageBox.No,
+    )
+    _start_training_ready(window, monkeypatch)
+    window.start_training()
+    qapp.processEvents()
+    assert len(asked) == 1
+    assert "driver" in asked[0]
+    assert "LiquidAI/LFM3-1.7B" in asked[0]
+    assert window._train_worker is None
+
+
+def test_start_training_governing_seat_yes_proceeds(
+    window, seeded, monkeypatch, qapp
+):
+    """T116: answering Yes to the governing-seat warning starts
+    the run."""
+    from PySide6.QtWidgets import QMessageBox
+
+    _bound_seat_session(window, seeded)
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.Yes
+    )
+    _start_training_ready(window, monkeypatch)
+    window.start_training()
+    qapp.processEvents()
+    assert window._train_worker is not None
+
+
+def test_start_training_governing_seat_abliterated_no_warning(
+    window, seeded, monkeypatch, qapp
+):
+    """T116 Done: the same bound seat on an abliterated base
+    warns about nothing."""
+    from PySide6.QtWidgets import QMessageBox
+
+    _bound_seat_session(
+        window, seeded, ollama_tag="minicpm5-heretic:2b"
+    )
+    asked = []
+    monkeypatch.setattr(
+        QMessageBox, "question",
+        lambda *a, **k: asked.append(a[2]) or QMessageBox.No,
+    )
+    _start_training_ready(window, monkeypatch)
+    window.start_training()
+    qapp.processEvents()
+    assert asked == []
+    assert window._train_worker is not None
+
+
+def test_delete_profile_dialog_names_item_and_counts(
+    window, seeded, monkeypatch
+):
+    """T120 Done: deleting a profile names it (display name +
+    slug), counts what goes with it, and states the trash
+    destination."""
+    from PySide6.QtWidgets import QMessageBox
+
+    seeded.create_project("lfm3-tool", "second-proj")
+    ckpt = (
+        seeded.home / "profiles" / "lfm3-tool" / "projects"
+        / "tool-calls" / "checkpoints" / "step-50"
+    )
+    ckpt.mkdir(parents=True)
+    seen = []
+
+    def fake_exec(self):
+        seen.append(self)
+        return QMessageBox.No
+
+    monkeypatch.setattr(QMessageBox, "exec", fake_exec)
+    window.delete_profile("lfm3-tool")
+    assert len(seen) == 1
+    text = seen[0].text()
+    assert "LFM3 Tool Seat" in text
+    assert "lfm3-tool" in text
+    assert "2 projects" in text
+    assert "1 checkpoint" in text
+    assert "notes for 2 projects" in text
+    assert "trash" in text
+
+
+def test_delete_project_dialog_names_checkpoints(
+    window, seeded, monkeypatch
+):
+    """T120 Done: deleting a project names it and its
+    checkpoints, and states the trash destination."""
+    from PySide6.QtWidgets import QMessageBox
+
+    ckpt = (
+        seeded.home / "profiles" / "lfm3-tool" / "projects"
+        / "tool-calls" / "checkpoints" / "step-50"
+    )
+    ckpt.mkdir(parents=True)
+    seen = []
+
+    def fake_exec(self):
+        seen.append(self)
+        return QMessageBox.No
+
+    monkeypatch.setattr(QMessageBox, "exec", fake_exec)
+    window.delete_project("lfm3-tool", "tool-calls")
+    assert len(seen) == 1
+    text = seen[0].text()
+    assert "tool-calls" in text
+    assert "1 checkpoint" in text
+    assert "its notes" in text
+    assert "trash" in text
+
+
+def test_trash_purge_dialog_names_what_it_destroys(
+    window, seeded, monkeypatch, qapp
+):
+    """T120: the purge dialog names the item and what goes with
+    it, and states that it is permanent."""
+    from PySide6.QtWidgets import QMessageBox
+
+    ckpt = (
+        seeded.home / "profiles" / "lfm3-tool" / "projects"
+        / "tool-calls" / "checkpoints" / "step-50"
+    )
+    ckpt.mkdir(parents=True)
+    seeded.delete_project("lfm3-tool", "tool-calls")
+    trash = window.open_trash_window()
+    qapp.processEvents()
+    assert trash.list_widget.count() == 1
+    trash.list_widget.setCurrentRow(0)
+    seen = []
+
+    def fake_exec(self):
+        seen.append(self)
+        return QMessageBox.No
+
+    monkeypatch.setattr(QMessageBox, "exec", fake_exec)
+    trash._purge_selected()
+    assert len(seen) == 1
+    text = seen[0].text()
+    assert "tool-calls" in text
+    assert "1 checkpoint" in text
+    assert "forever" in text
+    trash.close()
+
+
+def test_trash_empty_dialog_counts_items(
+    window, seeded, monkeypatch, qapp
+):
+    """T120: Empty trash names how many items go forever."""
+    from PySide6.QtWidgets import QMessageBox
+
+    seeded.delete_project("lfm3-tool", "tool-calls")
+    trash = window.open_trash_window()
+    qapp.processEvents()
+    seen = []
+
+    def fake_exec(self):
+        seen.append(self)
+        return QMessageBox.No
+
+    monkeypatch.setattr(QMessageBox, "exec", fake_exec)
+    trash._empty_trash()
+    assert len(seen) == 1
+    assert "1 item" in seen[0].text()
+    assert "forever" in seen[0].text()
+    trash.close()
+
+
+def test_clone_profile_button(window, seeded, monkeypatch, qapp):
+    """T121 Done: the Clone button in the profile window copies
+    the tag, base, and role under a new name, with zero projects;
+    the session moves to the clone."""
+    from PySide6.QtWidgets import QInputDialog, QMessageBox, QPushButton
+
+    _select_session(window)
+    win = window.open_profile_window("lfm3-tool")
+    qapp.processEvents()
+    monkeypatch.setattr(
+        QInputDialog, "getText", lambda *a, **k: ("lfm3-copy", True)
+    )
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.No
+    )
+    clone_btn = next(
+        b for b in win.findChildren(QPushButton) if b.text() == "Clone"
+    )
+    clone_btn.click()
+    qapp.processEvents()
+    clone = seeded.get_profile("lfm3-copy")
+    assert clone["ollama_tag"] == "lfm3:1.7b"
+    assert clone["role"] == "fast"
+    assert seeded.list_projects("lfm3-copy") == []
+    assert window._current_profile == "lfm3-copy"
+    assert "Cloned lfm3-tool as lfm3-copy." in (
+        window.statusBar().currentMessage()
+    )
+    win.close()
+
+
+def test_clone_profile_button_copies_projects_when_asked(
+    window, seeded, monkeypatch, qapp
+):
+    """T121: answering Yes to the copy-projects question copies
+    the projects into the clone."""
+    from PySide6.QtWidgets import QInputDialog, QMessageBox, QPushButton
+
+    win = window.open_profile_window("lfm3-tool")
+    qapp.processEvents()
+    monkeypatch.setattr(
+        QInputDialog, "getText", lambda *a, **k: ("lfm3-copy", True)
+    )
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.Yes
+    )
+    clone_btn = next(
+        b for b in win.findChildren(QPushButton) if b.text() == "Clone"
+    )
+    clone_btn.click()
+    qapp.processEvents()
+    assert [p["name"] for p in seeded.list_projects("lfm3-copy")] == [
+        "tool-calls"
+    ]
+    win.close()
+
+
+def test_profile_row_tooltip_shows_name_role_tag(window):
+    """T122 Done: hovering a profile row shows the full display
+    name, role, and tag."""
+    top = window.tree.topLevelItem(0)
+    tip = top.toolTip(0)
+    assert "LFM3 Tool Seat" in tip
+    assert "fast" in tip
+    assert "lfm3:1.7b" in tip
+
+
+def test_empty_store_shows_profile_hint(qapp, store, settings):
+    """T124 Done: an empty store's tree pane says what to do
+    next instead of showing a blank list."""
+    from stella.gui import MainWindow
+
+    win = MainWindow(store=store, settings=settings)
+    win.show()
+    qapp.processEvents()
+    assert win.tree_hint.isVisible()
+    assert win.tree_hint.text() == "No profiles yet - New profile to start"
+    win.close()
+
+
+def test_profile_without_projects_shows_hint(window, seeded, qapp):
+    """T124 Done: a profile with no projects shows the one-line
+    hint; a profile with projects does not."""
+    seeded.create_profile("empty-profile")
+    window.refresh_tree()
+    window.set_session("empty-profile", None)
+    qapp.processEvents()
+    assert window.tree_hint.isVisible()
+    assert window.tree_hint.text() == "No projects yet - New project to start"
+    window.set_session("lfm3-tool", "tool-calls")
+    qapp.processEvents()
+    assert not window.tree_hint.isVisible()
+
+
+def test_hint_hidden_with_projects(window):
+    """T124: with a session on a profile that has projects, no
+    hint shows."""
+    _select_session(window)
+    assert not window.tree_hint.isVisible()
+
+
+def test_splitter_cannot_collapse_panes(window, qapp):
+    """T126 Done: the panes cannot be dragged to width 0 — the
+    splitter refuses to collapse a pane, and each pane keeps an
+    honest minimum width."""
+    assert window.splitter.childrenCollapsible() is False
+    window.splitter.setSizes([0, 1100])
+    qapp.processEvents()
+    assert window.splitter.sizes()[0] >= 200
+    window.splitter.setSizes([1100, 0])
+    qapp.processEvents()
+    assert window.splitter.sizes()[1] >= 480
+
+
+def test_splitter_stays_uncollapsible_after_restoring_old_state(
+    qapp, seeded, settings
+):
+    """T126 Done (coordinator fix): restoreState brings back the
+    saved collapsible flag too, so a splitter state saved before
+    v0.19.0 — when panes were collapsible — would re-enable
+    collapsing on a returning user's window. The window re-asserts
+    non-collapsible after the restore. First prove the saved state
+    really carries the flag, so the assertion is not vacuous."""
+    from PySide6.QtWidgets import QLabel, QSplitter
+    from stella.gui import MainWindow
+
+    probe = QSplitter()
+    probe.addWidget(QLabel("left"))
+    probe.addWidget(QLabel("right"))
+    probe.setChildrenCollapsible(True)
+    old_state = probe.saveState()
+    check = QSplitter()
+    check.addWidget(QLabel("left"))
+    check.addWidget(QLabel("right"))
+    check.setChildrenCollapsible(False)
+    check.restoreState(old_state)
+    assert check.childrenCollapsible() is True
+
+    settings.setValue("splitter", old_state)
+    win = MainWindow(store=seeded, settings=settings)
+    win.show()
+    qapp.processEvents()
+    try:
+        assert win.splitter.childrenCollapsible() is False
+    finally:
+        win.close()
+
+
+def test_window_icon_is_set(window):
+    """T127 Done: the window shows the star icon."""
+    assert not window.windowIcon().isNull()
+
+
+def test_stella_icon_missing_file_is_null(qapp, tmp_path):
+    """T127: the icon guard — a missing asset file gives a null
+    icon instead of a crash."""
+    from stella.gui import _stella_icon
+
+    assert _stella_icon(tmp_path / "missing.png").isNull()
+    assert not _stella_icon().isNull()
+
+
+def test_profile_window_help_labels_not_clipped(window, qapp):
+    """T115: the config section made the profile window taller
+    than a small screen, and Qt then fell back to the minimum
+    size hint — squeezing every help label to two lines. The
+    form scrolls now (T80's pattern, as in the project window),
+    so every label gets its full height and the window stays
+    inside a 768px screen."""
+    prof_win = window.open_profile_window("lfm3-tool")
+    qapp.processEvents()
+    try:
+        assert prof_win.height() <= 700
+        for label in prof_win.findChildren(QLabel):
+            if not label.isVisible() or not label.wordWrap():
+                continue
+            text = label.text()
+            if len(text) < 20:
+                continue
+            assert label.height() >= label.heightForWidth(label.width()), (
+                f"clipped: {text[:50]!r} h={label.height()} "
+                f"need={label.heightForWidth(label.width())}"
+            )
+    finally:
+        prof_win.close()
+
+
+def test_project_window_help_labels_not_clipped(window, qapp):
+    """T114: the project window's help labels — including the
+    new Why-this-mode one — all get their full height."""
+    proj_win = window.open_project_window("lfm3-tool", "tool-calls")
+    qapp.processEvents()
+    try:
+        for label in proj_win.findChildren(QLabel):
+            if not label.isVisible() or not label.wordWrap():
+                continue
+            text = label.text()
+            if len(text) < 20:
+                continue
+            assert label.height() >= label.heightForWidth(label.width()), (
+                f"clipped: {text[:50]!r} h={label.height()} "
+                f"need={label.heightForWidth(label.width())}"
+            )
+    finally:
+        proj_win.close()
