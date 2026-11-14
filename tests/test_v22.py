@@ -771,14 +771,8 @@ def test_bare_stella_prints_command_list(home):
     assert "required" not in res.stderr
 
 
-def test_version_is_0_22_0(home):
-    """The version is 0.22.0 everywhere the CLI reports it."""
-    from stella.model import STELLA_VERSION
-
-    assert STELLA_VERSION == "0.22.0"
-    res = run_cli(home, "--version")
-    assert res.returncode == 0
-    assert "0.22.0" in res.stdout
+# NOTE: the version tests moved to test_v23.py (test_version_is_0_23_0,
+# test_window_title_carries_version) — the version is 0.23.0 now.
 
 
 # -- T174: per-role probe sets --------------------------------------
@@ -1310,8 +1304,4 @@ def test_script_help_exits_zero_without_side_effects(
 
 
 # -- Version --------------------------------------------------------
-
-
-def test_window_title_carries_version(window):
-    """The window title carries STELLA 0.22.0."""
-    assert "0.22.0" in window.windowTitle()
+# (moved to test_v23.py — the version is 0.23.0 now)

@@ -2266,6 +2266,7 @@ accounts for their findings.)
 - **Origin:** audit #7 T1
 - **Covers:** A7-W1, A7-W7, A7-W10, A7-D1
 - **Effort:** S
+- **Status:** HARD-GATED (2026-11-14) — needs Joshua's pick of the MetaMorphAi reading (morphing spirit vs compression codec), UNDECIDED; do not pick one for him. T70 gates T72, T73, T183, T188.
 - **Problem:** The mode does nothing, for either reading. No code
   path in `train.py`, `probe.py`, or `gguf.py` references metamorph
   at all (grep -c = 0 for each). Setting a project to `compress`
@@ -2330,6 +2331,7 @@ accounts for their findings.)
 - **Origin:** audit #7 T7
 - **Covers:** A7-G2, A7-W6, A7-D2, A7-D3
 - **Effort:** M
+- **Status:** HARD-GATED (2026-11-14) — needs the MetaMorphAi reading pick via T70 (what `compress` wires to depends on what the codec is).
 - **Problem:** No quantization choice driven by mode (GGUF always
   defaults to Q4_K_M, `gguf.py:29`); no adapter compression; no
   package compression; no token-level compression ("the same
@@ -2362,6 +2364,7 @@ accounts for their findings.)
 - **Origin:** audit #7 T6
 - **Covers:** A7-G1, A7-D4
 - **Effort:** M
+- **Status:** HARD-GATED (2026-11-14) — needs the MetaMorphAi reading pick via T70 (morph variant lineage depends on the morphing-spirit reading).
 - **Problem:** There is no operation that turns a base into a
   variant differently per mode, no way to spawn a variant project
   from another, and no record of which project descended from
@@ -3585,6 +3588,7 @@ accounts for their findings.)
 - **Origin:** audit #1 T11
 - **Covers:** A1-W8
 - **Effort:** S
+- **Status:** HARD-GATED (2026-11-14) — needs Joshua's one-line decision on the processor field's meaning (tokenizer id vs class name vs local path vs drop); the field currently has NO GUI field at all, deliberately excluded.
 - **Problem:** `processor` is a bare text field with no label help,
   no picker, no validation. Is it a tokenizer name, a processor
   class, a local path? The user cannot tell from the window, and
@@ -3956,6 +3960,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Origin:** audit #7 T12
 - **Covers:** A7-G4, A7-D12
 - **Effort:** S
+- **Status:** HARD-GATED (2026-11-14) — needs the MetaMorphAi reading pick, transitively via T72.
 - **Problem:** `METAMORPH_MODES` is a closed tuple, and
   `verify_export` rejects any mode outside it (`export.py:141-143`).
   Adding a mode later — or a codec version, which is what a real
@@ -4721,6 +4726,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Covers:** A1-G1 (full)
 - **Effort:** L
 - **Depends on:** T115 (config/deps reachable)
+- **Status:** HARD-GATED (2026-11-14) — needs Joshua's decision on per-profile env scope (per-profile venv vs shared training venv vs dependency-record-only); also needs splitting.
 - **Problem:** Profiles were specced as a clean environment per base
   (weights, config, processor/tokenizer, dependencies). Config/deps
   are dead fields (A1-W7 — first step is T115), there is no per-profile
@@ -4744,6 +4750,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Origin:** audit #7 T18
 - **Covers:** A7-G6, A7-D13
 - **Effort:** S
+- **Status:** HARD-GATED (2026-11-14) — needs the MetaMorphAi reading pick via T70 (per-mode defaults depend on the mode definitions).
 - **Problem:** Every mode gets identical `DEFAULT_SETTINGS`
   (`model.py:44-57`). A `compress` project might sensibly default
   to a lower rank; a `morph` project to variant-friendly settings.
@@ -4833,6 +4840,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Origin:** audit #7 T19
 - **Covers:** A7-D16
 - **Effort:** L
+- **Status:** HARD-GATED (2026-11-14) — needs the MetaMorphAi reading pick via T70 (the token-level codec is the codec reading itself).
 - **Problem:** "The same meaning in fewer tokens" at train time —
   dataset tokenization, dedup, and compression-aware training — is
   the deep reading of the codec and the hardest part. It has no code
@@ -4856,6 +4864,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Effort:** S
 - **Library:** none
 - **Supersedes:** T55 (remove/disable dead "full" method: remove it outright).
+- **Status:** MOOTED by T16 (Audit #9 R2) — the settings form, Method combo with it, was deleted in v0.11.0; no "full" anywhere in the UI. Verified in v0.23.0 and pinned by test_no_full_method_anywhere_in_ui. Kept in the list, marked, so the coverage map still accounts for its findings.
 - **Problem:** The Method combo lists `lora` and `full` with `full` disabled: a visible option the user can never use.
 - **Fix:** Drop `full` from the combo. (R2 deletes the settings form anyway; this is the cleanup if the form outlives R2.)
 - **Done:** No `full` anywhere in the UI.
@@ -4866,6 +4875,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Covers:** A9-D6
 - **Effort:** S
 - **Library:** none
+- **Status:** DONE in v0.23.0 (2026-11-14) — one tagline everywhere: the header now reads "STELLA: fine-tune models on your PC", the same line as the window title (which keeps the version).
 - **Problem:** The window title and the header carry two different taglines.
 - **Fix:** Window title and header use the same line.
 - **Done:** One tagline in both places.
@@ -4876,6 +4886,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Covers:** A9-D4
 - **Effort:** S
 - **Library:** none
+- **Status:** DONE in v0.23.0 (2026-11-14) — the status bar no longer repeats the session in slugs; the session title carries it in display names, and the status bar keeps the last action's message.
 - **Problem:** The session title and the status bar state the same fact twice, in two different namings (display name vs slug).
 - **Fix:** Drop the slug repeat from the status bar; the session title carries it.
 - **Done:** The status bar no longer repeats the title.
@@ -4886,6 +4897,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Covers:** A9-D5
 - **Effort:** S
 - **Library:** none
+- **Status:** DONE in v0.23.0 (2026-11-14) — buttons explain themselves on hover (Go, Proof run, Estimate, Prune, chat plan Run, dependency Add/Remove, Mark ready, distill Start); tree-row tooltips were already done by T78.
 - **Problem:** "Dream first" is the only tooltip in the app; nothing else explains itself on hover.
 - **Fix:** Tooltips on tree rows (full text) and on any button whose label needs one more word.
 - **Done:** Hovering a truncated row shows the full text.
@@ -4896,6 +4908,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Covers:** A9-D7
 - **Effort:** S
 - **Library:** none
+- **Status:** DONE in v0.23.0 (2026-11-14) — How to Use has a search box over the topics (title-or-body match, case-insensitive, never selects a topic), and the empty state links to Getting started.
 - **Problem:** Thirteen topics in a plain list with no search, and the empty main window never points at the guide.
 - **Fix:** A search box over the topics; the empty state links to Getting started.
 - **Done:** Searching finds topics; the empty screen offers the guide.
@@ -4906,6 +4919,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Covers:** A9-D8
 - **Effort:** S
 - **Library:** none
+- **Status:** DONE in v0.23.0 (2026-11-14) — the Chat window's help line has room: the default size is 700x560 and the help line is shortened to two sentences (measured: 30px rendered against a 30px need, 11px bottom gap).
 - **Problem:** The Chat window's two-line help text is squeezed at the bottom edge of the fixed 700x520 window.
 - **Fix:** Resize the window or shorten the help line so the text has room.
 - **Done:** The help line has room at the window's size.

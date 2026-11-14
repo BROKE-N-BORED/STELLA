@@ -214,6 +214,18 @@ job, export it as a usable package.
   with multi-select and bulk delete/export/role change. The
   scripts answer `--help`, and the app-menu launcher carries
   StartupNotify, Keywords, and a version.
+- v0.23.0 final UI polish (2026-11-14): one tagline everywhere
+  (the header carries the same "fine-tune models on your PC" as
+  the window title, which keeps the version); the status bar no
+  longer repeats the session in slug form; tooltips on the
+  buttons whose label needs one more word (Go, Proof run,
+  Estimate, Prune, and the rest); How to Use has a search box
+  over its topics, and the empty screen links to Getting
+  started; and the Chat window is taller with a shorter help
+  line, so the help text has room. The dead "full" method needs
+  no removal — the settings form that offered it was deleted in
+  v0.11.0, and old projects with a stored "full" method still
+  open.
 
 ## Install
 

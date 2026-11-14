@@ -1482,9 +1482,15 @@ class ProfileWindow(QDialog):
         self.dep_add_edit.returnPressed.connect(self._add_dependency)
         dep_row.addWidget(self.dep_add_edit, 1)
         self.dep_add_btn = QPushButton("Add")
+        self.dep_add_btn.setToolTip(
+            "Add the package named in the box to this profile."
+        )
         self.dep_add_btn.clicked.connect(self._add_dependency)
         dep_row.addWidget(self.dep_add_btn)
         self.dep_remove_btn = QPushButton("Remove")
+        self.dep_remove_btn.setToolTip(
+            "Remove the selected dependency from this profile."
+        )
         self.dep_remove_btn.clicked.connect(self._remove_dependency)
         self.dep_remove_btn.setEnabled(False)
         dep_row.addWidget(self.dep_remove_btn)
@@ -2089,6 +2095,9 @@ class ProjectWindow(QDialog):
         status_layout.setContentsMargins(0, 0, 0, 0)
         self.status_label = QLabel("")
         self.mark_ready_btn = QPushButton("Mark ready")
+        self.mark_ready_btn.setToolTip(
+            "Mark this project ready to train."
+        )
         self.mark_ready_btn.clicked.connect(self.mark_ready)
         status_layout.addWidget(self.status_label)
         status_layout.addWidget(self.mark_ready_btn)
@@ -2997,16 +3006,49 @@ class HowToUseWindow(QDialog):
         self.setWindowTitle("How to Use Stella")
         self.resize(900, 600)
         layout = QHBoxLayout(self)
+        # T193: a search box over the topics — thirteen topics in
+        # a plain list is a lot to scan. Typing narrows the list
+        # by title or body; clearing it shows all of them again.
+        # Nothing is selected by default, and filtering never
+        # picks a topic for the user.
+        left = QVBoxLayout()
+        self.search_box = QLineEdit()
+        self.search_box.setPlaceholderText("Search the guide...")
+        self.search_box.setClearButtonEnabled(True)
+        self.search_box.textChanged.connect(self._on_search)
+        left.addWidget(self.search_box)
         self.topic_list = QListWidget()
         self.topic_list.addItems(topic_titles())
         self.topic_list.currentItemChanged.connect(self._on_topic)
-        layout.addWidget(self.topic_list, 1)
+        left.addWidget(self.topic_list, 1)
+        layout.addLayout(left, 1)
         self.content = QTextBrowser()
         self.content.setPlainText(
             "Pick a topic on the left to read how it works."
         )
         layout.addWidget(self.content, 2)
-        _chain_tab_order([self.topic_list, self.content])
+        _chain_tab_order([self.search_box, self.topic_list, self.content])
+
+    def _on_search(self, text):
+        needle = text.strip().lower()
+        for row in range(self.topic_list.count()):
+            item = self.topic_list.item(row)
+            title = item.text()
+            body = topic_text(title) or ""
+            match = (
+                not needle
+                or needle in title.lower()
+                or needle in body.lower()
+            )
+            self.topic_list.setRowHidden(row, not match)
+
+    def show_topic(self, title):
+        """Open the guide on one topic (T193): the empty state's
+        Getting started link lands here."""
+        self.search_box.clear()
+        rows = self.topic_list.findItems(title, Qt.MatchExactly)
+        if rows:
+            self.topic_list.setCurrentRow(self.topic_list.row(rows[0]))
 
     def _on_topic(self, current, _previous):
         if current is None:
@@ -3071,7 +3113,10 @@ class ChatWindow(QDialog):
         self._awaiting_model = False
         self._streaming = False
         self.setWindowTitle("Chat with Stella")
-        self.resize(700, 520)
+        # T194: 700x560, not 700x520 — at 520 the help line at the
+        # bottom rendered 30px tall against a 45px need, clipped
+        # by a line. The extra 40px gives it room.
+        self.resize(700, 560)
         layout = QVBoxLayout(self)
 
         activity = QHBoxLayout()
@@ -3106,6 +3151,7 @@ class ChatWindow(QDialog):
         plan_layout = QHBoxLayout(self.plan_row)
         plan_layout.setContentsMargins(0, 0, 0, 0)
         self.plan_run_btn = QPushButton("Run")
+        self.plan_run_btn.setToolTip("Run the plan Stella showed.")
         self.plan_run_btn.clicked.connect(self._on_plan_run)
         self.plan_cancel_btn = QPushButton("Cancel")
         self.plan_cancel_btn.clicked.connect(self._on_plan_cancel)
@@ -3130,15 +3176,16 @@ class ChatWindow(QDialog):
         self.cancel_btn.setEnabled(False)
         input_row.addWidget(self.cancel_btn)
         layout.addLayout(input_row)
-        layout.addWidget(
-            _help_label(
-                "The chat talks to the model you pick in Settings: a "
-                "model on this PC through Ollama, or Groq or Gemini "
-                "with your key. It can set up and run training for "
-                "you. Say just do it and it shows the plan first, "
-                "then runs it when you say go ahead."
-            )
+        # T194: the help line, shortened to two sentences (the
+        # greeting above already says the chat sets up and runs
+        # training) so it fits its two lines at the default size.
+        self.help_label = _help_label(
+            "The chat talks to the model you pick in Settings: a "
+            "model on this PC through Ollama, or Groq or Gemini "
+            "with your key. Say just do it and it shows the plan "
+            "first, then runs it when you say go ahead."
         )
+        layout.addWidget(self.help_label)
         _chain_tab_order([self.messages, self.input, self.send_btn,
                           self.cancel_btn])
         self._append(
@@ -3452,6 +3499,10 @@ class DistillDialog(QDialog):
         )
         buttons = QHBoxLayout()
         self.start_btn = QPushButton("Start")
+        self.start_btn.setToolTip(
+            "Start teaching: the teacher answers your prompts, "
+            "and its answers become the examples."
+        )
         self.start_btn.setDefault(True)
         self.start_btn.setEnabled(False)
         self.start_btn.clicked.connect(self.accept)
@@ -4031,7 +4082,11 @@ class MainWindow(QMainWindow):
         self._build_menu_bar()
 
         header_row = QHBoxLayout()
-        header = QLabel("STELLA: shape a base model into its proper job")
+        # T190: one tagline everywhere — the header carries the
+        # same line as the window title ("fine-tune models on
+        # your PC"); the title keeps the version number.
+        self.header_label = QLabel("STELLA: fine-tune models on your PC")
+        header = self.header_label
         header.setStyleSheet("font-size: 16px; font-weight: bold; padding: 6px 2px;")
         header_row.addWidget(header, 1)
         # Activity indicator (U16): a light plus small status text,
@@ -4103,6 +4158,10 @@ class MainWindow(QMainWindow):
         self.tree_hint = QLabel("")
         self.tree_hint.setWordWrap(True)
         self.tree_hint.setVisible(False)
+        # T193: the empty-state hint links to Getting started.
+        self.tree_hint.setTextFormat(Qt.RichText)
+        self.tree_hint.setOpenExternalLinks(False)
+        self.tree_hint.linkActivated.connect(self._on_tree_hint_link)
         left_layout.addWidget(self.tree_hint)
         self.splitter.addWidget(left)
 
@@ -4375,6 +4434,7 @@ class MainWindow(QMainWindow):
 
         hero_layout.addWidget(QLabel("3. Press go"))
         self.go_btn = QPushButton("Go")
+        self.go_btn.setToolTip("Run the picked job.")
         self.go_btn.setObjectName("goButton")
         self.go_btn.setMinimumHeight(40)
         self.go_btn.setStyleSheet("font-size: 15px; font-weight: bold;")
@@ -4474,12 +4534,19 @@ class MainWindow(QMainWindow):
         # toy-simple, no settings on screen. It starts the same
         # training with a 5-step cap.
         self.train_proof_btn = QPushButton("Proof run")
+        self.train_proof_btn.setToolTip(
+            "A short 5-step run to check the setup works."
+        )
         self.train_proof_btn.clicked.connect(
             lambda: self.start_training(max_steps=PROOF_RUN_STEPS)
         )
         # The dry run (T85): RAM fit + steps + disk, computed from
         # metadata only — no model load — and shown in the log.
         self.train_estimate_btn = QPushButton("Estimate")
+        self.train_estimate_btn.setToolTip(
+            "Work out how long this run takes and how much disk "
+            "it needs, without loading the model."
+        )
         self.train_estimate_btn.clicked.connect(self._on_estimate)
         run_btns.addWidget(self.train_pause_btn)
         run_btns.addWidget(self.train_resume_btn)
@@ -4630,6 +4697,10 @@ class MainWindow(QMainWindow):
         )
         ckpt_btns.addWidget(self.checkpoint_keep_spin)
         self.checkpoint_prune_btn = QPushButton("Prune")
+        self.checkpoint_prune_btn.setToolTip(
+            "Delete old checkpoints, keeping the newest ones "
+            "you picked. Deleted for good."
+        )
         self.checkpoint_prune_btn.clicked.connect(self._prune_checkpoints)
         ckpt_btns.addWidget(self.checkpoint_prune_btn)
         ckpt_btns.addStretch(1)
@@ -5185,12 +5256,18 @@ class MainWindow(QMainWindow):
         filter that matches nothing says so, so an empty-looking
         list is never mistaken for an empty store."""
         if not self._tree_profiles:
-            text = "No profiles yet - New profile to start"
+            text = (
+                "No profiles yet - New profile to start. New here? "
+                "<a href=\"getting-started\">Getting started</a>."
+            )
         elif self._current_profile and not any(
             key[0] == self._current_profile
             for key in self._tree_projects
         ):
-            text = "No projects yet - New project to start"
+            text = (
+                "No projects yet - New project to start. New here? "
+                "<a href=\"getting-started\">Getting started</a>."
+            )
         else:
             text = ""
         if not text and self._tree_profiles:
@@ -5210,6 +5287,12 @@ class MainWindow(QMainWindow):
                 text = "No profiles match that filter."
         self.tree_hint.setText(text)
         self.tree_hint.setVisible(bool(text))
+
+    def _on_tree_hint_link(self, link):
+        # T193: the empty state's Getting started link opens the
+        # guide on that topic.
+        if link == "getting-started":
+            self.open_howto_window(topic="Getting started")
 
     def _sync_tree_selection(self):
         """Select the tree row matching the current session (or
@@ -5443,10 +5526,10 @@ class MainWindow(QMainWindow):
             self.project_label.setText(
                 f"Project: {proj.get('display_name') or self._current_project}"
             )
-            self._say(
-                f"Profile: {self._current_profile}, "
-                f"project: {self._current_project}."
-            )
+            # T191: the status bar no longer repeats the session
+            # in slug form — the session title above carries it,
+            # in display names. The status bar keeps whatever the
+            # last action said.
         elif has_profile:
             try:
                 prof = self.store.get_profile(self._current_profile)
@@ -5462,7 +5545,8 @@ class MainWindow(QMainWindow):
                 "No project yet. Pick one on the left, or press Go "
                 "and name one."
             )
-            self._say(f"Profile: {self._current_profile}, no project yet.")
+            # T191: no slug repeat here either — the session title
+            # carries the profile name, in display form.
         else:
             self.session_title.setText("No training session yet.")
             self.session_summary.setText("Pick a model to begin.")
@@ -6397,12 +6481,14 @@ class MainWindow(QMainWindow):
         trash.activateWindow()
         return trash
 
-    def open_howto_window(self):
+    def open_howto_window(self, topic=None):
         if self._howto_window is None:
             self._howto_window = HowToUseWindow(parent=self)
         self._howto_window.show()
         self._howto_window.raise_()
         self._howto_window.activateWindow()
+        if topic is not None:
+            self._howto_window.show_topic(topic)
         return self._howto_window
 
     @property

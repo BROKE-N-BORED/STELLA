@@ -237,9 +237,10 @@ def test_click_project_sets_session(window, settings):
     assert "LFM3 Tool Seat" in window.session_title.text()
     assert "tool-calls" in window.session_title.text()
     assert "forge-traces.jsonl" in window.session_summary.text()
-    assert window.statusBar().currentMessage() == (
-        "Profile: lfm3-tool, project: tool-calls."
-    )
+    # T191: the status bar no longer repeats the session in slug
+    # form — the session title above carries it, in display names.
+    assert "lfm3-tool" not in window.statusBar().currentMessage()
+    assert "tool-calls" not in window.statusBar().currentMessage()
     assert settings.value("session/profile") == "lfm3-tool"
     assert settings.value("session/project") == "tool-calls"
     # No job is picked yet, so Go waits (T15); picking one arms it.
@@ -6892,7 +6893,10 @@ def test_empty_store_shows_profile_hint(qapp, store, settings):
     win.show()
     qapp.processEvents()
     assert win.tree_hint.isVisible()
-    assert win.tree_hint.text() == "No profiles yet - New profile to start"
+    assert win.tree_hint.text() == (
+        "No profiles yet - New profile to start. New here? "
+        "<a href=\"getting-started\">Getting started</a>."
+    )
     win.close()
 
 
@@ -6904,7 +6908,10 @@ def test_profile_without_projects_shows_hint(window, seeded, qapp):
     window.set_session("empty-profile", None)
     qapp.processEvents()
     assert window.tree_hint.isVisible()
-    assert window.tree_hint.text() == "No projects yet - New project to start"
+    assert window.tree_hint.text() == (
+        "No projects yet - New project to start. New here? "
+        "<a href=\"getting-started\">Getting started</a>."
+    )
     window.set_session("lfm3-tool", "tool-calls")
     qapp.processEvents()
     assert not window.tree_hint.isVisible()

@@ -1,5 +1,48 @@
 # Changelog
 
+## v0.23.0 — 2026-11-14
+
+The final UI polish slice (audit #9 R21–R26, tasks T189–T194):
+one tagline everywhere, the status bar stops repeating the
+session, tooltips where they earn their place, a searchable
+How to Use with a link from the empty state, and breathing room
+for the Chat window's help line. T189 is mooted by T16 — the
+settings form (Method combo with it) was deleted in v0.11.0, so
+there is no "full" left to remove from the UI; the model enum
+still accepts it, so old projects still load.
+
+- T189 — Remove the dead "full" method: MOOTED by T16. No Method
+  combo exists anywhere in the GUI anymore (grep of gui.py finds
+  no "method" control at all), so there is nothing to remove;
+  pinned by a test asserting no combo offers "full" and no label
+  is "full", and by a test opening a project whose stored method
+  is "full" (it opens clean — the model enum keeps accepting it,
+  so old manifests still load).
+- T190 — One tagline everywhere: the header now carries the same
+  line as the window title, "fine-tune models on your PC". The
+  window title keeps the version number.
+- T191 — Status bar shows the session once, in display names:
+  refresh_session no longer writes "Profile: <slug>, project:
+  <slug>." (or the profile-only variant) into the status bar —
+  the session title carries the session, in display names. The
+  status bar keeps whatever the last action said.
+- T192 — Tooltips where they earn their place: tree rows already
+  carried their full text as tooltips (T78), so this slice adds
+  the button half — Go, Proof run, Estimate, Prune, the chat
+  plan Run, dependency Add/Remove, Mark ready, and the distill
+  Start each explain themselves on hover, in plain words.
+- T193 — How to Use gets search and a link from the empty state:
+  a search box over the topics narrows the list by title or
+  body (case-insensitive, never picks a topic for the user), and
+  the empty-list hint ("No profiles yet", "No projects yet")
+  links to Getting started, which opens the guide on that topic.
+- T194 — Chat window breathing room: the default size is 700x560
+  (was 700x520, where the help line rendered 30px against a 45px
+  need) and the help line is shortened to two sentences — the
+  greeting already says the chat sets up and runs training. The
+  test measures the rendered label height against its
+  heightForWidth, not by eye.
+
 ## v0.22.0 — 2026-11-14
 
 The packages/CLI/tree slice (audit tasks T170, T171, T172, T173,
