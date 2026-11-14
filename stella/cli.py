@@ -29,6 +29,9 @@
                                           ask a teacher model each prompt
                                           and save the answers as the
                                           project's dataset
+    stella pc-info                        what this PC can do, and the
+                                          training settings Stella picks
+                                          for it
 
 Reads STELLA_HOME for the home dir (default ~/.stella).
 """
@@ -40,7 +43,8 @@ import sys
 from pathlib import Path
 
 from . import export as export_mod
-from .model import STELLA_VERSION, StellaError, Store
+from .autoconfig import auto_settings, format_report
+from .model import STELLA_VERSION, StellaError, Store, metamorph_problem
 
 
 def _store() -> Store:
@@ -55,9 +59,18 @@ def cmd_profiles(args) -> int:
         print("or: stella create-profile <name> --tag <ollama-tag> --role <role>")
         return 0
     for p in profiles:
+        # Defensive read (T5): one nameless manifest degrades to a
+        # warning line instead of killing the whole list.
+        name = p.get("name") or p.get("display_name") or "(unnamed profile)"
+        if not p.get("name"):
+            print(
+                "warning: a profile has no name, shown as "
+                "(unnamed profile).",
+                file=sys.stderr,
+            )
         role = p.get("role") or "-"
         tag = p.get("ollama_tag") or p.get("base_ref") or "-"
-        print(f"{p['name']}\trole: {role}\tbase: {tag}")
+        print(f"{name}\trole: {role}\tbase: {tag}")
     return 0
 
 
@@ -68,7 +81,24 @@ def cmd_projects(args) -> int:
         print(f"No projects in profile {args.profile!r}.")
         return 0
     for p in projects:
-        print(f"{p['name']}\tstatus: {p.get('status', 'draft')}")
+        name = p.get("name") or "(unnamed project)"
+        print(f"{name}\tstatus: {p.get('status', 'draft')}")
+        # A broken metamorph block degrades to a warning line (T39),
+        # read through the shared reader — never a crash, never
+        # silent normal.
+        problem = metamorph_problem(p)
+        if problem is not None:
+            print(
+                f"  warning: {name}: {problem}; "
+                "using the usual mode instead."
+            )
+    return 0
+
+
+def cmd_pc_info(args) -> int:
+    store = _store()
+    measurement, settings = auto_settings(store.home)
+    print(format_report(measurement, settings))
     return 0
 
 
@@ -136,10 +166,11 @@ def cmd_train(args) -> int:
     # Ctrl+C pauses cleanly: the loop checkpoints after the current
     # step and the run resumes with --resume. A hard kill mid-step
     # loses at most the steps since the last checkpoint.
+    # The handler sets the flag ONLY — printing inside a signal
+    # handler races with buffered stdout and crashed the pause
+    # (audit #5 W1). The "paused" event prints.
     def _sigint(signum, frame):
         controller.request_stop()
-        print("\nPausing after this step (checkpoint will save)...",
-              flush=True)
 
     old_handler = signal.signal(signal.SIGINT, _sigint)
     try:
@@ -660,6 +691,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_requant)
 
     p = sub.add_parser(
+        "pc-info",
+        help="what this PC can do, and the training settings "
+        "Stella picks for it",
+    )
+    p.set_defaults(func=cmd_pc_info)
+
+    p = sub.add_parser(
         "distill",
         help="ask a teacher model each prompt in a file and save "
         "the answers as the project's dataset",
@@ -681,6 +719,14 @@ def main(argv: list[str] | None = None) -> int:
         return args.func(args)
     except StellaError as exc:
         print(f"stella: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:
+        # Last-resort net (T5): an unexpected failure is one clean
+        # line on stderr, exit 1 — never a raw traceback on the
+        # default path. (KeyboardInterrupt/SystemExit still pass
+        # through: except Exception does not catch them.)
+        message = str(exc).strip() or f"unexpected {type(exc).__name__}"
+        print(f"stella: {message}", file=sys.stderr)
         return 1
 
 

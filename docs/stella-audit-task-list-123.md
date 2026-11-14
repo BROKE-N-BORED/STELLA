@@ -278,6 +278,7 @@ accounts for their findings.)
   GUI. Tests: one per probed variant, atomicity (home byte-identical
   after a failed import), normalization (returned names equal the
   stored names). A failed import refreshes the lists, so the window matches the disk even when the import fails.
+- **Status:** DONE in v0.9.0 (2026-11-13) — strict manifest schema (types only, no format versioning), slug normalized once at import start, atomic import via staging dir + move, GUI last-resort catch + refresh-on-failure. Verified by coordinator from a fresh unzip: 467 passed / 22 skipped.
 
 ### T2 — Dirty tracking, or auto-save on switch (both detail panels)
 
@@ -384,6 +385,7 @@ accounts for their findings.)
   the checkpoint. Tests: subprocess Ctrl+C-pause test against a
   stubbed or tiny training loop (the crash shipped because nothing
   tested the pause — see T142).
+- **Status:** DONE in v0.9.0 (2026-11-13) — the print inside cmd_train's _sigint handler is deleted; the handler sets the stop flag only and the "paused" event prints. Pinned by a subprocess Ctrl+C-pause test (tests/_ctrlc_driver.py).
 
 ### T5 — `main()` must catch everything; the list commands must read defensively
 
@@ -435,6 +437,7 @@ accounts for their findings.)
   metamorph, file-destination export, bad import manifest — all
   clean exits. An HF load failure on a bad repo id or an empty dir
   prints one clean `stella:` line naming the cause.
+- **Status:** DONE in v0.9.0 (2026-11-13) — main() catch-all: StellaError and unexpected exceptions print one plain-words line on stderr and exit 1, no raw traceback on the default path; defensive .get("name") in cmd_profiles; HF load failures wrapped as StellaError.
 
 ### T6 — Validate settings in the model, once, everywhere
 
@@ -482,6 +485,7 @@ accounts for their findings.)
   unknown-key rejection. The engine-side cases (rank "banana",
   grad_accum=0, checkpoint_steps=-1, warmup_steps=-3) are refused
   with a readable message naming the setting.
+- **Status:** DONE in v0.9.0 (2026-11-13) — settings validated in the model (SETTING_RULES, ranges matching the chat's), _write_json with allow_nan=False, engine range checks in run_training_loop (RUN_SETTING_RULES).
 
 ### T7 — Learning rate as a real numeric input with a sane range
 
@@ -561,6 +565,7 @@ accounts for their findings.)
   be clicked (or arrowed to) explicitly. Tests: timer-driven modal
   test asserting Enter returns No, on both the profile and the
   project delete.
+- **Status:** DONE in v0.9.0 (2026-11-13) — verified already implemented: delete confirms default to No (gui.py), pinned by test_delete_confirm_defaults_to_no. No code change in this version; marked DONE after coordinator verification.
 
 ### T10 — Probe loads the base model twice at once; load one at a time
 
@@ -860,6 +865,7 @@ accounts for their findings.)
   project's values. Tests: bad-type fill for each setting, mixed
   panel impossible, save-after-bad-fill writes only this
   project's values.
+- **Status:** DONE in v0.9.0 (2026-11-13) — ProjectWindow._load is defensive: a bad stored value falls back to the default, the panel shows a "stored value was invalid" note, and the save guard prevents writing the bad value back.
 
 ### T22 — Safe torch.load for optimizer.pt (weights_only=True)
 
@@ -1318,6 +1324,7 @@ accounts for their findings.)
   save — the save works and the mode defaults to `morph`; no
   traceback escapes the Qt slot. Tests: missing-key save, null
   save, string-block save.
+- **Status:** DONE in v0.9.0 (2026-11-13) — shared defensive metamorph readers in the model layer (metamorph_mode / metamorph_problem); get_project defaults the block; update_project reads through the reader. No KeyError on a missing block, no AttributeError on a null block.
 
 ### T38 — Export must not crash on `metamorph: null` — and must not leave a partial package
 
@@ -1345,6 +1352,7 @@ accounts for their findings.)
   defaults to `morph`), or fails before creating anything — never
   a partial folder. Tests: null export, missing-key export,
   no-partial-package on failure.
+- **Status:** DONE in v0.9.0 (2026-11-13) — export goes through the T37 reader and builds all content before creating the folder; no partial package on a bad metamorph block.
 
 ### T39 — The GUI project list must not die on a string metamorph
 
@@ -1377,6 +1385,7 @@ accounts for their findings.)
   line for the string-metamorph project and lists the rest. Tests:
   string block in the list, string block in the detail fill,
   string block in the CLI list.
+- **Status:** DONE in v0.9.0 (2026-11-13) — a string-metamorph project shows a warning row in the GUI tree and a warning line in CLI list output. Pinned by test_tree_warns_on_string_metamorph.
 
 ### T40 — Settle the package format: versioned format + named kinds
 
@@ -1537,6 +1546,7 @@ accounts for their findings.)
 - **Done:** A screenshot at 1100x680 shows Start training (and the
   progress bar) without scrolling. Tests: geometry assertion that
   Start training is inside the viewport at default size.
+- **Status:** DONE in v0.9.0 (2026-11-13) — verified already true: at 1100x680 the Train panel (Start training, train progress) sits above the fold. Pinned by test_train_panel_above_fold_at_default_size. (Sleep below the fold is T74's problem.)
 
 ### T45 — Dataset picker + validation
 
@@ -1741,6 +1751,7 @@ accounts for their findings.)
   nothing; the detail panel is empty; selecting a profile then a
   project works as before. Tests: launch state has no selection
   (GUI test asserting current row is -1 / None on both lists).
+- **Status:** DONE in v0.9.0 (2026-11-13) — verified already true: nothing is selected on launch, pinned by test_no_selection_by_default. A returning user's restored session is their own pick coming back, not a default.
 
 ### T53 — A real status lifecycle, with UI
 
@@ -2259,6 +2270,7 @@ accounts for their findings.)
 - **Done:** The tooltip states the truth; the list suffix is
   unchanged but no longer misleading beside an honest tooltip.
   Tests: tooltip text assertion.
+- **Status:** DONE in v0.9.0 (2026-11-13) — the metamorph tooltip vanished with the control in v0.8 (zero "metamorph" in gui.py); pinned by the test asserting no metamorph_combo exists.
 
 ### T72 — Wire `compress` to real compression: GGUF quant + package compression
 
@@ -3355,6 +3367,7 @@ accounts for their findings.)
 - **Done:** With a profile selected but no project, the panel
   shows no settings values and Save is disabled. Tests:
   no-selection panel state, Save disabled.
+- **Status:** DONE in v0.9.0 (2026-11-13) — the v0.4 restructure fixed this: a no-project session shows no settings values. Pinned by test_no_project_session_has_no_settings.
 
 ### T124 — Buttons follow the selection; panes explain themselves
 
@@ -3562,6 +3575,7 @@ accounts for their findings.)
 - **Done:** main carries audit #4, #5, #6, #7, and #8 reports and the
   current merged list; the repo's docs match the tree. (Verified
   by read-back after the push.)
+- **Status:** DONE in v0.9.0 (2026-11-13) — verified already true: the audit #8 report and audit #4 task list are on main (docs pushes be33e328 + 8f2f0b22 carried them). No code change; marked DONE after coordinator verification.
 
 ### T132 — Wrap pip failures in a Stella error
 
@@ -4165,6 +4179,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Done:** Launching Stella twice raises the first window; no
   second writer on the home. Tests: second-launch detection
   (subprocess).
+- **Status:** DONE in v0.9.0 (2026-11-13) — single-instance guard was already implemented (gui.py QLocalServer); pinned by the subprocess test that starts a first instance and proves a second one cannot take the socket.
 
 ### T163 — Health badge per profile row
 
@@ -4436,6 +4451,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
   behavior summary.
 - **Done:** The Train panel names the mode and its current
   (non-)effect during a run. Tests: panel shows the mode line.
+- **Status:** OVERTAKEN by the v0.8 metamorph UI removal — the control this task would have changed no longer exists (deliberate removal, pinned by tests). Re-scope only if the MetaMorphAi codec lands; the reading pick (morphing spirit vs compression codec) is still undecided.
 
 ### T176 — CLI help strings for `--metamorph`
 
@@ -4452,6 +4468,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
   update half of D15 rides T87.
 - **Done:** `stella create-project --help` explains the modes
   honestly. Tests: help output contains the mode meanings.
+- **Status:** OVERTAKEN by the v0.8 metamorph UI removal — the control this task would have changed no longer exists (deliberate removal, pinned by tests). Re-scope only if the MetaMorphAi codec lands; the reading pick (morphing spirit vs compression codec) is still undecided.
 
 ### T177 — Validate the notes type at both write points
 

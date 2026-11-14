@@ -81,10 +81,20 @@ def test_delete_profile(store):
 
 
 def test_create_project_defaults(store):
+    # No explicit settings: this PC picks them (auto-config), so the
+    # rank/seq match the computed recipe for this machine's RAM.
+    from stella.autoconfig import compute_settings, measure_pc
+
     store.create_profile("p1")
     data = store.create_project("p1", "proj")
+    expected = compute_settings(measure_pc(store.home)["ram_available_gb"])
+    assert data["settings_source"] == "auto"
     assert data["settings"]["method"] == "lora"
-    assert data["settings"]["rank"] == 8
+    assert data["settings"]["rank"] == expected["rank"]
+    assert data["settings"]["max_seq_len"] == expected["max_seq_len"]
+    assert data["settings"]["learning_rate"] == 0.0002
+    assert data["settings"]["epochs"] == 3
+    assert data["settings"]["batch_size"] == 1
     assert data["metamorph"]["mode"] == "morph"
     assert data["status"] == "draft"
     pdir = store.home / "profiles" / "p1" / "projects" / "proj"
@@ -159,6 +169,197 @@ def test_path_escape_blocked(store):
             store.profile_dir(evil)
     # Nothing escaped: home holds only profiles/.
     assert sorted(p.name for p in store.home.iterdir()) == ["profiles"]
+
+
+def _corrupt_project_json(store, profile, project, mutate):
+    """Hand-edit a project.json in place (the file the docs invite
+    users to fix by hand)."""
+    manifest = store.project_dir(profile, project) / "project.json"
+    data = json.loads(manifest.read_text())
+    mutate(data)
+    manifest.write_text(json.dumps(data))
+    return manifest
+
+
+# -- T37: the defensive metamorph reader ----------------------------
+
+
+def test_metamorph_mode_reader():
+    from stella.model import metamorph_mode
+
+    assert metamorph_mode({"metamorph": {"mode": "both"}}) == "both"
+    assert metamorph_mode({"metamorph": {"mode": "compress"}}) == "compress"
+    assert metamorph_mode({}) == "morph"  # missing block
+    assert metamorph_mode({"metamorph": None}) == "morph"  # null block
+    assert metamorph_mode({"metamorph": "both"}) == "morph"  # string block
+    assert metamorph_mode({"metamorph": 7}) == "morph"  # int block
+    assert metamorph_mode({"metamorph": {}}) == "morph"  # no mode key
+    assert metamorph_mode({"metamorph": {"mode": "shrink"}}) == "morph"
+
+
+def test_metamorph_problem_reader():
+    from stella.model import metamorph_problem
+
+    assert metamorph_problem({"metamorph": {"mode": "both"}}) is None
+    assert metamorph_problem({}) is None  # absent is fine, not broken
+    assert metamorph_problem({"metamorph": None}) is not None
+    assert metamorph_problem({"metamorph": "both"}) is not None
+    assert metamorph_problem({"metamorph": {"mode": "shrink"}}) is not None
+
+
+def test_get_project_defaults_metamorph_block(store):
+    store.create_profile("p1")
+    store.create_project("p1", "proj")
+    _corrupt_project_json(store, "p1", "proj", lambda d: d.pop("metamorph"))
+    assert store.get_project("p1", "proj")["metamorph"]["mode"] == "morph"
+    _corrupt_project_json(
+        store, "p1", "proj", lambda d: d.update(metamorph=None)
+    )
+    assert store.get_project("p1", "proj")["metamorph"]["mode"] == "morph"
+    _corrupt_project_json(
+        store, "p1", "proj", lambda d: d.update(metamorph="both")
+    )
+    assert store.get_project("p1", "proj")["metamorph"]["mode"] == "morph"
+
+
+def test_update_project_missing_metamorph_key(store):
+    store.create_profile("p1")
+    store.create_project("p1", "proj")
+    _corrupt_project_json(store, "p1", "proj", lambda d: d.pop("metamorph"))
+    # No KeyError: the save works and the mode defaults to morph.
+    updated = store.update_project(
+        "p1", "proj", metamorph={"notes": "kept my note"}
+    )
+    assert updated["metamorph"]["mode"] == "morph"
+    assert updated["metamorph"]["notes"] == "kept my note"
+
+
+def test_update_project_null_metamorph(store):
+    store.create_profile("p1")
+    store.create_project("p1", "proj")
+    _corrupt_project_json(
+        store, "p1", "proj", lambda d: d.update(metamorph=None)
+    )
+    updated = store.update_project("p1", "proj", metamorph={"mode": "both"})
+    assert updated["metamorph"]["mode"] == "both"
+
+
+def test_update_project_string_metamorph(store):
+    store.create_profile("p1")
+    store.create_project("p1", "proj")
+    _corrupt_project_json(
+        store, "p1", "proj", lambda d: d.update(metamorph="both")
+    )
+    updated = store.update_project(
+        "p1", "proj", display_name="Still saves"
+    )
+    assert updated["display_name"] == "Still saves"
+    updated = store.update_project(
+        "p1", "proj", metamorph={"mode": "compress"}
+    )
+    assert updated["metamorph"]["mode"] == "compress"
+
+
+# -- T6: validate settings in the model -----------------------------
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"rank": -5},
+        {"rank": 0},
+        {"rank": 65},
+        {"rank": "banana"},
+        {"rank": 2.5},
+        {"rank": True},
+        {"epochs": 0},
+        {"epochs": 101},
+        {"batch_size": 0},
+        {"batch_size": 33},
+        {"learning_rate": -0.5},
+        {"learning_rate": 2.0},
+        {"learning_rate": float("inf")},
+        {"learning_rate": float("nan")},
+        {"max_seq_len": 127},
+        {"max_seq_len": 999999},
+        {"grad_accum": 0},
+        {"checkpoint_steps": -1},
+        {"val_fraction": 0.6},
+        {"warmup_steps": -3},
+        {"foo": 1},  # unknown key
+        {"method": "banana"},
+        {"method": "LORA"},
+    ],
+)
+def test_create_project_rejects_bad_settings(store, bad):
+    store.create_profile("p1")
+    with pytest.raises(StellaError):
+        store.create_project("p1", "proj", settings=bad)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"rank": -5},
+        {"epochs": 0},
+        {"learning_rate": float("inf")},
+        {"learning_rate": float("nan")},
+        {"foo": 1},
+        {"method": "banana"},
+    ],
+)
+def test_update_project_rejects_bad_settings(store, bad):
+    store.create_profile("p1")
+    store.create_project("p1", "proj")
+    rank_before = store.get_project("p1", "proj")["settings"]["rank"]
+    with pytest.raises(StellaError):
+        store.update_project("p1", "proj", settings=bad)
+    # Nothing was stored: the old settings survive untouched.
+    assert store.get_project("p1", "proj")["settings"]["rank"] == rank_before
+
+
+def test_settings_rejection_names_the_key(store):
+    store.create_profile("p1")
+    with pytest.raises(StellaError, match="rank"):
+        store.create_project("p1", "proj", settings={"rank": -5})
+    with pytest.raises(StellaError, match="foo"):
+        store.create_project("p1", "proj", settings={"foo": 1})
+
+
+def test_valid_settings_still_save(store):
+    store.create_profile("p1")
+    data = store.create_project(
+        "p1",
+        "proj",
+        settings={
+            "method": "full",
+            "rank": 64,
+            "learning_rate": 0.001,
+            "epochs": 100,
+            "batch_size": 32,
+            "grad_accum": 64,
+            "max_seq_len": 32768,
+            "checkpoint_steps": 0,
+            "val_fraction": 0.5,
+            "warmup_steps": 1000,
+            "seed": -1,
+            "notes": "edge values",
+        },
+    )
+    assert data["settings"]["rank"] == 64
+    assert data["settings"]["method"] == "full"
+    updated = store.update_project("p1", "proj", settings={"rank": 1})
+    assert updated["settings"]["rank"] == 1
+
+
+def test_write_json_refuses_nan(tmp_path):
+    from stella.model import _write_json
+
+    with pytest.raises(StellaError, match="not a real number"):
+        _write_json(tmp_path / "bad.json", {"x": float("nan")})
+    with pytest.raises(StellaError, match="not a real number"):
+        _write_json(tmp_path / "bad.json", {"x": float("inf")})
+    assert not (tmp_path / "bad.json").exists()
 
 
 def test_slug_from_model():

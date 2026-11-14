@@ -319,6 +319,7 @@ def test_list_projects_tool(agent, store, seeded):
 
 def test_settings_validation(agent, store, seeded):
     base = {"profile": "lfm3-tool", "project": "tool-calls"}
+    rank_before = store.get_project("lfm3-tool", "tool-calls")["settings"]["rank"]
     bad_rank = dict(base, settings={"rank": -5})
     assert "between 1 and 64" in agent.call_tool(
         "set_project_settings", bad_rank
@@ -340,7 +341,7 @@ def test_settings_validation(agent, store, seeded):
         "set_project_settings", non_int
     )
     # The bad sets stored nothing.
-    assert store.get_project("lfm3-tool", "tool-calls")["settings"]["rank"] == 8
+    assert store.get_project("lfm3-tool", "tool-calls")["settings"]["rank"] == rank_before
     good = dict(base, settings={"rank": 4, "epochs": 2})
     result = agent.call_tool("set_project_settings", good)
     assert "rank 4" in result

@@ -1,5 +1,70 @@
 # Changelog
 
+## v0.9.0 — 2026-11-13
+
+Auto-config backend plus the P0 foundations from the finish list.
+The backend now measures the PC and picks the training settings,
+so the user never has to; the trust boundary (import/export) is
+strict and atomic; and the model, the CLI, and the engine all
+validate settings the same way.
+
+- Auto-config (new `stella/autoconfig.py`, Qt-free, stdlib only):
+  `measure_pc()` reads CPU count + model, RAM total/available,
+  free disk on the Stella home filesystem, and load; 
+  `compute_settings()` picks the recipe by documented conservative
+  rules — batch size always 1 on CPU; rank 8, learning rate 2e-4,
+  3 epochs, max sequence length 1024; rank 4 and seq 512 when less
+  than 4 GB of RAM is available. New projects get the computed
+  settings with `settings_source="auto"`; training re-measures at
+  run start for auto projects and stores the fresh values. Anything
+  a human set (Project window, chat, import) is `"manual"` and is
+  never recomputed. New command: `stella pc-info` prints the
+  measurement and the picked settings in plain words.
+- T37 — one defensive metamorph reader (`metamorph_mode` in the
+  model layer): a missing, null, or wrong-type block yields the
+  default mode instead of a crash. `get_project` defaults the
+  block; `update_project` reads through the reader.
+- T38 — export reads metamorph through the reader and builds the
+  whole package in a staging dir, moved into place only when every
+  file is written: no crash on `metamorph: null`, no partial
+  package on failure.
+- T39 — a string-metamorph project shows a warning row in the GUI
+  tree and a warning line in the CLI project list, via the reader.
+- T1 — trust-boundary import: strict manifest schema in
+  `verify_export` (types for settings, config, dependencies,
+  status, metamorph mode); slugs normalized once at import start,
+  so returned names match stored names; import is atomic
+  (settings validated before anything is created, plus rollback of
+  anything created on a late failure); the GUI import handler gets
+  a last-resort catch and refreshes the lists on failure. No format
+  versioning here — that stays T40's.
+- T4 — the train command's Ctrl+C handler no longer prints from
+  inside the signal handler (the pause message already comes from
+  the `paused` event), matching the sleep handler. Subprocess
+  Ctrl+C-pause test: pause, checkpoint saved, exit 0.
+- T5 — `main()` catches everything: one clean `stella:` line, exit
+  1, no raw traceback on the default path. `profiles` reads
+  defensively (a nameless manifest degrades to a warning line).
+  HF load failures in `load_base_model` are wrapped as StellaError
+  naming the repo/path and the likely cause.
+- T6 — settings validated in the model (`validate_settings`,
+  ranges matching the chat's table, now the single table both use):
+  bad rank/epochs/batch/learning rate/seq len, unknown keys, and a
+  bad method are all refused with the key named. `_write_json`
+  refuses NaN/inf. The engine re-checks every numeric setting it
+  reads (`validate_run_settings` at the top of `train_project` and
+  `run_training_loop`) instead of bare int()/float().
+- T21 — the Project window fills defensively: a bad stored value
+  falls back to the default with a "stored value was invalid" note,
+  the fill never aborts mid-way, and Save can never write another
+  project's values back.
+- Pinning tests (no behavior change): T44 geometry (Start training
+  + progress bar inside the 1100x680 viewport), T71 (no metamorph
+  promise text in any visible GUI string), T123 (no-project session
+  summary holds no settings values; no project window opens with no
+  selection), T162 (a second launch against a live first instance
+  exits 0 with no second window).
+
 ## v0.8.0 — 2026-11-13
 
 This completes the stopped v0.5 scope (re-quantize + distill),

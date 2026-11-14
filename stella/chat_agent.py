@@ -32,7 +32,7 @@ import re
 from .distill import distill_dataset
 from .gguf import export_gguf
 from .howto import topic_text, topic_titles
-from .model import StellaError, Store, slug_from_model
+from .model import SETTING_RULES, StellaError, Store, slug_from_model
 from .ollama import OllamaError, list_models
 from .probe import probe_gate, probe_project
 from .providers import ProviderError, make_chat_fn
@@ -85,19 +85,9 @@ DEFAULT_CHAT_SETTINGS = {
 }
 
 # Settings the chat may change, with their allowed ranges. Anything
-# outside these is refused in plain words, never stored.
-SETTING_RULES = {
-    "rank": ("int", 1, 64),
-    "learning_rate": ("float", 0.0, 1.0),
-    "epochs": ("int", 1, 100),
-    "batch_size": ("int", 1, 32),
-    "grad_accum": ("int", 1, 64),
-    "max_seq_len": ("int", 128, 32768),
-    "checkpoint_steps": ("int", 0, 10000),
-    "val_fraction": ("float", 0.0, 0.5),
-    "warmup_steps": ("int", 0, 1000),
-    "seed": ("int", -2**31, 2**31 - 1),
-}
+# outside these is refused in plain words, never stored. The table
+# lives in the model (SETTING_RULES) — one rule, everywhere — and is
+# imported here so the chat and the model can never drift apart.
 
 TOOL_BLOCK_RE = re.compile(r"```tool\s*\n?(.*?)\n?```", re.DOTALL)
 
@@ -536,12 +526,17 @@ class ChatAgent:
             name = self._unique_slug("fine-tune", taken)
         else:
             name = self._unique_slug(slug_from_model(name), taken)
-        self.store.create_project(profile, name)
+        created = self.store.create_project(profile, name)
         self.current_profile = profile
         self.current_project = name
+        # Report the settings this PC actually picked (auto-config
+        # shrinks them on a short-RAM machine), not the usual ones.
+        picked = created["settings"]
         return (
             f"Created project {name!r} in profile {profile!r}, with the "
-            "usual settings (rank 8, learning rate 0.0002, 3 epochs). "
+            f"usual settings for this PC (rank {picked['rank']}, "
+            f"learning rate {picked['learning_rate']}, "
+            f"{picked['epochs']} epochs). "
             "Next step: the data. Say which dataset file to use, or say "
             "use the sample dataset."
         )

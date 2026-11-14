@@ -21,12 +21,15 @@ dir — names are slugs, paths are containment-checked.
 from __future__ import annotations
 
 import json
+import math
 import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
-STELLA_VERSION = "0.8.0"
+from .autoconfig import compute_settings, measure_pc
+
+STELLA_VERSION = "0.9.0"
 
 # Slug: lowercase letters, digits, dash, underscore. Must start alnum.
 # No dots, no slashes — a slug can never climb out of its directory.
@@ -35,6 +38,41 @@ MAX_SLUG_LEN = 64
 
 # MetaMorphAi modes (structure only in v0.1 — no codec yet).
 METAMORPH_MODES = ("morph", "compress", "both")
+DEFAULT_METAMORPH_MODE = "morph"
+
+# Training methods. "full" is listed so old projects still show it,
+# but it does not run on this PC (train.py always trains LoRA).
+SETTING_METHODS = ("lora", "full")
+
+# Project lifecycle statuses, as used across the tree: draft at
+# creation, training/paused/trained by the engine, exported by GGUF
+# export. The import boundary (export.verify_export) rejects any
+# other status.
+PROJECT_STATUSES = ("draft", "training", "paused", "trained", "exported")
+
+# Where a project's settings came from: "auto" (measured from this
+# PC, re-resolved at each run start) or "manual" (set by a human —
+# the Project window, the chat, an import — never recomputed).
+# Projects written before v0.9 have no field and read as "manual",
+# so old hand-tuned settings are never overwritten.
+SETTINGS_SOURCES = ("auto", "manual")
+
+# Settings the model validates, with their allowed ranges. These are
+# the chat's ranges (chat_agent.SETTING_RULES imports this table) —
+# one rule, everywhere: GUI, CLI, imports, and hand-edits all get
+# the same answer. Each rule is (kind, low, high).
+SETTING_RULES = {
+    "rank": ("int", 1, 64),
+    "learning_rate": ("float", 0.0, 1.0),
+    "epochs": ("int", 1, 100),
+    "batch_size": ("int", 1, 32),
+    "grad_accum": ("int", 1, 64),
+    "max_seq_len": ("int", 128, 32768),
+    "checkpoint_steps": ("int", 0, 10000),
+    "val_fraction": ("float", 0.0, 0.5),
+    "warmup_steps": ("int", 0, 1000),
+    "seed": ("int", -2**31, 2**31 - 1),
+}
 
 # Default training settings for a new project — the knobs the Item 3
 # training engine drives (stella/train.py). Micro-LoRA defaults for a
@@ -85,7 +123,7 @@ def validate_slug(name: str, kind: str = "name") -> str:
         raise StellaError(f"{kind} is too long (max {MAX_SLUG_LEN})")
     if not SLUG_RE.match(slug):
         raise StellaError(
-            f"{kind} {name!r} is not valid — use lowercase letters, "
+            f"{kind} {name!r} is not valid. Use lowercase letters, "
             "numbers, dashes and underscores, starting with a letter "
             "or number"
         )
@@ -111,6 +149,102 @@ def slug_from_model(model: str) -> str:
     return value or "profile"
 
 
+def metamorph_mode(data: dict) -> str:
+    """The metamorph mode of a project dict, defensively (T37).
+
+    The ONE reader for the block: the model, the CLI list, the GUI
+    list + detail fill, export, and verify all go through here.
+    Missing, null, wrong-type, or unknown-mode blocks all yield the
+    default ("morph") instead of a crash. Use metamorph_problem()
+    when the caller needs to know the block was broken.
+    """
+    if not isinstance(data, dict):
+        return DEFAULT_METAMORPH_MODE
+    block = data.get("metamorph")
+    if not isinstance(block, dict):
+        return DEFAULT_METAMORPH_MODE
+    mode = block.get("mode", DEFAULT_METAMORPH_MODE)
+    if mode not in METAMORPH_MODES:
+        return DEFAULT_METAMORPH_MODE
+    return mode
+
+
+def metamorph_problem(data: dict) -> str | None:
+    """Why a project's metamorph block is broken, in plain words —
+    or None when it is fine (including absent, which just means the
+    default). The GUI tree and the CLI list show this as a warning
+    instead of dying on the row (T39)."""
+    if not isinstance(data, dict):
+        return "the project record is not set right"
+    if "metamorph" not in data:
+        return None
+    block = data.get("metamorph")
+    if not isinstance(block, dict):
+        return "the metamorph setting is not set right"
+    mode = block.get("mode", DEFAULT_METAMORPH_MODE)
+    if mode not in METAMORPH_MODES:
+        return (
+            f"metamorph mode {mode!r} is not one of "
+            f"{', '.join(METAMORPH_MODES)}"
+        )
+    return None
+
+
+def validate_settings(settings: dict) -> dict:
+    """Validate a full settings dict against SETTING_RULES (T6).
+
+    Returns a cleaned copy (numbers coerced to their kind). Every
+    rejection is a StellaError naming the key and what is accepted:
+    unknown keys, a bad method, a wrong type, a non-finite number,
+    or a value outside its range. The GUI, CLI, imports, and
+    hand-edits all hit these same rules through create/update.
+    """
+    if not isinstance(settings, dict):
+        raise StellaError("settings must be an object")
+    cleaned: dict = {}
+    for key, value in settings.items():
+        if key == "method":
+            if value not in SETTING_METHODS:
+                raise StellaError(
+                    f"method must be one of {', '.join(SETTING_METHODS)}, "
+                    f"not {value!r}"
+                )
+            cleaned[key] = value
+            continue
+        if key == "notes":
+            if not isinstance(value, str):
+                raise StellaError(f"notes must be text, not {value!r}")
+            cleaned[key] = value
+            continue
+        rule = SETTING_RULES.get(key)
+        if rule is None:
+            raise StellaError(
+                f"there is no setting called {key!r}. The settings are: "
+                f"{', '.join(sorted(SETTING_RULES))}, method, notes"
+            )
+        kind, low, high = rule
+        if isinstance(value, bool):
+            raise StellaError(f"{key} must be a number, not {value!r}")
+        try:
+            number = int(value) if kind == "int" else float(value)
+        except (TypeError, ValueError, OverflowError):
+            raise StellaError(f"{key} must be a number, not {value!r}") from None
+        if kind == "int" and float(value) != number:
+            raise StellaError(
+                f"{key} must be a whole number, not {value!r}"
+            )
+        if kind == "float" and not math.isfinite(number):
+            raise StellaError(
+                f"{key} must be a real number, not {value!r}"
+            )
+        if not low <= number <= high:
+            raise StellaError(
+                f"{key} must be between {low} and {high}, not {value!r}"
+            )
+        cleaned[key] = number
+    return cleaned
+
+
 def _check_inside(home: Path, path: Path) -> Path:
     """Resolve `path` and require it to sit inside `home`."""
     home_r = home.resolve()
@@ -128,8 +262,17 @@ def _check_inside(home: Path, path: Path) -> Path:
 
 def _write_json(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        text = json.dumps(data, indent=2, sort_keys=True, allow_nan=False)
+    except ValueError as exc:
+        # A NaN/inf value must never reach disk as bare NaN (not
+        # valid JSON, and the next read would misbehave).
+        raise StellaError(
+            "cannot save: a value is not a real number "
+            "(NaN or infinity cannot be stored)"
+        ) from exc
     tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.write_text(text + "\n", encoding="utf-8")
     tmp.replace(path)
 
 
@@ -294,6 +437,15 @@ class Store:
         data = _read_json(manifest)
         data.setdefault("name", project)
         data.setdefault("profile", validate_slug(profile, "profile name"))
+        # Default the metamorph block in memory (T37): a missing,
+        # null, or wrong-type block reads as the default instead of
+        # crashing the next reader. The file on disk is untouched —
+        # the lists still see the raw block and can warn about it.
+        block = data.get("metamorph")
+        if not isinstance(block, dict):
+            data["metamorph"] = {"mode": DEFAULT_METAMORPH_MODE, "notes": ""}
+        elif block.get("mode") not in METAMORPH_MODES:
+            block["mode"] = DEFAULT_METAMORPH_MODE
         return data
 
     def create_project(
@@ -320,8 +472,20 @@ class Store:
             raise StellaError(
                 f"project {slug!r} already exists in profile {profile!r}"
             )
-        merged = dict(DEFAULT_SETTINGS)
-        merged.update(settings or {})
+        # Settings: no explicit settings means this PC picks them
+        # (auto-config, measured now); explicit settings are the
+        # caller's and are validated but never recomputed.
+        if settings is None:
+            measurement = measure_pc(self.home)
+            computed = compute_settings(measurement["ram_available_gb"])
+            merged = dict(DEFAULT_SETTINGS)
+            merged.update(computed)
+            settings_source = "auto"
+        else:
+            merged = dict(DEFAULT_SETTINGS)
+            merged.update(settings)
+            settings_source = "manual"
+        merged = validate_settings(merged)
         data = {
             "stella_version": STELLA_VERSION,
             "kind": "project",
@@ -330,6 +494,7 @@ class Store:
             "profile": profile,
             "dataset_ref": dataset_ref or "",
             "settings": merged,
+            "settings_source": settings_source,
             "metamorph": {"mode": metamorph_mode, "notes": metamorph_notes or ""},
             "status": "draft",
             "created": utc_now(),
@@ -348,34 +513,60 @@ class Store:
             "display_name",
             "dataset_ref",
             "settings",
+            "settings_source",
             "metamorph",
             "status",
         }
+        settings_changed = False
         for key, value in fields.items():
             if key not in allowed:
                 raise StellaError(f"cannot change {key!r} on a project")
             if key == "metamorph":
                 if not isinstance(value, dict):
                     raise StellaError("metamorph must be an object")
-                mode = value.get("mode", data["metamorph"]["mode"])
+                # Read the stored block through the shared reader
+                # (T37): a missing/null/wrong-type block defaults
+                # instead of raising KeyError/TypeError.
+                mode = value.get("mode", metamorph_mode(data))
                 if mode not in METAMORPH_MODES:
                     raise StellaError(
                         f"metamorph mode must be one of "
                         f"{', '.join(METAMORPH_MODES)}"
                     )
+                old_block = data.get("metamorph")
+                old_notes = (
+                    old_block.get("notes", "")
+                    if isinstance(old_block, dict)
+                    else ""
+                )
                 data["metamorph"] = {
                     "mode": mode,
-                    "notes": value.get("notes", data["metamorph"].get("notes", "")),
+                    "notes": value.get("notes", old_notes),
                 }
                 continue
             if key == "settings":
                 if not isinstance(value, dict):
                     raise StellaError("settings must be an object")
-                merged = dict(data.get("settings", {}))
+                old = data.get("settings")
+                merged = dict(old) if isinstance(old, dict) else dict(DEFAULT_SETTINGS)
                 merged.update(value)
-                data["settings"] = merged
+                data["settings"] = validate_settings(merged)
+                settings_changed = True
+                continue
+            if key == "settings_source":
+                if value not in SETTINGS_SOURCES:
+                    raise StellaError(
+                        f"settings source must be one of "
+                        f"{', '.join(SETTINGS_SOURCES)}"
+                    )
+                data[key] = value
                 continue
             data[key] = value
+        # Explicit settings are a human choice: the project becomes
+        # manual, unless the caller named the source itself (the
+        # run-start re-resolve passes "auto" back in).
+        if settings_changed and "settings_source" not in fields:
+            data["settings_source"] = "manual"
         data["updated"] = utc_now()
         pdir = self.project_dir(profile, project)
         _write_json(pdir / "project.json", data)

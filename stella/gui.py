@@ -77,9 +77,11 @@ from .debug_log import DebugLogger, check_ollama
 from .howto import topic_text, topic_titles
 from .model import (
     DEFAULT_SETTINGS,
+    SETTING_RULES,
     STELLA_VERSION,
     StellaError,
     Store,
+    metamorph_problem,
     slug_from_model,
 )
 from .ollama import list_models, ollama_url
@@ -102,6 +104,40 @@ def _help_label(text):
     label.setStyleSheet("color: #9a9a9a; font-size: 11px;")
     label.setWordWrap(True)
     return label
+
+
+def _coerce_int(value, low, high, default):
+    """A stored int setting, or the default when it is not a usable
+    whole number in range. Returns (value, was_valid). Used by the
+    Project window fill (T21): a bad stored value falls back to the
+    default instead of aborting the fill mid-way."""
+    try:
+        if isinstance(value, bool):
+            return default, False
+        number = int(value)
+        if float(value) != number:
+            return default, False
+    except (TypeError, ValueError, OverflowError):
+        return default, False
+    if not low <= number <= high:
+        return default, False
+    return number, True
+
+
+def _coerce_float(value, low, high, default):
+    """A stored float setting, or the default when it is not a real
+    number in range. Returns (value, was_valid)."""
+    import math
+
+    try:
+        if isinstance(value, bool):
+            return default, False
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return default, False
+    if not math.isfinite(number) or not low <= number <= high:
+        return default, False
+    return number, True
 
 
 def _weights_label(status):
@@ -728,6 +764,13 @@ class ProjectWindow(QDialog):
         outer = QVBoxLayout(self)
         outer.addWidget(scroll)
 
+        # Shown when a stored value was invalid and the usual value
+        # is displayed instead (T21). Hidden on a clean fill.
+        self._load_note = QLabel("")
+        self._load_note.setWordWrap(True)
+        self._load_note.setVisible(False)
+        layout.addWidget(self._load_note)
+
         form = QFormLayout()
         self.display_edit = QLineEdit()
         self.dataset_edit = QLineEdit()
@@ -848,23 +891,90 @@ class ProjectWindow(QDialog):
         self._load()
 
     def _load(self):
+        """Fill the form from the stored project, defensively (T21).
+
+        A setting of the wrong type or outside its range falls back
+        to its default and the panel says so — the fill never aborts
+        mid-way, so the panel can never show another project's
+        values mixed with this one's, and Save can never write such
+        a mix back. The fallback defaults and ranges match the
+        model validation (T6)."""
         try:
             p = self._main.store.get_project(self._profile, self._project)
             notes = self._main.store.read_notes(self._profile, self._project)
         except StellaError:
             return
-        self.display_edit.setText(p.get("display_name", ""))
-        self.dataset_edit.setText(p.get("dataset_ref", ""))
+        bad = []
+        display = p.get("display_name", "")
+        if not isinstance(display, str):
+            display = ""
+            bad.append("display name")
+        self.display_edit.setText(display)
+        dataset = p.get("dataset_ref", "")
+        if not isinstance(dataset, str):
+            dataset = ""
+            bad.append("dataset")
+        self.dataset_edit.setText(dataset)
         settings = p.get("settings", {})
+        if not isinstance(settings, dict):
+            settings = {}
+            bad.append("settings")
         method = settings.get("method", "lora")
-        idx = self.method_combo.findText(method)
-        self.method_combo.setCurrentIndex(idx if idx >= 0 else 0)
-        self.rank_spin.setValue(int(settings.get("rank", 8)))
-        self.lr_edit.setText(str(settings.get("learning_rate", 0.0002)))
-        self.epochs_spin.setValue(int(settings.get("epochs", 3)))
-        self.batch_spin.setValue(int(settings.get("batch_size", 1)))
-        self.seq_spin.setValue(int(settings.get("max_seq_len", 1024)))
-        self.notes_edit.setPlainText(notes)
+        idx = self.method_combo.findText(method) if isinstance(method, str) else -1
+        if idx < 0:
+            idx = 0
+            bad.append("method")
+        self.method_combo.setCurrentIndex(idx)
+        rank, ok = _coerce_int(
+            settings.get("rank", DEFAULT_SETTINGS["rank"]),
+            *SETTING_RULES["rank"][1:],
+            DEFAULT_SETTINGS["rank"],
+        )
+        if not ok:
+            bad.append("rank")
+        self.rank_spin.setValue(rank)
+        lr, ok = _coerce_float(
+            settings.get("learning_rate", DEFAULT_SETTINGS["learning_rate"]),
+            *SETTING_RULES["learning_rate"][1:],
+            DEFAULT_SETTINGS["learning_rate"],
+        )
+        if not ok:
+            bad.append("learning rate")
+        self.lr_edit.setText(str(lr))
+        epochs, ok = _coerce_int(
+            settings.get("epochs", DEFAULT_SETTINGS["epochs"]),
+            *SETTING_RULES["epochs"][1:],
+            DEFAULT_SETTINGS["epochs"],
+        )
+        if not ok:
+            bad.append("epochs")
+        self.epochs_spin.setValue(epochs)
+        batch, ok = _coerce_int(
+            settings.get("batch_size", DEFAULT_SETTINGS["batch_size"]),
+            *SETTING_RULES["batch_size"][1:],
+            DEFAULT_SETTINGS["batch_size"],
+        )
+        if not ok:
+            bad.append("batch size")
+        self.batch_spin.setValue(batch)
+        seq, ok = _coerce_int(
+            settings.get("max_seq_len", DEFAULT_SETTINGS["max_seq_len"]),
+            *SETTING_RULES["max_seq_len"][1:],
+            DEFAULT_SETTINGS["max_seq_len"],
+        )
+        if not ok:
+            bad.append("max seq len")
+        self.seq_spin.setValue(seq)
+        self.notes_edit.setPlainText(notes if isinstance(notes, str) else "")
+        if bad:
+            self._load_note.setText(
+                "A stored value was invalid, so the usual value is "
+                "shown instead. Saving keeps the usual value."
+            )
+            self._load_note.setVisible(True)
+        else:
+            self._load_note.setText("")
+            self._load_note.setVisible(False)
 
     def save(self) -> bool:
         """Save the project form. Returns True on success, False when
@@ -1835,7 +1945,13 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _project_label(p):
-        return p.get("display_name") or p["name"]
+        label = p.get("display_name") or p.get("name") or "(unnamed project)"
+        # A broken metamorph block shows as a warning row (T39),
+        # read through the shared reader — not a crash, not silent
+        # normal. Every other project lists as usual.
+        if metamorph_problem(p) is not None:
+            label += " (warning: metamorph setting is broken)"
+        return label
 
     def refresh_tree(self):
         """Sync the tree with the store WITHOUT rebuilding it (U28):
@@ -2463,6 +2579,18 @@ class MainWindow(QMainWindow):
             result = export_mod.import_export(self.store, path)
         except StellaError as exc:
             self._warn(str(exc))
+            self.refresh_tree()
+            self.refresh_session()
+            return
+        except Exception as exc:
+            # Last-resort catch (T1): an unexpected failure still
+            # surfaces as a readable error, never a raw crash — and
+            # the lists refresh so the window matches the disk even
+            # when the import fails.
+            message = str(exc).strip() or f"unexpected {type(exc).__name__}"
+            self._warn(f"Import failed: {message}")
+            self.refresh_tree()
+            self.refresh_session()
             return
         self.debug_log.action(
             f"project imported: {result['profile']}/{result['project']}"

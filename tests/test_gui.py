@@ -299,7 +299,10 @@ def test_project_window_save_writes_through(window, seeded):
     assert win.dataset_edit.text() == "forge-traces.jsonl"
     # No metamorph control: it did nothing, so it gets no control.
     assert not hasattr(win, "metamorph_combo")
-    assert win.rank_spin.value() == 8
+    # The fill shows the stored rank (auto-config picked it for
+    # this PC when the project was created).
+    stored_rank = seeded.get_project("lfm3-tool", "tool-calls")["settings"]["rank"]
+    assert win.rank_spin.value() == stored_rank
     win.display_edit.setText("Tool Calls v2")
     win.rank_spin.setValue(16)
     win.notes_edit.setPlainText("raised rank after first look")
@@ -1039,3 +1042,310 @@ def test_chat_window_has_no_em_dash(window, qapp):
     bad = [t for t in _visible_texts(window) if "—" in t]
     assert bad == []
     chat.close()
+
+
+# -- T21: fill the detail panel defensively --------------------------
+
+
+def _corrupt_project_json(store, profile, project, mutate):
+    import json
+
+    manifest = store.project_dir(profile, project) / "project.json"
+    data = json.loads(manifest.read_text())
+    mutate(data)
+    manifest.write_text(json.dumps(data))
+
+
+def test_project_window_bad_rank_falls_back(window, seeded, qapp):
+    _corrupt_project_json(
+        seeded, "lfm3-tool", "tool-calls",
+        lambda d: d["settings"].update(rank="high"),
+    )
+    win = window.open_project_window("lfm3-tool", "tool-calls")
+    qapp.processEvents()
+    assert win.rank_spin.value() == 8
+    assert "stored value was invalid" in win._load_note.text()
+    assert win._load_note.isVisible()
+    # The rest of the panel still filled from THIS project.
+    assert win.display_edit.text() == "tool-calls"
+    assert win.dataset_edit.text() == "forge-traces.jsonl"
+    # Save writes the good default, not the bad stored value.
+    assert win.save() is True
+    data = seeded.get_project("lfm3-tool", "tool-calls")
+    assert data["settings"]["rank"] == 8
+    assert isinstance(data["settings"]["rank"], int)
+    win.close()
+
+
+@pytest.mark.parametrize(
+    "mutate, check",
+    [
+        (lambda d: d["settings"].update(learning_rate="banana"),
+         lambda w: w.lr_edit.text() == "0.0002"),
+        (lambda d: d["settings"].update(epochs="many"),
+         lambda w: w.epochs_spin.value() == 3),
+        (lambda d: d["settings"].update(batch_size="lots"),
+         lambda w: w.batch_spin.value() == 1),
+        (lambda d: d["settings"].update(max_seq_len="long"),
+         lambda w: w.seq_spin.value() == 1024),
+        (lambda d: d["settings"].update(method="warp"),
+         lambda w: w.method_combo.currentText() == "lora"),
+        (lambda d: d["settings"].update(rank=999),
+         lambda w: w.rank_spin.value() == 8),
+        (lambda d: d.update(settings="all of it"),
+         lambda w: w.rank_spin.value() == 8),
+    ],
+)
+def test_project_window_bad_value_falls_back(window, seeded, qapp,
+                                             mutate, check):
+    _corrupt_project_json(seeded, "lfm3-tool", "tool-calls", mutate)
+    win = window.open_project_window("lfm3-tool", "tool-calls")
+    qapp.processEvents()
+    assert check(win)
+    assert "stored value was invalid" in win._load_note.text()
+    win.close()
+
+
+def test_project_window_clean_fill_shows_no_note(window, seeded, qapp):
+    win = window.open_project_window("lfm3-tool", "tool-calls")
+    qapp.processEvents()
+    assert win._load_note.text() == ""
+    assert not win._load_note.isVisible()
+    win.close()
+
+
+def test_project_window_retarget_never_mixes_projects(window, seeded, qapp):
+    # Project A holds rank 16; project B has a corrupt rank. Opening
+    # A then retargeting to B must show B (default rank + note),
+    # never A's values under B's name.
+    seeded.create_project("lfm3-tool", "second", settings={"rank": 16})
+    _corrupt_project_json(
+        seeded, "lfm3-tool", "tool-calls",
+        lambda d: d["settings"].update(rank="high"),
+    )
+    win = window.open_project_window("lfm3-tool", "second")
+    qapp.processEvents()
+    assert win.rank_spin.value() == 16
+    win.retarget("tool-calls")
+    qapp.processEvents()
+    assert win.rank_spin.value() == 8
+    assert win.display_edit.text() == "tool-calls"
+    assert "stored value was invalid" in win._load_note.text()
+    win.close()
+
+
+# -- T39: GUI list warns on a string metamorph -----------------------
+
+
+def test_tree_warns_on_string_metamorph(window, seeded, qapp):
+    seeded.create_project("lfm3-tool", "broken")
+    _corrupt_project_json(
+        seeded, "lfm3-tool", "broken",
+        lambda d: d.update(metamorph="both"),
+    )
+    window.refresh_tree()
+    qapp.processEvents()
+    top = window.tree.topLevelItem(0)
+    rows = {top.child(i).text(0) for i in range(top.childCount())}
+    assert top.childCount() == 2
+    warned = [r for r in rows if "warning" in r]
+    assert len(warned) == 1
+    assert "broken" in warned[0]
+    # The good project lists normally, with no warning.
+    assert any(r == "tool-calls" for r in rows)
+
+
+# -- T1: GUI import handler ------------------------------------------
+
+
+def test_import_package_warns_and_refreshes_on_failure(
+    window, seeded, tmp_path, monkeypatch, qapp
+):
+    import json as json_mod
+
+    from PySide6.QtWidgets import QFileDialog, QMessageBox
+
+    from stella import export as export_mod
+
+    pkg = export_mod.export_project(
+        seeded, "lfm3-tool", "tool-calls", tmp_path
+    )
+    manifest_path = pkg / "manifest.json"
+    manifest = json_mod.loads(manifest_path.read_text())
+    manifest["project"]["settings"] = "rank 8"
+    manifest_path.write_text(json_mod.dumps(manifest))
+    warnings = []
+    monkeypatch.setattr(
+        QMessageBox, "warning", lambda *a, **k: warnings.append(a[2])
+    )
+    monkeypatch.setattr(
+        QFileDialog, "getExistingDirectory", lambda *a, **k: str(pkg)
+    )
+    window.import_package()
+    qapp.processEvents()
+    assert warnings, "no warning dialog appeared for the bad import"
+    assert "settings" in warnings[0]
+    # The lists refreshed: the window still matches the disk.
+    assert window.tree.topLevelItemCount() == 1
+    assert window.tree.topLevelItem(0).childCount() == 1
+
+
+def test_import_package_last_resort_catch(
+    window, seeded, monkeypatch, qapp
+):
+    from PySide6.QtWidgets import QFileDialog, QMessageBox
+
+    import stella.gui as gui_mod
+
+    warnings = []
+    monkeypatch.setattr(
+        QMessageBox, "warning", lambda *a, **k: warnings.append(a[2])
+    )
+    monkeypatch.setattr(
+        QFileDialog, "getExistingDirectory", lambda *a, **k: "/tmp/whatever"
+    )
+    monkeypatch.setattr(
+        gui_mod.export_mod, "import_export",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("kaboom")),
+    )
+    window.import_package()  # must not raise out of the handler
+    qapp.processEvents()
+    assert warnings
+    assert "kaboom" in warnings[0]
+    assert window.tree.topLevelItemCount() == 1
+
+
+# -- T44 (pin): Train panel above the fold at 1100x680 ---------------
+
+
+def test_train_panel_above_fold_at_default_size(window, qapp):
+    from PySide6.QtWidgets import QScrollArea
+
+    window.resize(1100, 680)
+    window.set_session("lfm3-tool", "tool-calls")
+    window.show()
+    qapp.processEvents()
+    assert window.width() == 1100
+    assert window.height() == 680
+    scrolls = window.findChildren(QScrollArea)
+    assert len(scrolls) == 1
+    viewport = scrolls[0].viewport()
+    height = viewport.height()
+    assert height > 0
+    for widget in (window.train_start_btn, window.train_progress):
+        top = widget.mapTo(viewport, widget.rect().topLeft()).y()
+        bottom = top + widget.height()
+        assert 0 <= top, f"{widget} starts above the viewport"
+        assert bottom <= height, (
+            f"{widget} ends at y={bottom} in a {height}px viewport"
+        )
+
+
+# -- T71 (pin): no metamorph promise text in any visible GUI string --
+
+
+def test_t71_no_promise_text_in_gui(window, qapp):
+    project_win = window.open_project_window("lfm3-tool", "tool-calls")
+    profile_win = window.open_profile_window("lfm3-tool")
+    settings_win = window.open_settings_window()
+    howto_win = window.open_howto_window()
+    qapp.processEvents()
+    texts = _visible_texts(window)
+    assert texts, "no visible strings collected at all"
+    for text in texts:
+        lowered = text.lower()
+        assert "metamorph" not in lowered, f"metamorph text visible: {text!r}"
+        assert "turns the base into variants" not in lowered
+        assert "shrinks how the fine-tune is stored" not in lowered
+    project_win.close()
+    profile_win.close()
+    settings_win.close()
+    howto_win.close()
+
+
+# -- T123 (pin): no-project session shows no settings values ---------
+
+
+def test_no_project_session_has_no_settings(window, qapp, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    window.set_session("lfm3-tool", None)
+    qapp.processEvents()
+    summary = window.session_summary.text()
+    assert "rank" not in summary.lower()
+    assert "learning rate" not in summary.lower()
+    assert "epochs" not in summary.lower()
+    # And there is no project window to open with no selection.
+    # (The "pick a project first" warning is a modal dialog: stub
+    # it out, or the test waits at it forever.)
+    warnings = []
+    monkeypatch.setattr(
+        QMessageBox, "warning", lambda *a, **k: warnings.append(a[2])
+    )
+    window.set_session(None, None)
+    qapp.processEvents()
+    assert window.open_project_window() is None
+    assert warnings
+
+
+# -- T162 (pin): second launch exits 0, no second window -------------
+
+
+def test_second_main_exits_zero_while_first_runs(tmp_path, qapp):
+    import os
+    import subprocess
+    import sys
+    import time
+    from pathlib import Path
+
+    from PySide6.QtCore import QCoreApplication
+    from PySide6.QtNetwork import QLocalSocket
+
+    root = Path(__file__).resolve().parent.parent
+    env = dict(os.environ)
+    env["QT_QPA_PLATFORM"] = "offscreen"
+    env["STELLA_HOME"] = str(tmp_path / "home")
+    first = subprocess.Popen(
+        [sys.executable, "-c",
+         "from stella.gui import main; raise SystemExit(main())"],
+        cwd=root, env=env, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        # Wait until the first instance is listening on its socket.
+        deadline = time.time() + 30
+        listening = False
+        while time.time() < deadline:
+            if first.poll() is not None:
+                break
+            probe = QLocalSocket()
+            probe.connectToServer("stella-single-instance")
+            if probe.waitForConnected(200):
+                listening = True
+                probe.disconnectFromServer()
+                break
+            probe.abort()
+            QCoreApplication.processEvents()
+            time.sleep(0.2)
+        assert listening, "the first instance never started listening"
+        assert first.poll() is None, "the first instance exited early"
+        started = time.time()
+        second = subprocess.run(
+            [sys.executable, "-c",
+             "from stella.gui import main; raise SystemExit(main())"],
+            cwd=root, env=env, capture_output=True, text=True, timeout=30,
+        )
+        elapsed = time.time() - started
+        assert second.returncode == 0
+        # A second window would run the event loop until the timeout;
+        # the guard returns at once.
+        assert elapsed < 15, f"second launch took {elapsed:.1f}s"
+        assert first.poll() is None, "the first instance died"
+    finally:
+        if first.poll() is None:
+            first.terminate()
+            try:
+                first.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                first.kill()
+                first.wait(timeout=10)

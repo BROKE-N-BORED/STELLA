@@ -49,6 +49,16 @@ job, export it as a usable package.
   <profile> <project> --teacher <tag> --prompts <file>` (the
   teacher's answers become the project's dataset). The Chat can
   run both jobs too: just ask it.
+- v0.9.0 auto-config backend (2026-11-13): Stella measures this PC
+  (CPU, RAM, disk, load) and picks the training settings for it —
+  new projects get the right recipe with no knobs to turn, and
+  training re-checks the PC at every run start. `bash stella-cli
+  pc-info` shows what the PC can do and which settings Stella
+  picked. Import/export is strict and atomic (a bad package is
+  refused cleanly and leaves nothing behind), settings are
+  validated the same way everywhere, and the Project window falls
+  back to the usual value with a note when a stored value is bad
+  instead of crashing.
 
 ## Install
 

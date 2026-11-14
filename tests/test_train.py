@@ -284,7 +284,7 @@ def _tiny_project(store, tmp_path, rows=4):
             "batch_size": 1,
             "grad_accum": 1,
             "rank": 2,
-            "max_seq_len": 64,
+            "max_seq_len": 128,
             "checkpoint_steps": 1,
             "val_fraction": 0.25,
             "warmup_steps": 1,
@@ -402,3 +402,134 @@ def test_resume_without_checkpoints_fails(need_torch, tmp_path):
             _model_loader=tiny_model_and_tokenizer,
             _dtype="float32",
         )
+
+
+# -- T6: engine-side range checks (no torch needed: validation runs
+# before the torch import, so a bad value is refused on any install)
+
+
+@pytest.mark.parametrize(
+    "bad, name",
+    [
+        ({"rank": -5}, "rank"),
+        ({"rank": 0}, "rank"),
+        ({"rank": "banana"}, "rank"),
+        ({"rank": 2.5}, "rank"),
+        ({"epochs": 0}, "epochs"),
+        ({"epochs": "three"}, "epochs"),
+        ({"learning_rate": -0.5}, "learning_rate"),
+        ({"learning_rate": 0}, "learning_rate"),
+        ({"learning_rate": float("inf")}, "learning_rate"),
+        ({"learning_rate": float("nan")}, "learning_rate"),
+        ({"batch_size": 0}, "batch_size"),
+        ({"grad_accum": 0}, "grad_accum"),
+        ({"max_seq_len": 3}, "max_seq_len"),
+        ({"checkpoint_steps": -1}, "checkpoint_steps"),
+        ({"warmup_steps": -3}, "warmup_steps"),
+        ({"seed": "x"}, "seed"),
+    ],
+)
+def test_run_training_loop_rejects_bad_setting(tmp_path, bad, name):
+    from stella.train import run_training_loop
+
+    with pytest.raises(StellaError, match=name):
+        run_training_loop(None, None, [], [], bad, tmp_path)
+
+
+def test_run_training_loop_accepts_engine_bounds(tmp_path):
+    # The engine bounds are looser than the stored ones: a short
+    # sequence length (64) is fine to RUN even though the model
+    # layer would not store it. The loop then fails on the missing
+    # torch import (or the None model) — the point is it gets PAST
+    # validation, which is what this asserts by the error type.
+    from stella.train import run_training_loop, validate_run_settings
+
+    cleaned = validate_run_settings(
+        {"rank": 2, "max_seq_len": 64, "checkpoint_steps": 1}
+    )
+    assert cleaned["rank"] == 2
+    assert cleaned["max_seq_len"] == 64
+    assert cleaned["epochs"] == 3  # defaults fill in
+    with pytest.raises((ModuleNotFoundError, AttributeError, TypeError)):
+        run_training_loop(
+            None, None, [], [],
+            {"rank": 2, "max_seq_len": 64},
+            tmp_path,
+        )
+
+
+def test_validate_run_settings_coerces(tmp_path):
+    from stella.train import validate_run_settings
+
+    cleaned = validate_run_settings({"rank": "8", "epochs": 2.0})
+    assert cleaned["rank"] == 8
+    assert cleaned["epochs"] == 2
+
+
+# -- T5: HF load failures are plain StellaErrors --------------------
+
+
+def _install_fake_transformers(monkeypatch, failure):
+    """A fake torch + transformers in sys.modules, so
+    load_base_model can be tested with no downloads and no torch."""
+    import sys
+    import types
+
+    torch_mod = types.ModuleType("torch")
+    torch_mod.bfloat16 = "bfloat16"
+    torch_mod.float32 = "float32"
+    monkeypatch.setitem(sys.modules, "torch", torch_mod)
+
+    def _boom(*args, **kwargs):
+        raise failure
+
+    transformers_mod = types.ModuleType("transformers")
+
+    class FakeTokenizer:
+        @staticmethod
+        def from_pretrained(*args, **kwargs):
+            _boom()
+
+    class FakeModel:
+        @staticmethod
+        def from_pretrained(*args, **kwargs):
+            _boom()
+
+    transformers_mod.AutoTokenizer = FakeTokenizer
+    transformers_mod.AutoModelForCausalLM = FakeModel
+    monkeypatch.setitem(sys.modules, "transformers", transformers_mod)
+
+
+def test_load_base_model_wraps_hf_failure(monkeypatch, tmp_path):
+    import stella.train as train_mod
+
+    monkeypatch.setattr(train_mod, "require_training_deps", lambda: None)
+    _install_fake_transformers(
+        monkeypatch, ValueError("Couldn't instantiate the backend tokenizer")
+    )
+    with pytest.raises(StellaError, match="could not load the base model"):
+        train_mod.load_base_model("someone/no-such-model")
+
+
+def test_load_base_model_names_empty_dir(monkeypatch, tmp_path):
+    import stella.train as train_mod
+
+    monkeypatch.setattr(train_mod, "require_training_deps", lambda: None)
+    empty = tmp_path / "empty-model"
+    empty.mkdir()
+    _install_fake_transformers(monkeypatch, ValueError("no files here"))
+    with pytest.raises(
+        StellaError, match="does not hold a model"
+    ):
+        train_mod.load_base_model(str(empty))
+
+
+def test_load_base_model_names_repo_not_found(monkeypatch):
+    import stella.train as train_mod
+
+    monkeypatch.setattr(train_mod, "require_training_deps", lambda: None)
+    _install_fake_transformers(
+        monkeypatch, ValueError("Repository Not Found for url")
+    )
+    with pytest.raises(StellaError, match="no model with that name"):
+        train_mod.load_base_model("someone/no-such-model")

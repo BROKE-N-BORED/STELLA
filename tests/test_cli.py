@@ -205,3 +205,137 @@ def test_cli_sleep_missing_deps_in_process(home, monkeypatch, capsys):
     code = cli_mod.main(["sleep", "p1", "proj"])
     assert code == 1
     assert "install-training.sh" in capsys.readouterr().err
+
+
+# -- pc-info --------------------------------------------------------
+
+
+def test_cli_pc_info(home):
+    res = run_cli(home, "pc-info")
+    assert res.returncode == 0
+    assert "CPUs" in res.stdout
+    assert "RAM" in res.stdout
+    assert "Free disk" in res.stdout
+    assert "Training settings for this PC" in res.stdout
+    assert "Traceback" not in res.stderr
+
+
+# -- T5: main() catches everything; defensive lists ------------------
+
+
+def test_cli_main_catches_unexpected_errors(home, monkeypatch, capsys):
+    import stella.cli as cli_mod
+
+    monkeypatch.setenv("STELLA_HOME", str(home))
+    monkeypatch.setattr(
+        cli_mod, "cmd_profiles",
+        lambda args: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    code = cli_mod.main(["profiles"])
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "stella: boom" in err
+    assert "Traceback" not in err
+
+
+def test_cli_profiles_nameless_manifest(home):
+    # A valid-JSON profile manifest missing "name": the list shows
+    # the rest, with a warning line for the nameless one.
+    run_cli(home, "create-profile", "good", "--tag", "x:1b")
+    pdir = Path(home) / "profiles" / "nameless"
+    (pdir / "projects").mkdir(parents=True)
+    (pdir / "profile.json").write_text(
+        json.dumps({"kind": "profile", "role": "quiet"})
+    )
+    res = run_cli(home, "profiles")
+    assert res.returncode == 0
+    assert "good" in res.stdout
+    assert "(unnamed profile)" in res.stdout
+    assert "no name" in res.stderr
+
+
+def test_cli_export_to_file_destination(home, tmp_path):
+    # A destination that is a file: one clean line, exit 1, no
+    # traceback (the main() catch-all is the last-resort net).
+    run_cli(home, "create-profile", "p1", "--tag", "x:1b")
+    run_cli(home, "create-project", "p1", "proj")
+    dest_file = tmp_path / "not-a-dir"
+    dest_file.write_text("x")
+    res = run_cli(home, "export", "p1", "proj", str(dest_file))
+    assert res.returncode == 1
+    assert "stella:" in res.stderr
+    assert "Traceback" not in res.stderr
+
+
+def test_cli_import_bad_manifest_clean_exit(home, tmp_path):
+    run_cli(home, "create-profile", "p1", "--tag", "x:1b")
+    run_cli(home, "create-project", "p1", "proj")
+    dest = tmp_path / "exports"
+    run_cli(home, "export", "p1", "proj", str(dest))
+    pkg = dest / "proj-stella-export"
+    manifest_path = pkg / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["project"]["settings"] = "rank 8"
+    manifest_path.write_text(json.dumps(manifest))
+    res = run_cli(tmp_path / "home2", "import", str(pkg))
+    assert res.returncode == 1
+    assert "stella:" in res.stderr
+    assert "Traceback" not in res.stderr
+
+
+# -- T39: CLI list warns on a string metamorph -----------------------
+
+
+def test_cli_projects_warns_on_string_metamorph(home):
+    run_cli(home, "create-profile", "p1", "--tag", "x:1b")
+    run_cli(home, "create-project", "p1", "good")
+    run_cli(home, "create-project", "p1", "broken")
+    manifest = (
+        Path(home) / "profiles" / "p1" / "projects" / "broken" / "project.json"
+    )
+    data = json.loads(manifest.read_text())
+    data["metamorph"] = "both"
+    manifest.write_text(json.dumps(data))
+    res = run_cli(home, "projects", "p1")
+    assert res.returncode == 0
+    assert "good" in res.stdout
+    assert "broken" in res.stdout
+    assert "warning" in res.stdout
+    assert "metamorph" in res.stdout
+    assert "Traceback" not in res.stderr
+
+
+# -- T4: Ctrl+C pauses, not crashes ----------------------------------
+
+
+def test_cli_train_ctrl_c_pauses(tmp_path):
+    import signal
+    import time
+
+    home = tmp_path / "home"
+    env = dict(os.environ)
+    env["STELLA_HOME"] = str(home)
+    proc = subprocess.Popen(
+        [sys.executable, str(ROOT / "tests" / "_ctrlc_driver.py"), str(home)],
+        cwd=ROOT, env=env, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        # The fake run lasts ~10 s; interrupt mid-run.
+        time.sleep(2)
+        assert proc.poll() is None, "the fake run ended before Ctrl+C"
+        proc.send_signal(signal.SIGINT)
+        out, err = proc.communicate(timeout=30)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate(timeout=10)
+    assert proc.returncode == 0
+    assert "Paused at step" in out
+    assert "Traceback" not in err
+    # A checkpoint was saved at the pause step, so --resume has
+    # something to continue from.
+    ckpt_dir = home / "profiles" / "p1" / "projects" / "proj" / "checkpoints"
+    saved = [d for d in ckpt_dir.iterdir() if d.is_dir()]
+    assert saved
+    assert (saved[0] / "training_state.json").is_file()

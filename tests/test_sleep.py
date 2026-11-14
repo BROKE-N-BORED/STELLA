@@ -46,7 +46,7 @@ def _tiny_project(store, tmp_path, rows=6):
             "batch_size": 1,
             "grad_accum": 1,
             "rank": 2,
-            "max_seq_len": 64,
+            "max_seq_len": 128,
             "checkpoint_steps": 1,
             "val_fraction": 0.25,
             "warmup_steps": 1,
@@ -535,10 +535,16 @@ def test_sleep_rank_capped_at_8(need_torch, tmp_path):
 
 
 def test_sleep_ram_guard_refuses(need_torch, tmp_path):
+    import json
+
     store = _tiny_project(Store(tmp_path / "home"), tmp_path, rows=6)
-    store.update_project(
-        "tiny", "proof", settings={"max_seq_len": 3_000_000}
-    )
+    # A bad value on disk by hand-edit: update_project would refuse
+    # it (model validation), so write it straight into the file —
+    # the RAM guard is the net for values that got there by hand.
+    manifest = store.project_dir("tiny", "proof") / "project.json"
+    data = json.loads(manifest.read_text())
+    data["settings"]["max_seq_len"] = 3_000_000
+    manifest.write_text(json.dumps(data))
     with pytest.raises(StellaError, match="over the 8.00 GB ceiling"):
         sleep_project(
             store, "tiny", "proof",

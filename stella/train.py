@@ -38,6 +38,7 @@ import random
 import shutil
 from pathlib import Path
 
+from .autoconfig import compute_settings, measure_pc
 from .model import STELLA_VERSION, StellaError, Store
 
 # First proof target — confirmed from the live model card, not guessed.
@@ -80,6 +81,106 @@ DEFAULT_TRAIN = {
 
 # Dataset roles, in order of appearance in a conversation.
 DATASET_ROLES = ("system", "user", "assistant")
+
+
+# -- engine-side settings validation (T6, D6) -----------------------
+# The model layer (model.validate_settings) guards what gets STORED.
+# The engine guards what gets RUN: a hand-edited project.json can
+# still reach the loop, so the loop re-checks every numeric setting
+# it reads — with the engine's own bounds, which are looser than the
+# stored ones (a test or replay pass may legitimately run a short
+# sequence length the model layer would not store). Each rule is
+# (kind, low, high); None means unbounded on that side. A bad value
+# is refused with a StellaError naming the setting, before anything
+# loads or trains.
+RUN_SETTING_RULES = {
+    "rank": ("int", 1, None),
+    "learning_rate": ("float", 0.0, None),  # strictly > 0, checked below
+    "epochs": ("int", 1, None),
+    "batch_size": ("int", 1, None),
+    "grad_accum": ("int", 1, None),
+    "max_seq_len": ("int", 8, None),
+    "checkpoint_steps": ("int", 0, None),
+    "warmup_steps": ("int", 0, None),
+    "seed": ("int", None, None),
+}
+
+_RUN_DEFAULTS = {
+    "rank": 8,
+    "learning_rate": 0.0002,
+    "epochs": 3,
+    "batch_size": 1,
+    "grad_accum": 8,
+    "max_seq_len": 1024,
+    "checkpoint_steps": 50,
+    "warmup_steps": 5,
+    "seed": 42,
+}
+
+
+def validate_run_settings(config: dict) -> dict:
+    """Validate the numeric settings a run actually reads.
+
+    Pure Python (no torch) so it runs before any heavy import.
+    Returns the resolved values (defaults filled in, numbers
+    coerced). Raises StellaError naming the setting on the first
+    bad value: wrong type, non-finite, or out of range.
+    """
+    import math
+
+    if not isinstance(config, dict):
+        raise StellaError("training settings must be an object")
+    cleaned: dict = {}
+    for key, (kind, low, high) in RUN_SETTING_RULES.items():
+        value = config.get(key, _RUN_DEFAULTS[key])
+        if isinstance(value, bool):
+            raise StellaError(f"{key} must be a number, not {value!r}")
+        try:
+            number = int(value) if kind == "int" else float(value)
+        except (TypeError, ValueError, OverflowError):
+            raise StellaError(
+                f"{key} must be a number, not {value!r}"
+            ) from None
+        if kind == "int" and float(value) != number:
+            raise StellaError(
+                f"{key} must be a whole number, not {value!r}"
+            )
+        if kind == "float" and not math.isfinite(number):
+            raise StellaError(
+                f"{key} must be a real number, not {value!r}"
+            )
+        if key == "learning_rate" and number <= 0:
+            raise StellaError(
+                "learning_rate must be above 0, not "
+                f"{value!r} (a run with no learning rate learns nothing)"
+            )
+        if low is not None and number < low:
+            raise StellaError(
+                f"{key} must be at least {low}, not {value!r}"
+            )
+        if high is not None and number > high:
+            raise StellaError(
+                f"{key} must be at most {high}, not {value!r}"
+            )
+        cleaned[key] = number
+    return cleaned
+
+
+def refresh_auto_settings(store: Store, profile: str, project: str) -> dict:
+    """Re-resolve an "auto" project's settings from a fresh
+    measurement of this PC, and store the fresh values (the project
+    stays "auto"). A "manual" project — or one with no source
+    recorded, which reads as manual — is left exactly as it is.
+    Returns the settings the run should use."""
+    proj = store.get_project(profile, project)
+    if proj.get("settings_source", "manual") != "auto":
+        return dict(proj.get("settings", {}) or {})
+    measurement = measure_pc(store.home)
+    computed = compute_settings(measurement["ram_available_gb"])
+    updated = store.update_project(
+        profile, project, settings=computed, settings_source="auto"
+    )
+    return dict(updated["settings"])
 
 
 # -- dependency gate ------------------------------------------------
@@ -346,16 +447,55 @@ def load_base_model(base_ref: str, *, dtype: str = "bfloat16"):
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     torch_dtype = torch.bfloat16 if dtype == "bfloat16" else torch.float32
-    tokenizer = AutoTokenizer.from_pretrained(
-        base_ref, trust_remote_code=True
-    )
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    model = AutoModelForCausalLM.from_pretrained(
-        base_ref, torch_dtype=torch_dtype, trust_remote_code=True,
-    )
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(
+            base_ref, trust_remote_code=True
+        )
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        model = AutoModelForCausalLM.from_pretrained(
+            base_ref, torch_dtype=torch_dtype, trust_remote_code=True,
+        )
+    except Exception as exc:
+        # An HF load failure is a plain-words StellaError naming the
+        # repo/path and the likely cause — never a raw traceback
+        # from inside transformers (T5, A8-W9).
+        raise StellaError(_hf_load_message(base_ref, exc)) from exc
     model.config.use_cache = False  # no KV cache while training
     return model, tokenizer
+
+
+def _hf_load_message(base_ref: str, exc: Exception) -> str:
+    """A plain-words cause for a failed from_pretrained call."""
+    detail = str(exc).strip().splitlines()
+    first = detail[0][:200] if detail else ""
+    lowered = " ".join(detail).lower()
+    if Path(base_ref).expanduser().is_dir():
+        return (
+            f"could not load the base model from {base_ref!r}: that "
+            "folder does not hold a model (no tokenizer or weights "
+            "found there)."
+        )
+    if "not found" in lowered or "404" in lowered or "no such" in lowered:
+        return (
+            f"could not load the base model {base_ref!r}: no model "
+            "with that name was found. Check the name."
+        )
+    if any(
+        word in lowered
+        for word in ("connect", "timed out", "timeout", "resolve",
+                     "network", "unreachable", "temporary failure")
+    ):
+        return (
+            f"could not load the base model {base_ref!r}: the download "
+            "failed. Check the network and try again."
+        )
+    if first:
+        return f"could not load the base model {base_ref!r}: {first}"
+    return (
+        f"could not load the base model {base_ref!r}. Check the name "
+        "and the network, then try again."
+    )
 
 
 def detect_target_modules(model) -> list[str]:
@@ -616,21 +756,25 @@ def run_training_loop(
 ) -> dict:
     """The loop itself, separated from model loading so tests can pass
     a tiny random model. Returns a summary dict."""
+    # Validate first, before the torch import: a bad value is
+    # refused with a plain message naming the setting, never a raw
+    # ValueError/ZeroDivisionError from a bare int()/float() (T6).
+    checked = validate_run_settings(config)
     import torch
 
     def emit(event: dict):
         if on_event is not None:
             on_event(event)
 
-    batch_size = int(config.get("batch_size", 1))
-    grad_accum = int(config.get("grad_accum", 8))
-    max_seq_len = int(config.get("max_seq_len", 1024))
-    epochs = int(config.get("epochs", 3))
-    lr = float(config.get("learning_rate", 0.0002))
-    rank = int(config.get("rank", 8))
-    warmup = int(config.get("warmup_steps", 5))
-    checkpoint_steps = int(config.get("checkpoint_steps", 50))
-    seed = int(config.get("seed", 42))
+    batch_size = checked["batch_size"]
+    grad_accum = checked["grad_accum"]
+    max_seq_len = checked["max_seq_len"]
+    epochs = checked["epochs"]
+    lr = checked["learning_rate"]
+    rank = checked["rank"]
+    warmup = checked["warmup_steps"]
+    checkpoint_steps = checked["checkpoint_steps"]
+    seed = checked["seed"]
     use_bf16 = next(model.parameters()).dtype == torch.bfloat16
 
     steps_per_epoch = max(1, math.ceil(len(train_examples) / (batch_size * grad_accum)))
@@ -829,10 +973,21 @@ def train_project(
     work_dir = Path(work_dir) if work_dir is not None else project_dir
     work_dir.mkdir(parents=True, exist_ok=True)
 
+    # Auto projects re-resolve their settings from a fresh
+    # measurement at run start (manual ones are untouched). Sleep
+    # runs (update_status=False) never rewrite the project — the
+    # consolidation job trains with its own override.
+    if update_status:
+        refresh_auto_settings(store, profile, project)
+        proj = store.get_project(profile, project)
+
     settings = dict(DEFAULT_TRAIN)
     settings.update(proj.get("settings", {}) or {})
     if settings_override:
         settings.update(settings_override)
+    # Engine-side range check on the effective settings, before
+    # anything loads (T6, D6).
+    settings.update(validate_run_settings(settings))
     if max_steps is not None:
         # A step cap is a short proof run: shrink the epoch budget to
         # fit it (epochs are re-derived from the cap below).
