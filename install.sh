@@ -7,6 +7,16 @@
 # Run it with bash, never sh: it uses set -euo pipefail and bash arrays.
 set -euo pipefail
 
+# T186: --help answers with usage and exits 0, without installing
+# anything. Checked before DIR resolution, so nothing happens at all.
+if [ "${1:-}" = "--help" ]; then
+  echo "Usage: bash install.sh [--help]"
+  echo "Installs Stella: a private .venv with PySide6, the app-menu"
+  echo "launcher, and the 'stella' command. No training packages —"
+  echo "run bash install-training.sh for those."
+  exit 0
+fi
+
 DIR="$(cd "$(dirname "$0")" && pwd)"
 # Resolve symlinks, so installing through a link still finds this folder.
 SOURCE="${BASH_SOURCE[0]}"

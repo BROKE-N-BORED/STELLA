@@ -1,5 +1,96 @@
 # Changelog
 
+## v0.22.0 — 2026-11-14
+
+The packages/CLI/tree slice (audit tasks T170, T171, T172, T173,
+T174, T180, T181, T184, T185, T186, T187; T175/T176 stay
+overtaken by the v0.8 metamorph UI removal, T182/T183 stay
+hard-gated on Joshua's decisions): recipes and adapters are
+packages now, every package kind travels as one `.stella` file,
+the command line is scriptable and quietable, the probe runs a
+per-role prompt set, and the profile list has a filter, a role
+filter, sort, and multi-select bulk actions.
+
+- T170 — Settings-only export / share a recipe: `export_recipe`
+  writes a `stella-recipe-export` package — profile block,
+  project block (dataset reference, settings, metamorph mode +
+  notes), README, notes — no weights, no checkpoints, no probe
+  results, no sleep cycles. Importing a recipe creates a new
+  project with those values, through the same profile merge and
+  collision choices as a project import; a dataset that is not
+  on the importing PC warns at import and never blocks it.
+  CLI: `stella export-recipe`, `stella import` reads recipes.
+  GUI: File menu "Export recipe...".
+- T171 — Single-file package option: every package kind exports
+  as a `.stella` zip holding exactly the folder package (same
+  manifest, same members, at the zip root). `stella export`,
+  `export-profile`, `export-recipe`, and `export-adapter` take
+  `--zip`; the GUI's File menu has "as single file" entries for
+  project and profile; import, verify, check, and preview read
+  a `.stella` file exactly like a folder, and a zip whose
+  members escape the folder is refused whole.
+- T172 — Machine-readable and quiet output: `--json` on
+  `profiles`, `projects`, `show-profile`, `show-project`,
+  `probe`, `verify`, and `sleep-status` prints valid JSON
+  (parseable, with the damaged rows included); `--quiet` silences
+  the per-step lines on `train`, `sleep`, and `distill` and the
+  progress lines on `pull-weights`; `--verbose` prints the full
+  traceback behind the catch-all error. The flags are global:
+  they work before or after the subcommand.
+- T173 — Adapter library: `export_adapter` writes a
+  `stella-adapter-export` package — the trained adapter weights
+  under `weights/` plus a manifest adapter block (name, base,
+  rank, dataset, status, steps, final loss). Import lands it in
+  any project with the same base (into an existing project from
+  the import preview, or a new project built around the weights
+  with the adapter's rank and dataset reference); the base must
+  match, a target that already has an adapter refuses, and a
+  new-project import whose name is taken lands under a copy
+  name. CLI: `stella export-adapter`, `stella import-adapter`.
+  GUI: File menu "Export adapter...", import preview checkbox.
+- T174 — Per-role probe sets: `stella/probe_sets/<role>.json`,
+  one file per canonical role, editable. Governing seats
+  (driver, reviewer, tester, fast) get the full 18-prompt
+  refusal battery plus 6 role-specific prompts; vision,
+  all-rounder, and utility get 12 role-specific prompts each.
+  The probe picks the set for the profile's role, falls back to
+  the default set (with a note when a set file is unreadable),
+  and records the set name in `probe_results.json`; the results
+  dialog shows it, and `stella probe` prints it.
+- T180 — Search, filter, and sort for the profile list: a
+  filter box above the tree (matches display name, slug, role,
+  and tag), a role filter, and sort by name (the default —
+  the old filesystem order is gone), role, recently used
+  (the T165 `last_used` stamp), and project count. Filtering
+  keeps the current selection when the selected profile still
+  matches, and a filter that matches nothing says so.
+- T181 — Bulk operations / multi-select: Ctrl/Shift-click
+  selects several profiles; the right-click menu offers delete
+  (one confirm naming them all, each to the trash), export (one
+  package per profile, one include-projects question, one
+  overwrite question), and role change (one picker for the
+  whole selection). Single-click selection and every
+  single-profile action work exactly as before.
+- T184 — Replace the pull-weights one-liner: `stella
+  pull-weights <repo>` downloads a Hugging Face repo's weights
+  with plain progress lines (no nested quotes anywhere), and
+  install-training.sh ends with the short command.
+- T185 — Desktop-file polish: the generated launcher
+  (`stella/install.py`) carries `StartupNotify=true`, a
+  `Keywords` line, and `Version=1.0`; the checked-in "Install
+  Stella.desktop" gained StartupNotify and Keywords too.
+  (No `desktop-file-validate` in the sandbox; the fields are
+  verified by parsing.)
+- T186 — --help for the scripts: install.sh,
+  install-training.sh, and run.sh each answer `--help` with
+  usage and exit 0, checked before anything else runs, so no
+  install or launch happens.
+- T187 — Small CLI polish: every create/rename path that
+  normalizes a name says so ("Created profile 'upper-case'
+  (from 'UPPER-Case')"), and bare `stella` with no subcommand
+  prints the command list instead of argparse's "arguments are
+  required" error.
+
 ## v0.21.0 — 2026-11-14
 
 The profiles/rows/provenance slice (audit tasks T160, T161, T163,

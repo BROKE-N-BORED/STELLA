@@ -3534,9 +3534,11 @@ class ImportPreviewDialog(QDialog):
     imported. Import goes ahead; Cancel imports nothing. When the
     profile already exists and differs, the merge choice is here
     too: neither radio is checked by default, and not picking
-    keeps yours."""
+    keeps yours. T173: an adapter package also offers importing
+    into the current project (into_option) instead of a new
+    one."""
 
-    def __init__(self, parent, summary: dict):
+    def __init__(self, parent, summary: dict, into_option=None):
         super().__init__(parent)
         self.setWindowTitle("Import this package?")
         self._summary = summary
@@ -3544,6 +3546,15 @@ class ImportPreviewDialog(QDialog):
         summary_label = QLabel(export_mod.format_preview(summary))
         summary_label.setWordWrap(True)
         layout.addWidget(summary_label)
+        self._into_checkbox = None
+        self._into_option = into_option
+        if into_option is not None:
+            profile, project = into_option
+            self._into_checkbox = QCheckBox(
+                f"Import into the current project '{project}' "
+                "instead of a new one."
+            )
+            layout.addWidget(self._into_checkbox)
         self._keep_radio = None
         self._take_radio = None
         if summary.get("profile_diff"):
@@ -3573,6 +3584,17 @@ class ImportPreviewDialog(QDialog):
         if self._take_radio is None:
             return None
         return "take" if self._take_radio.isChecked() else "keep"
+
+    def into_project(self):
+        """The adapter import's into-current-project choice
+        (T173): the (profile, project) tuple when the checkbox
+        was offered and ticked, else None."""
+        if (
+            self._into_checkbox is not None
+            and self._into_checkbox.isChecked()
+        ):
+            return self._into_option
+        return None
 
 
 class ProbeResultsDialog(QDialog):
@@ -3609,6 +3631,16 @@ class ProbeResultsDialog(QDialog):
         )
         self.counts_label.setWordWrap(True)
         layout.addWidget(self.counts_label)
+        self.set_label = None
+        if result.get("probe_set"):
+            # T174: which probe set ran (the profile's role set,
+            # or the default set when it had none).
+            self.set_label = QLabel(
+                f"Probe set: {result['probe_set']} "
+                f"({before.get('total', 0)} prompts)."
+            )
+            self.set_label.setWordWrap(True)
+            layout.addWidget(self.set_label)
         if result.get("mode", "gate") == "informational":
             verdict_text = (
                 "Informational only: this probe does not pass or "
@@ -3775,6 +3807,25 @@ def _import_message(result: dict) -> str:
                 f"Imported profile {result['profile']} "
                 "(no projects)."
             )
+    elif "adapter" in result:
+        # An adapter package (T173): into an existing project, or
+        # as a new project built around the weights.
+        if result.get("into_existing"):
+            message = (
+                f"Imported adapter {result['adapter']} into "
+                f"project {result['project']}."
+            )
+        else:
+            message = (
+                f"Imported adapter {result['adapter']} as new "
+                f"project {result['project']} in "
+                f"{result['profile']}."
+            )
+            if result.get("copy_of"):
+                message += (
+                    f" (a copy of {result['copy_of']!r} - the "
+                    "name was taken)."
+                )
     else:
         message = (
             f"Imported {result['project']} into {result['profile']}."
@@ -3999,9 +4050,43 @@ class MainWindow(QMainWindow):
         left = QWidget()
         left_layout = QVBoxLayout(left)
         left_layout.addWidget(QLabel("Profiles"))
+        # T180: search, filter, and sort for the profile list. The
+        # filter box matches display name, slug, role, and tag; the
+        # role filter shows only that role; the sort picker orders
+        # the list (name is the default — the old filesystem order
+        # is gone). Filtering keeps the selection when the selected
+        # profile still matches.
+        self.tree_filter = QLineEdit()
+        self.tree_filter.setPlaceholderText("Filter profiles...")
+        self.tree_filter.setClearButtonEnabled(True)
+        self.tree_filter.textChanged.connect(self._on_tree_filter_changed)
+        left_layout.addWidget(self.tree_filter)
+        filter_row = QHBoxLayout()
+        self.tree_role_filter = QComboBox()
+        self.tree_role_filter.addItem("All roles")
+        for role in CANONICAL_ROLES:
+            self.tree_role_filter.addItem(role)
+        self.tree_role_filter.currentIndexChanged.connect(
+            self._on_tree_filter_changed
+        )
+        filter_row.addWidget(self.tree_role_filter)
+        self.tree_sort = QComboBox()
+        self.tree_sort.addItems(
+            ["Name", "Role", "Recently used", "Project count"]
+        )
+        self.tree_sort.currentIndexChanged.connect(
+            self._on_tree_filter_changed
+        )
+        filter_row.addWidget(self.tree_sort)
+        left_layout.addLayout(filter_row)
         self.tree = QTreeWidget()
         self.tree.setHeaderHidden(True)
         self.tree.setColumnCount(1)
+        # T181: multi-select (Ctrl/Shift-click) for bulk actions.
+        # Single-click selection and the current-item session
+        # behave exactly as before — ExtendedSelection only adds
+        # the multi-pick.
+        self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.tree.currentItemChanged.connect(self._on_tree_current_changed)
         self.tree.itemDoubleClicked.connect(self._on_tree_double_clicked)
         # Right-click renames the row (T168): the menu is built per
@@ -4062,14 +4147,35 @@ class MainWindow(QMainWindow):
         self._menu_action_export = file_menu.addAction(
             "Export project...", self.export_project
         )
+        # T171: the same exports as a single .stella file.
+        self._menu_action_export_project_zip = file_menu.addAction(
+            "Export project as single file...",
+            lambda: self.export_project(as_zip=True),
+        )
         # T86: a whole profile (optionally with its projects) exports
         # as one package, and T105 checks a package without
         # importing it.
         self._menu_action_export_profile = file_menu.addAction(
             "Export profile...", self.export_profile
         )
+        self._menu_action_export_profile_zip = file_menu.addAction(
+            "Export profile as single file...",
+            lambda: self.export_profile(as_zip=True),
+        )
+        # T170: a recipe (settings only, no weights); T173: a bare
+        # adapter.
+        self._menu_action_export_recipe = file_menu.addAction(
+            "Export recipe...", self.export_recipe
+        )
+        self._menu_action_export_adapter = file_menu.addAction(
+            "Export adapter...", self.export_adapter
+        )
         self._menu_action_import = file_menu.addAction(
             "Import package...", self.import_package
+        )
+        self._menu_action_import_zip = file_menu.addAction(
+            "Import single-file package...",
+            self.import_single_file_package,
         )
         self._menu_action_check = file_menu.addAction(
             "Check package...", self.check_package
@@ -4115,7 +4221,11 @@ class MainWindow(QMainWindow):
         self._menu_action_new_project.setEnabled(has_profile)
         self._menu_action_profiles.setEnabled(has_profile)
         self._menu_action_export.setEnabled(has_session)
+        self._menu_action_export_project_zip.setEnabled(has_session)
         self._menu_action_export_profile.setEnabled(has_profile)
+        self._menu_action_export_profile_zip.setEnabled(has_profile)
+        self._menu_action_export_recipe.setEnabled(has_session)
+        self._menu_action_export_adapter.setEnabled(has_session)
         self._menu_action_projects.setEnabled(has_session)
 
     def _build_session(self):
@@ -4943,7 +5053,9 @@ class MainWindow(QMainWindow):
                     child.setData(0, Qt.UserRole, key)
                     self._tree_projects[key] = child
                 self._set_tree_row(child, pr_label, pr_damaged)
-        self.tree.sortItems(0, Qt.AscendingOrder)
+        # T180: the filter + sort (name is the default order, not
+        # the old filesystem order). Children stay in name order.
+        self._apply_tree_filter(profiles)
         for slug, item in self._tree_profiles.items():
             item.setExpanded(slug in expanded)
         if vbar is not None:
@@ -4952,11 +5064,126 @@ class MainWindow(QMainWindow):
         self._refresh_tree_hint()
         self._sync_tree_selection()
 
+    def _on_tree_filter_changed(self, *args):
+        """The filter box, role filter, or sort picker changed
+        (T180): re-apply the filter. The tree rows already exist,
+        so this is hiding + ordering only — no store re-read, no
+        relabel, and the selection survives when the selected
+        profile still matches."""
+        self._apply_tree_filter()
+        self._refresh_tree_hint()
+
+    def _apply_tree_filter(self, profiles: dict | None = None) -> None:
+        """Hide the profiles the filter does not match, and order
+        the rest by the sort picker (T180). The filter text matches
+        display name, slug, role, and tag; the role filter shows
+        only that role. Sorts: name (the default), role, recently
+        used (last_used, newest first, never-used last), project
+        count (most first). Ties break by name. Damaged rows are
+        never hidden — a broken row must stay visible so it can be
+        repaired. The current item and the multi-selection are
+        restored after a reorder, so filtering never loses the
+        selection when the selected profile still matches."""
+        if profiles is None:
+            profiles = {
+                p["name"]: p
+                for p in self.store.list_profiles()
+                if not p.get("_damaged")
+            }
+        else:
+            profiles = {
+                slug: p for slug, p in profiles.items()
+                if not p.get("_damaged")
+            }
+        text = ""
+        role_filter = ""
+        sort_key = "Name"
+        if getattr(self, "tree_filter", None) is not None:
+            text = (self.tree_filter.text() or "").strip().lower()
+        if getattr(self, "tree_role_filter", None) is not None:
+            role_filter = self.tree_role_filter.currentText()
+            role_filter = "" if role_filter == "All roles" else role_filter.lower()
+        if getattr(self, "tree_sort", None) is not None:
+            sort_key = self.tree_sort.currentText()
+        for slug, item in self._tree_profiles.items():
+            p = profiles.get(slug)
+            if p is None:
+                # A damaged row: never hidden.
+                item.setHidden(False)
+                continue
+            hay = " ".join([
+                p.get("display_name") or "",
+                p.get("name") or "",
+                p.get("role") or "",
+                p.get("ollama_tag") or "",
+                p.get("base_ref") or "",
+            ]).lower()
+            match = (not text or text in hay) and (
+                not role_filter
+                or (p.get("role") or "").lower() == role_filter
+            )
+            item.setHidden(not match)
+        # Order: name first (the tie-break — sorts are stable),
+        # then the picked key.
+        items = list(self._tree_profiles.items())
+
+        def _name(slug):
+            p = profiles.get(slug) or {}
+            return (p.get("display_name") or slug).lower()
+
+        items.sort(key=lambda kv: _name(kv[0]))
+        if sort_key == "Role":
+            items.sort(key=lambda kv: (
+                (profiles.get(kv[0]) or {}).get("role") or ""
+            ).lower() or "\uffff")
+        elif sort_key == "Recently used":
+            # Newest first; a blank last_used ("never") sorts last
+            # ("" is smaller than any timestamp, so reverse puts
+            # it at the end).
+            items.sort(
+                key=lambda kv: (profiles.get(kv[0]) or {}).get("last_used") or "",
+                reverse=True,
+            )
+        elif sort_key == "Project count":
+            items.sort(
+                key=lambda kv: sum(
+                    1 for key in self._tree_projects if key[0] == kv[0]
+                ),
+                reverse=True,
+            )
+        current = self.tree.currentItem()
+        selected = self.tree.selectedItems()
+        self._building = True
+        try:
+            for index, (_slug, item) in enumerate(items):
+                at = self.tree.indexOfTopLevelItem(item)
+                if at != index:
+                    self.tree.takeTopLevelItem(at)
+                    self.tree.insertTopLevelItem(index, item)
+            for item in self._tree_profiles.values():
+                item.sortChildren(0, Qt.AscendingOrder)
+        finally:
+            self._building = False
+        # Restore the selection after the reorder: taking an item
+        # out drops it from the selection, and the current item
+        # with it. Hidden rows keep their selection too — the
+        # filter hides rows, it does not unpick them.
+        if current is not None:
+            self._building = True
+            try:
+                self.tree.setCurrentItem(current)
+            finally:
+                self._building = False
+        for item in selected:
+            item.setSelected(True)
+
     def _refresh_tree_hint(self):
         """The empty-list hint (T124): one line under the tree
         saying what to do next, when the tree has nothing to
         show — an empty store, or a profile with no projects.
-        Hidden the moment there is something to look at."""
+        Hidden the moment there is something to look at. T180: a
+        filter that matches nothing says so, so an empty-looking
+        list is never mistaken for an empty store."""
         if not self._tree_profiles:
             text = "No profiles yet - New profile to start"
         elif self._current_profile and not any(
@@ -4966,6 +5193,21 @@ class MainWindow(QMainWindow):
             text = "No projects yet - New project to start"
         else:
             text = ""
+        if not text and self._tree_profiles:
+            filtering = False
+            if getattr(self, "tree_filter", None) is not None:
+                filtering = bool(self.tree_filter.text().strip())
+            if (
+                not filtering
+                and getattr(self, "tree_role_filter", None) is not None
+                and self.tree_role_filter.currentText() != "All roles"
+            ):
+                filtering = True
+            if filtering and all(
+                item.isHidden()
+                for item in self._tree_profiles.values()
+            ):
+                text = "No profiles match that filter."
         self.tree_hint.setText(text)
         self.tree_hint.setVisible(bool(text))
 
@@ -5050,7 +5292,11 @@ class MainWindow(QMainWindow):
         """The right-click menu for one tree row (T168): Rename,
         for a healthy row. None for a damaged row or no row —
         there is nothing to rename there. Factored out so tests
-        can read the menu without showing it."""
+        can read the menu without showing it. T181: when several
+        profiles are selected and the row is one of them, the
+        bulk actions join the menu — delete, export, and role
+        change for the whole selection. A single selection shows
+        Rename only, exactly as before."""
         if item is None or item.data(0, Qt.UserRole + 1):
             return None
         data = item.data(0, Qt.UserRole)
@@ -5067,7 +5313,46 @@ class MainWindow(QMainWindow):
             rename.triggered.connect(
                 lambda: self.rename_project(profile, project)
             )
+        selected = self._selected_profiles()
+        if (
+            project is None
+            and len(selected) > 1
+            and profile in selected
+        ):
+            menu.addSeparator()
+            n = len(selected)
+            delete = menu.addAction(f"Delete {n} selected profiles...")
+            delete.triggered.connect(
+                lambda: self._bulk_delete_profiles(selected)
+            )
+            export = menu.addAction(
+                f"Export {n} selected profiles..."
+            )
+            export.triggered.connect(
+                lambda: self._bulk_export_profiles(selected)
+            )
+            role = menu.addAction(
+                f"Change role for {n} selected profiles..."
+            )
+            role.triggered.connect(
+                lambda: self._bulk_change_role(selected)
+            )
         return menu
+
+    def _selected_profiles(self) -> list[str]:
+        """The profile slugs in the current tree selection (T181):
+        top-level rows only — project rows are not bulk targets.
+        Damaged rows are skipped: there is nothing to delete or
+        export until they are repaired."""
+        slugs = []
+        for item in self.tree.selectedItems():
+            data = item.data(0, Qt.UserRole)
+            if data is None or item.data(0, Qt.UserRole + 1):
+                continue
+            profile, project = data
+            if project is None and profile not in slugs:
+                slugs.append(profile)
+        return slugs
 
     def _on_tree_context_menu(self, pos):
         """Right-click on the tree (T168): show the row's menu at
@@ -6416,6 +6701,270 @@ class MainWindow(QMainWindow):
             self.refresh_tree()
         self._say(f"Moved profile {slug} to the trash.")
 
+    # -- T181: bulk operations on the multi-selection --------------
+    def _bulk_delete_box(self, slugs):
+        """The bulk-delete confirm (T181): ONE dialog naming every
+        selected profile, defaulting to No, Escape leaving things
+        untouched. Factored out so tests can read the box without
+        showing it, like _profile_merge_box.
+
+        Modal audit: this box is reached only from the bulk
+        context-menu action — no existing test reaches it, and the
+        bulk tests stub QMessageBox.exec."""
+        names = []
+        for slug in slugs:
+            try:
+                prof = self.store.get_profile(slug)
+                names.append(
+                    _displayed_name(
+                        prof.get("display_name") or slug, slug
+                    )
+                )
+            except StellaError:
+                names.append(slug)
+        box = QMessageBox(self)
+        box.setWindowTitle("Delete profiles")
+        box.setText(
+            f"Move {len(slugs)} profiles to the trash?"
+        )
+        box.setInformativeText(
+            "Profiles:\n"
+            + "\n".join(f"- {name}" for name in names)
+            + "\n\nYou can move them back later, or delete them "
+            "forever from Trash in the File menu."
+        )
+        box.setIcon(QMessageBox.Warning)
+        box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        box.setDefaultButton(QMessageBox.No)
+        box.setEscapeButton(QMessageBox.No)
+        return box
+
+    def _bulk_delete_profiles(self, slugs):
+        """Delete several profiles at once (T181): one confirm
+        naming them all, each to the trash (T23). A profile that
+        fails to delete warns and the rest still go — one bad
+        folder must not block the rest."""
+        if not slugs:
+            return
+        box = self._bulk_delete_box(slugs)
+        if box.exec() != QMessageBox.Yes:
+            return
+        moved = []
+        for slug in slugs:
+            try:
+                self.store.delete_profile(slug)
+            except StellaError as exc:
+                self._warn(str(exc))
+                continue
+            moved.append(slug)
+            win = self._profile_windows.pop(slug, None)
+            if win is not None:
+                win.close()
+            for key in list(self._project_windows):
+                if key[0] == slug:
+                    self._project_windows.pop(key).close()
+            self.debug_log.action(f"profile deleted: {slug}")
+        if self._current_profile in moved:
+            self.set_session(None, None)
+        else:
+            self.refresh_tree()
+        if moved:
+            self._say(
+                f"Moved {len(moved)} profiles to the trash."
+            )
+
+    def _ask_bulk_include_projects(self, slugs) -> bool | None:
+        """The bulk-export question (T181): include the projects
+        in each package, or the profiles alone? One question for
+        the whole selection, naming the total. Returns True to
+        include, False for profiles alone, None when the user
+        cancels. No projects anywhere means no question — the
+        profiles alone are the only choice.
+
+        Modal audit: reached only from the bulk export action;
+        the bulk tests stub it with a QTimer clicker."""
+        total = 0
+        for slug in slugs:
+            total += len([
+                p for p in self.store.list_projects(slug)
+                if not p.get("_damaged")
+            ])
+        if total == 0:
+            return False
+        box = QMessageBox(self)
+        box.setWindowTitle("Include the projects?")
+        box.setText(
+            f"The {len(slugs)} selected profiles have {total} "
+            f"project{'s' if total != 1 else ''} between them."
+        )
+        box.setInformativeText(
+            "Include them and each package carries its projects "
+            "with their weights, checkpoints, and notes. Profiles "
+            "alone carry just the profiles."
+        )
+        include = box.addButton(
+            "Include projects", QMessageBox.ButtonRole.AcceptRole
+        )
+        alone = box.addButton(
+            "Profiles alone", QMessageBox.ButtonRole.AcceptRole
+        )
+        cancel = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(include)
+        box.setEscapeButton(cancel)
+        box._stella_include_button = include
+        box._stella_alone_button = alone
+        box._stella_cancel_button = cancel
+        box.exec()
+        if box.clickedButton() is include:
+            return True
+        if box.clickedButton() is alone:
+            return False
+        return None
+
+    def _bulk_overwrite_box(self, targets):
+        """The bulk-overwrite dialog (T181): some of the packages
+        already exist. One question for all of them, naming each.
+        Factored out so tests can read the box without showing it.
+
+        Modal audit: reached only from the bulk export action;
+        the bulk tests stub it with a QTimer clicker."""
+        box = QMessageBox(self)
+        box.setWindowTitle("Exports already exist")
+        box.setText(
+            f"{len(targets)} package"
+            f"{'s' if len(targets) != 1 else ''} already exist in "
+            "that folder."
+        )
+        box.setInformativeText(
+            "Overwrite them, or cancel and pick another folder?\n"
+            + "\n".join(target.name for target in targets)
+        )
+        over = box.addButton(
+            "Overwrite", QMessageBox.ButtonRole.AcceptRole
+        )
+        cancel = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(cancel)
+        box.setEscapeButton(cancel)
+        box._stella_overwrite_button = over
+        box._stella_cancel_button = cancel
+        return box
+
+    def _ask_bulk_overwrite(self, targets) -> bool:
+        """Ask whether to overwrite the existing bulk-export
+        targets. A dialog that closes without a click (or a
+        stubbed exec in a test) means do not overwrite — the safe
+        answer."""
+        box = self._bulk_overwrite_box(targets)
+        box.exec()
+        return box.clickedButton() is box._stella_overwrite_button
+
+    def _bulk_export_profiles(self, slugs):
+        """Export several profiles at once (T181): one package per
+        profile, into one folder, on the job card (T106). One
+        include-projects question and one overwrite question cover
+        the whole selection. A profile that fails to export is
+        named in the warning at the end; the rest still land."""
+        if not slugs:
+            return
+        if self._job_already_running():
+            return
+        include = self._ask_bulk_include_projects(slugs)
+        if include is None:
+            self._say("Export cancelled.")
+            return
+        dest = QFileDialog.getExistingDirectory(
+            self, "Export selected profiles to folder", str(Path.home())
+        )
+        if not dest:
+            return
+        targets = [
+            Path(dest) / (slug + export_mod.PROFILE_EXPORT_SUFFIX)
+            for slug in slugs
+        ]
+        force = False
+        existing = [t for t in targets if t.exists()]
+        if existing:
+            if not self._ask_bulk_overwrite(existing):
+                self._say("Export cancelled.")
+                return
+            force = True
+
+        def job(ctx):
+            exported = []
+            failed = []
+            for index, slug in enumerate(slugs):
+                ctx.progress(index, len(slugs))
+                if ctx.is_cancelled():
+                    raise StellaError("Cancelled.")
+                try:
+                    export_mod.export_profile(
+                        self.store, slug, dest,
+                        include_projects=include, force=force,
+                        should_stop=ctx.is_cancelled,
+                    )
+                    exported.append(slug)
+                except StellaError as exc:
+                    failed.append(f"{slug}: {exc}")
+            if failed:
+                raise StellaError(
+                    "Some profiles did not export:\n"
+                    + "\n".join(failed)
+                )
+            return (
+                f"Exported {len(exported)} profiles to {dest}."
+            )
+
+        def on_finished(ok, message):
+            self.refresh_tree()
+            self.refresh_session()
+            if not ok:
+                self._warn(message)
+            else:
+                self._say(message.splitlines()[0] if message else "Done.")
+
+        if self._start_job_worker(
+            job, "Exporting profiles", True, on_finished=on_finished
+        ):
+            self._train_log_line(
+                f"Exporting {len(slugs)} profiles..."
+            )
+        self.debug_log.action(
+            f"bulk profile export started: {len(slugs)} profiles "
+            f"to {dest}"
+        )
+
+    def _bulk_change_role(self, slugs):
+        """Change the role on several profiles at once (T181):
+        one role picker, applied to the whole selection. "No role"
+        clears the role. A profile that fails to update warns and
+        the rest still change.
+
+        Modal audit: QInputDialog.getItem is reached only from
+        this action; the bulk tests stub getItem."""
+        items = ["No role"] + list(CANONICAL_ROLES)
+        choice, ok = QInputDialog.getItem(
+            self, "Change role",
+            f"New role for the {len(slugs)} selected profiles:",
+            items, 0, False,
+        )
+        if not ok:
+            return
+        role = "" if choice == "No role" else choice
+        changed = 0
+        for slug in slugs:
+            try:
+                self.store.update_profile(slug, role=role)
+            except StellaError as exc:
+                self._warn(str(exc))
+                continue
+            changed += 1
+        self.refresh_tree()
+        self.refresh_session()
+        if changed:
+            self._say(
+                f"Changed the role for {changed} profiles."
+            )
+
     # -- project actions --------------------------------------------
     def new_project(self):
         profile = self._selected_profile()
@@ -6689,7 +7238,7 @@ class MainWindow(QMainWindow):
         if self._start_job_worker(job, title, True, on_finished=on_finished):
             self._train_log_line(log_line)
 
-    def export_project(self):
+    def export_project(self, as_zip: bool = False):
         profile = self._selected_profile()
         project = self._selected_project()
         if not profile or not project:
@@ -6700,15 +7249,17 @@ class MainWindow(QMainWindow):
         bundle = self._ask_bundle_dataset(profile, project)
         # T167: the dialog title names the package before the
         # folder is picked.
+        suffix = export_mod.EXPORT_SUFFIX + (
+            export_mod.ZIP_SUFFIX if as_zip else ""
+        )
         dest = QFileDialog.getExistingDirectory(
             self,
-            f"Export project to folder "
-            f"(package: {project}{export_mod.EXPORT_SUFFIX})",
+            f"Export project to folder (package: {project}{suffix})",
             str(Path.home()),
         )
         if not dest:
             return
-        target = Path(dest) / (project + export_mod.EXPORT_SUFFIX)
+        target = Path(dest) / (project + suffix)
         force = False
         if target.exists():
             # T117: the folder already holds a package with this
@@ -6727,6 +7278,7 @@ class MainWindow(QMainWindow):
                 self.store, profile, project, dest,
                 bundle_dataset=bundle, force=force,
                 on_progress=on_progress, should_stop=should_stop,
+                as_zip=as_zip,
             ),
             "Exporting project",
             f"Exporting project {profile}/{project} "
@@ -6779,7 +7331,7 @@ class MainWindow(QMainWindow):
             return False
         return None
 
-    def export_profile(self):
+    def export_profile(self, as_zip: bool = False):
         profile = self._selected_profile()
         if not profile:
             self._warn("Pick a profile to export.")
@@ -6792,17 +7344,17 @@ class MainWindow(QMainWindow):
             return
         # T167: the dialog title names the package before the
         # folder is picked.
+        suffix = export_mod.PROFILE_EXPORT_SUFFIX + (
+            export_mod.ZIP_SUFFIX if as_zip else ""
+        )
         dest = QFileDialog.getExistingDirectory(
             self,
-            f"Export profile to folder "
-            f"(package: {profile}{export_mod.PROFILE_EXPORT_SUFFIX})",
+            f"Export profile to folder (package: {profile}{suffix})",
             str(Path.home()),
         )
         if not dest:
             return
-        target = (
-            Path(dest) / (profile + export_mod.PROFILE_EXPORT_SUFFIX)
-        )
+        target = Path(dest) / (profile + suffix)
         force = False
         if target.exists():
             if not self._ask_overwrite(target):
@@ -6819,6 +7371,7 @@ class MainWindow(QMainWindow):
                 self.store, profile, dest,
                 include_projects=include, force=force,
                 on_progress=on_progress, should_stop=should_stop,
+                as_zip=as_zip,
             ),
             "Exporting profile",
             f"Exporting profile {profile} "
@@ -6826,6 +7379,101 @@ class MainWindow(QMainWindow):
         )
         self.debug_log.action(
             f"profile export started: {profile} to {dest}"
+        )
+
+    # -- T170: export a recipe (settings only, no weights) --------
+    def export_recipe(self):
+        profile = self._selected_profile()
+        project = self._selected_project()
+        if not profile or not project:
+            self._warn("Pick a project to export a recipe for.")
+            return
+        if self._job_already_running():
+            return
+        # T167: the dialog title names the package before the
+        # folder is picked.
+        dest = QFileDialog.getExistingDirectory(
+            self,
+            f"Export recipe to folder "
+            f"(package: {project}{export_mod.RECIPE_EXPORT_SUFFIX})",
+            str(Path.home()),
+        )
+        if not dest:
+            return
+        target = Path(dest) / (project + export_mod.RECIPE_EXPORT_SUFFIX)
+        force = False
+        if target.exists():
+            if not self._ask_overwrite(target):
+                self._say("Export cancelled.")
+                return
+            force = True
+        # T178: the log line that starts the job carries the
+        # estimated size; the success message carries the real one.
+        estimate = export_mod.estimate_recipe_export_size(
+            self.store, profile, project
+        )
+        self._export_job(
+            lambda on_progress, should_stop: export_mod.export_recipe(
+                self.store, profile, project, dest, force=force,
+                on_progress=on_progress, should_stop=should_stop,
+            ),
+            "Exporting recipe",
+            f"Exporting recipe {profile}/{project} "
+            f"(about {export_mod.format_size(estimate)})...",
+        )
+        self.debug_log.action(
+            f"recipe export started: {profile}/{project} to {dest}"
+        )
+
+    # -- T173: export a bare adapter --------------------------------
+    def export_adapter(self):
+        profile = self._selected_profile()
+        project = self._selected_project()
+        if not profile or not project:
+            self._warn("Pick a project to export an adapter for.")
+            return
+        if self._job_already_running():
+            return
+        adapter_dir = self.store.project_dir(profile, project) / "adapter"
+        if not (adapter_dir / "adapter_config.json").is_file():
+            self._warn(
+                f"Project {project!r} has no trained adapter yet. "
+                "Train it first, then export the adapter."
+            )
+            return
+        # T167: the dialog title names the package before the
+        # folder is picked.
+        dest = QFileDialog.getExistingDirectory(
+            self,
+            f"Export adapter to folder "
+            f"(package: {project}{export_mod.ADAPTER_EXPORT_SUFFIX})",
+            str(Path.home()),
+        )
+        if not dest:
+            return
+        target = Path(dest) / (project + export_mod.ADAPTER_EXPORT_SUFFIX)
+        force = False
+        if target.exists():
+            if not self._ask_overwrite(target):
+                self._say("Export cancelled.")
+                return
+            force = True
+        # T178: the log line that starts the job carries the
+        # estimated size; the success message carries the real one.
+        estimate = export_mod.estimate_adapter_export_size(
+            self.store, profile, project
+        )
+        self._export_job(
+            lambda on_progress, should_stop: export_mod.export_adapter(
+                self.store, profile, project, dest, force=force,
+                on_progress=on_progress, should_stop=should_stop,
+            ),
+            "Exporting adapter",
+            f"Exporting adapter {profile}/{project} "
+            f"(about {export_mod.format_size(estimate)})...",
+        )
+        self.debug_log.action(
+            f"adapter export started: {profile}/{project} to {dest}"
         )
 
     # -- T105: check a package without importing it -----------------
@@ -6950,15 +7598,38 @@ class MainWindow(QMainWindow):
 
     def _confirm_import_preview(self, path, summary):
         """Show the import preview dialog (T58). Returns
-        (confirmed, profile_choice): confirmed is False when the
-        user cancels (nothing is imported); profile_choice is the
-        preview's merge choice, or None when there was no diff to
-        choose over. Factored out so tests can stub the dialog
-        and still exercise the import."""
-        dialog = ImportPreviewDialog(self, summary)
+        (confirmed, profile_choice, into_target): confirmed is
+        False when the user cancels (nothing is imported);
+        profile_choice is the preview's merge choice, or None
+        when there was no diff to choose over; into_target is
+        (profile, project) when the user picked the adapter
+        import's "into the current project" choice (T173), else
+        None. Factored out so tests can stub the dialog and still
+        exercise the import. The into-current-project choice is
+        offered only when the session project shares the
+        adapter's base — importing into a different base is
+        refused, so it is never offered."""
+        into_option = None
+        if summary.get("kind") == export_mod.ADAPTER_PACKAGE_KIND:
+            profile = self._current_profile
+            project = self._current_project
+            if profile and project:
+                try:
+                    target_prof = self.store.get_profile(profile)
+                    self.store.get_project(profile, project)
+                    adapter = {"base": summary.get("adapter_base", "")}
+                    if export_mod.adapter_base_matches(
+                        target_prof, adapter
+                    ):
+                        into_option = (profile, project)
+                except StellaError:
+                    into_option = None
+        dialog = ImportPreviewDialog(
+            self, summary, into_option=into_option
+        )
         if dialog.exec() != QDialog.Accepted:
-            return False, None
-        return True, dialog.profile_choice()
+            return False, None, None
+        return True, dialog.profile_choice(), dialog.into_project()
 
     # -- T117: the import collision question -----------------------
     def _import_collision_box(self, slug):
@@ -7007,6 +7678,24 @@ class MainWindow(QMainWindow):
         )
         if not path:
             return
+        self._import_package_from(path)
+
+    def import_single_file_package(self):
+        """Import a `.stella` single-file package (T171): the same
+        import flow as import_package, from a file picker. Any
+        kind imports — project, profile, recipe, or adapter."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Pick a Stella package file", str(Path.home()),
+            "Stella packages (*.stella);;All files (*)",
+        )
+        if not path:
+            return
+        self._import_package_from(path)
+
+    def _import_package_from(self, path):
+        """The import flow shared by folder and single-file
+        imports (T171): preview, confirm, merge/collision
+        choices, then the worker import."""
         if self._job_already_running():
             return
         # The preview (T58): what the package is, before anything
@@ -7022,20 +7711,38 @@ class MainWindow(QMainWindow):
             self.refresh_tree()
             self.refresh_session()
             return
-        confirmed, choice = self._confirm_import_preview(path, summary)
+        # The real dialog returns (confirmed, choice, into_target);
+        # older stubs return (confirmed, choice) — both are
+        # accepted here.
+        confirmed_result = self._confirm_import_preview(path, summary)
+        confirmed, choice = (
+            confirmed_result[0], confirmed_result[1]
+        )
+        into_target = (
+            confirmed_result[2]
+            if len(confirmed_result) > 2
+            else None
+        )
         if not confirmed:
             return
         # Every choice is resolved HERE, on the GUI thread, before
         # the worker starts (T106): a modal cannot run in a worker
         # thread. The profile merge (T57) still asks when the
         # preview had no choice to make; the collision (T117) asks
-        # when the project already exists.
+        # when the project already exists. An adapter package
+        # (T173) never asks about a collision: a new-project
+        # import lands under a copy name on its own, and an
+        # into-existing import targets a project that is already
+        # there by design.
         if choice is None and summary.get("profile_diff"):
             choice = self._ask_profile_merge(
                 summary["profile"], summary["profile_diff"]
             )
         collision = None
-        if summary.get("kind") != export_mod.PROFILE_PACKAGE_KIND:
+        if summary.get("kind") in (
+            export_mod.PROJECT_PACKAGE_KIND,
+            export_mod.RECIPE_PACKAGE_KIND,
+        ):
             if summary.get("project_existed"):
                 collision = self._ask_import_collision(
                     summary["project"]
@@ -7057,6 +7764,8 @@ class MainWindow(QMainWindow):
                     done, total
                 ),
                 should_stop=ctx.is_cancelled,
+                into_profile=into_target[0] if into_target else None,
+                into_project=into_target[1] if into_target else None,
             )
             box["result"] = result
             return _import_message(result)

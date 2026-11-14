@@ -172,8 +172,13 @@ def test_menu_bar_has_expected_menus_and_actions(window):
             "New profile...",
             "New project...",
             "Export project...",
+            "Export project as single file...",  # T171
             "Export profile...",  # T86
+            "Export profile as single file...",  # T171
+            "Export recipe...",  # T170
+            "Export adapter...",  # T173
             "Import package...",
+            "Import single-file package...",  # T171
             "Check package...",  # T105
             "Run the picked job",
             "Settings...",
@@ -1443,6 +1448,11 @@ def test_import_package_last_resort_catch(
         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("kaboom")),
     )
     window.import_package()  # must not raise out of the handler
+    # Wait for the worker: one processEvents() is not enough under
+    # load — the thread may not have run yet, so the warning would
+    # not be recorded (and the worker would outlive the test's
+    # stubs, firing a real warning modal into the next test).
+    _wait_for_job(window, qapp)
     qapp.processEvents()
     assert warnings
     assert "kaboom" in warnings[0]
@@ -5812,6 +5822,13 @@ def test_export_cancel_leaves_no_package(
         import time as time_mod
 
         time_mod.sleep(0.5)
+        # Cancel deterministically mid-export: the main thread's
+        # cancel below races the worker under load. Requesting the
+        # cancel here, from the worker itself, guarantees it is
+        # in flight while the export still has checks ahead of
+        # it. The GUI cancel below still runs (idempotently).
+        if window._job_worker is not None:
+            window._job_worker.request_cancel()
         return real_copy(src, dst, progress)
 
     monkeypatch.setattr(export_mod, "_copy_file_counted", slow_copy)
@@ -5871,6 +5888,15 @@ def test_import_cancel_leaves_home_untouched(
         import time as time_mod
 
         time_mod.sleep(0.5)
+        # Cancel deterministically mid-import: the main thread's
+        # cancel below races the worker under load, and a cancel
+        # that lands after the import's last check point goes
+        # unnoticed — the import reports success. Requesting the
+        # cancel here, from the worker itself, guarantees it is
+        # in flight while the import still has checks ahead of
+        # it. The GUI cancel below still runs (idempotently).
+        if window._job_worker is not None:
+            window._job_worker.request_cancel()
         return real_copy(src, dst, progress)
 
     monkeypatch.setattr(export_mod, "_copy_file_counted", slow_copy)

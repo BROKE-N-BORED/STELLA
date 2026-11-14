@@ -422,18 +422,19 @@ def test_package_kinds_are_defined_in_one_place():
         "stella-export",
         "stella-profile-export",
         "stella-recipe-export",
+        "stella-adapter-export",
     }
 
 
-def test_verify_names_a_known_but_unimportable_kind(seeded, tmp_path):
-    # T86: the profile kind IS importable now — the recipe kind is
-    # the one this Stella cannot import yet.
+def test_verify_accepts_every_defined_kind(seeded, tmp_path):
+    # T170/T173: the recipe and adapter kinds are importable now —
+    # every kind in PACKAGE_KINDS verifies. (The old test pinned
+    # the recipe kind as known-but-unimportable; v0.22.0 closed
+    # that gap, so there is no known-but-unimportable kind left.)
     out = export_mod.export_project(seeded, "lfm3-tool", "tool-calls", tmp_path)
     _rewrite_manifest(out, lambda m: m.update(kind="stella-recipe-export"))
-    with pytest.raises(StellaError) as exc:
-        export_mod.verify_export(out)
-    assert "recipe package" in str(exc.value)
-    assert "only import project and profile packages" in str(exc.value)
+    manifest = export_mod.verify_export(out)
+    assert manifest["kind"] == "stella-recipe-export"
 
 
 def test_verify_rejects_unknown_kind(seeded, tmp_path):

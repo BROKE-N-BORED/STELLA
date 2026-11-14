@@ -4478,6 +4478,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Covers:** A2-G6; A3-G2
 - **Effort:** S
 - **Depends on:** T40 (package format defines the recipe kind)
+- **Status:** DONE in v0.22.0 (2026-11-14) — recipes export on their own (export_recipe: no weights/checkpoints/probe/sleep; recipe kind in FORMAT.md), with a missing-dataset warning.
 - **Problem:** Export is the whole package; there is no way to
   share a recipe (dataset + settings) without weights and
   checkpoints. Audit #3 confirmed the gap (G2): whole package or
@@ -4503,6 +4504,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Origin:** audit #3 T16; extended by the repo-audit verdict (R33)
 - **Covers:** A3-G4, A3-D13; R33
 - **Effort:** M
+- **Status:** DONE in v0.22.0 (2026-11-14) — packages can be a single .stella file (write_package_zip, --zip on all four export commands; import refuses entries escaping the package).
 - **Problem:** A package is a folder; sharing means zipping by
   hand. No `.stella` zip (or tar) form that import can read. The
   verdict's idea list asks for the same thing (R33: zip export).
@@ -4519,6 +4521,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Origin:** audit #5 T16 (G5/D15 part)
 - **Covers:** A5-G5, A5-D15
 - **Effort:** M
+- **Status:** DONE in v0.22.0 (2026-11-14) — the terminal gains --json, --quiet, and --verbose as global flags (work before or after the subcommand; --verbose shows the traceback).
 - **Problem:** No `--json`, `--quiet`, or `--verbose` flag exists
   on any command. The tab-separated list output is close to
   parseable but not a format, and there is no way to get a
@@ -4542,6 +4545,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Origin:** repo-audit verdict (R32)
 - **Covers:** R32
 - **Effort:** M
+- **Status:** DONE in v0.22.0 (2026-11-14) — adapters export and import into a project on the same base (export_adapter, import_adapter_export, adapter_base_matches; a base mismatch refuses; refuses when the target already has an adapter; export refuses without an adapter).
 - **Problem:** There is no way to share a bare adapter (weights
   only, no project) — export is the whole project package (T41)
   or a recipe with no weights (T170). A user who wants to hand
@@ -4561,6 +4565,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Origin:** repo-audit verdict (R31)
 - **Covers:** R31
 - **Effort:** M
+- **Status:** DONE in v0.22.0 (2026-11-14) — the probe runs a per-role prompt set (7 files; governing seats 24 prompts = 18 default + 6 role-specific, others 12 each; an unknown/blank role or an invalid file falls back to the 18-prompt default with a note; the set name is recorded in the result and shown in the dialog).
 - **Problem:** The refusal probe is one fixed 12-prompt set for
   every profile — but a driver, a reviewer, and a tool-calling
   model need different refusal evidence. A role whose job is tool
@@ -4677,6 +4682,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Origin:** audit #1 T16
 - **Covers:** A1-W12 (search/filter/sort); A1-G6 (search/sort part)
 - **Effort:** M
+- **Status:** DONE in v0.22.0 (2026-11-14) — the profile list filters, sorts, and keeps your selection (filter box, role filter, 4 sorts; name is the default order, fixing the old filesystem order).
 - **Problem:** No search, filter, or sort in the list. Fine at 11
   profiles, thin at 30+. No multi-select or bulk operations either
   (A1-G6 — bulk work is T181).
@@ -4695,6 +4701,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Origin:** audit #1 T17
 - **Covers:** A1-G6 (bulk part)
 - **Effort:** M
+- **Status:** DONE in v0.22.0 (2026-11-14) — pick several profiles at once to delete, export, or change their role (one confirm naming all; single-selection behavior unchanged).
 - **Problem:** No multi-select, no bulk operations — acceptable now,
   a wall later. Every profile action is one at a time.
 - **Fix:** Multi-select in the profile list (Ctrl/Shift-click) with
@@ -4753,6 +4760,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Origin:** audit #6 T24
 - **Covers:** A6-U9, A6-D23
 - **Effort:** S
+- **Status:** DONE in v0.22.0 (2026-11-14) — `stella pull-weights <repo>` downloads a base model's weights; the nested-quote one-liner is gone from install-training.sh.
 - **Problem:** `install-training.sh` ends by printing
   `$DIR/.venv/bin/python -c "from huggingface_hub import
   snapshot_download; snapshot_download('LiquidAI/LFM3-1.7B')"` —
@@ -4771,6 +4779,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Origin:** audit #6 T23
 - **Covers:** A6-U7, A6-D19
 - **Effort:** S
+- **Status:** DONE in v0.22.0 (2026-11-14) — the desktop files carry StartupNotify, Keywords, and Version=1.0 (verified by parsing the fields; desktop-file-validate is not installed in the sandbox).
 - **Problem:** The generated entry has no `StartupNotify=true`
   (no launch feedback in the panel), no `Keywords` (no search
   terms in the menu), no `Version=1.0`. All optional; all absent.
@@ -4785,6 +4794,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Origin:** audit #6 T25
 - **Covers:** A6-G7, A6-D25
 - **Effort:** S
+- **Status:** DONE in v0.22.0 (2026-11-14) — install.sh, install-training.sh, and run.sh all answer --help (checked before anything else runs, exits 0 without side effects).
 - **Problem:** `bash install.sh --help` just installs; the
   scripts ignore arguments entirely. Minor — but the first thing
   a careful user types is `--help`.
@@ -4799,6 +4809,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Origin:** audit #5 T18
 - **Covers:** A5-U3, A5-U9, A5-D18
 - **Effort:** S
+- **Status:** DONE in v0.22.0 (2026-11-14) — the terminal echoes the name it actually stored (normalized-name echo on create/rename) and bare `stella` prints the command list.
 - **Problem:** `create-profile UPPER-Case` succeeds and stores
   `upper-case`, with no notice. The user asked for one name and
   got another; the next command that uses the name they typed

@@ -6,7 +6,20 @@
                                           export a project package
     stella export-profile <profile> <dir>
                                           export a profile package
+    stella export-recipe <profile> <project> <dir>
+                                          export a recipe package
+                                          (settings only, no weights)
+    stella export-adapter <profile> <project> <dir>
+                                          export a bare adapter package
     stella import <export-dir>            import a package back
+                                          (a folder or a .stella file)
+    stella import-adapter <export-dir> [--into-profile <p>
+                                          --into-project <j>]
+                                          import an adapter package,
+                                          into a project with the same
+                                          base or a new project
+    stella pull-weights <repo>            download a base model's
+                                          weights from Hugging Face
     stella verify <export-dir>            check a package without
                                           importing it
     stella create-profile <name> [--tag <ollama-tag>] [--role <role>]
@@ -70,11 +83,18 @@
                                           only reports, without fixing)
 
 Reads STELLA_HOME for the home dir (default ~/.stella).
+
+Global flags (T172), available on every command: --json prints a
+structured result for scripting (on the list, show, probe,
+sleep-status, and verify commands), --quiet silences the per-step
+progress lines on a long run, --verbose prints the full traceback
+behind the clean error line.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -87,9 +107,59 @@ def _store() -> Store:
     return Store()
 
 
+def _as_json(args) -> bool:
+    """True when --json was passed (T172)."""
+    return bool(getattr(args, "json", False))
+
+
+def _is_quiet(args) -> bool:
+    """True when --quiet was passed (T172)."""
+    return bool(getattr(args, "quiet", False))
+
+
+def _print_json(obj) -> None:
+    """One JSON document on stdout (T172): indented, so a human
+    reading it can follow it too."""
+    print(json.dumps(obj, indent=2, default=str))
+
+
+def _normalized_note(typed: str, stored: str) -> str:
+    """The "(from 'UPPER-Case')" tail (T187): when a name was
+    normalized, say so — the user asked for one name and got
+    another, and the next command using the typed name would fail
+    to match it. Empty when nothing changed."""
+    if typed != stored:
+        return f" (from {typed!r})"
+    return ""
+
+
 def cmd_profiles(args) -> int:
     store = _store()
     profiles = store.list_profiles()
+    if _as_json(args):
+        # T172: the structured form — one object per profile, so a
+        # script can read names, roles, and bases without parsing
+        # the human lines. An empty home prints [], not the hint.
+        out = []
+        for p in profiles:
+            if p.get("_damaged"):
+                out.append({
+                    "name": p.get("name") or "",
+                    "damaged": True,
+                    "error": p.get("_error", "bad file"),
+                })
+                continue
+            out.append({
+                "name": p.get("name") or "",
+                "display_name": p.get("display_name") or p.get("name") or "",
+                "role": p.get("role") or "",
+                "ollama_tag": p.get("ollama_tag") or "",
+                "base_ref": p.get("base_ref") or "",
+                "governing_seat": p.get("governing_seat") or "",
+                "last_used": p.get("last_used") or "",
+            })
+        _print_json(out)
+        return 0
     if not profiles:
         print("No profiles yet. Create one in the Stella window,")
         # The working form before install is bash stella-cli (T51):
@@ -126,6 +196,29 @@ def cmd_projects(args) -> int:
     # exist", not as "you haven't made any projects yet".
     store.get_profile(args.profile)
     projects = store.list_projects(args.profile)
+    if _as_json(args):
+        # T172: the structured form — one object per project.
+        out = []
+        for p in projects:
+            if p.get("_damaged"):
+                out.append({
+                    "name": p.get("name") or "",
+                    "damaged": True,
+                    "error": p.get("_error", "bad file"),
+                })
+                continue
+            entry = {
+                "name": p.get("name") or "",
+                "display_name": p.get("display_name") or p.get("name") or "",
+                "status": p.get("status", "draft"),
+                "dataset_ref": p.get("dataset_ref") or "",
+            }
+            problem = metamorph_problem(p)
+            if problem is not None:
+                entry["metamorph_warning"] = problem
+            out.append(entry)
+        _print_json(out)
+        return 0
     if not projects:
         print(f"No projects in profile {args.profile!r}.")
         return 0
@@ -181,6 +274,7 @@ def cmd_export(args) -> int:
         store, args.profile, args.project, args.dir,
         bundle_dataset=bundle,
         force=getattr(args, "force", False),
+        as_zip=getattr(args, "zip", False),
     )
     print(f"Exported to {out}")
     print(
@@ -203,6 +297,7 @@ def cmd_export_profile(args) -> int:
         store, args.profile, args.dir,
         include_projects=include,
         force=getattr(args, "force", False),
+        as_zip=getattr(args, "zip", False),
     )
     print(f"Exported to {out}")
     print(
@@ -211,10 +306,107 @@ def cmd_export_profile(args) -> int:
     return 0
 
 
+def cmd_export_recipe(args) -> int:
+    """Export a recipe on its own (T170): the settings-only share
+    — dataset reference, settings, metamorph mode + notes, and
+    project notes. No weights, no checkpoints."""
+    store = _store()
+    estimate = export_mod.estimate_recipe_export_size(
+        store, args.profile, args.project,
+    )
+    print(f"Package size: about {export_mod.format_size(estimate)}.")
+    out = export_mod.export_recipe(
+        store, args.profile, args.project, args.dir,
+        force=getattr(args, "force", False),
+        as_zip=getattr(args, "zip", False),
+    )
+    print(f"Exported recipe to {out}")
+    print(
+        f"Package size: {export_mod.format_size(export_mod.package_size(out))}."
+    )
+    return 0
+
+
+def cmd_export_adapter(args) -> int:
+    """Export a bare adapter on its own (T173): the adapter
+    weights + a manifest (base, rank, dataset name, training
+    summary). No project record, no checkpoints."""
+    store = _store()
+    estimate = export_mod.estimate_adapter_export_size(
+        store, args.profile, args.project,
+    )
+    print(f"Package size: about {export_mod.format_size(estimate)}.")
+    out = export_mod.export_adapter(
+        store, args.profile, args.project, args.dir,
+        force=getattr(args, "force", False),
+        as_zip=getattr(args, "zip", False),
+    )
+    print(f"Exported adapter to {out}")
+    print(
+        f"Package size: {export_mod.format_size(export_mod.package_size(out))}."
+    )
+    return 0
+
+
+def cmd_pull_weights(args) -> int:
+    """Download a base model's weights (T184): the short command
+    that replaces the nested-quote one-liner the training
+    installer used to print. Nothing to hand-type with nested
+    quotes: `stella pull-weights LiquidAI/LFM3-1.7B`."""
+    from . import provision as provision_mod
+
+    repo = args.repo
+    if not provision_mod.is_hf_repo_id(repo):
+        print(
+            f"stella: {repo!r} is not a Hugging Face repo id "
+            "(it should look like org/name).",
+            file=sys.stderr,
+        )
+        return 1
+    if not provision_mod.hub_available():
+        print(
+            "stella: the Hugging Face packages are not installed. "
+            "Run this once in the Stella folder: "
+            "bash install-training.sh",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"Pulling weights for {repo}...")
+    quiet = _is_quiet(args)
+
+    def _show(line, **kwargs):
+        # run_download speaks in PROGRESS / DONE / ERROR lines
+        # (the GUI parses them); the terminal gets plain words.
+        if line.startswith("DONE "):
+            print(f"Downloaded to {line[5:]}.")
+        elif line.startswith("ERROR "):
+            print(f"stella: {line[6:]}", file=sys.stderr)
+        elif line.startswith("PROGRESS ") and not quiet:
+            try:
+                _tag, done, total = line.split()
+                done = int(done)
+                total = int(total)
+            except ValueError:
+                return
+            if total > 0:
+                print(
+                    f"Downloaded {provision_mod.format_size(done)} "
+                    f"of {provision_mod.format_size(total)}.",
+                    flush=True,
+                )
+
+    return provision_mod.run_download(repo, _print=_show)
+
+
 def cmd_verify(args) -> int:
     """Check a package without importing it (T105): one
     readable pass/fail per check, exit 0 when all pass."""
     report = export_mod.check_export(args.dir)
+    if _as_json(args):
+        # T172: the structured form — the whole report, including
+        # the manifest, as one JSON document.
+        _print_json(report)
+        return 0 if report["ok"] else 1
     print(f"Checking {args.dir}...")
     print(export_mod.format_check_report(report))
     return 0 if report["ok"] else 1
@@ -293,25 +485,113 @@ def cmd_import(args) -> int:
             )
         else:
             print(f"Imported profile {result['profile']!r} (no projects).")
+    elif summary.get("kind") == export_mod.ADAPTER_PACKAGE_KIND:
+        # A generic import always creates a new project around
+        # the adapter (import-adapter is the command that targets
+        # an existing project).
+        print(
+            f"Imported adapter {result['adapter']!r} as new project "
+            f"{result['project']!r} in profile {result['profile']!r}."
+        )
+        if result.get("copy_of"):
+            print(
+                f"(The name {result['copy_of']!r} was taken, so it "
+                "landed under a copy name.)"
+            )
     else:
+        # A project package, or a recipe (T170) — same shape, and
+        # the same collision choices. The noun says which.
+        noun = (
+            "recipe"
+            if summary.get("kind") == export_mod.RECIPE_PACKAGE_KIND
+            else "project"
+        )
         if result.get("collision") == "copy":
             print(
-                f"Imported project {result['project']!r} into profile "
+                f"Imported {noun} {result['project']!r} into profile "
                 f"{result['profile']!r} (a copy of "
                 f"{result.get('copy_of', '')!r})."
             )
         elif result.get("collision") == "replace":
             print(
-                f"Imported project {result['project']!r} into profile "
+                f"Imported {noun} {result['project']!r} into profile "
                 f"{result['profile']!r} (the old project went to the "
                 "trash)."
             )
         else:
             print(
-                f"Imported project {result['project']!r} into profile "
+                f"Imported {noun} {result['project']!r} into profile "
                 f"{result['profile']!r}"
             )
     if result.get("profile_existed"):
+        print(f"Profile {result['profile']!r} already existed.")
+    if result.get("profile_choice") == "take":
+        fields = export_mod.describe_profile_diff(
+            result.get("profile_diff") or {}
+        )
+        print(f"Profile updated from the package ({fields}).")
+    for warning in result.get("warnings", []):
+        print(f"Warning: {warning}")
+    if (
+        result.get("profile_choice") == "keep"
+        and result.get("profile_diff")
+        and choice is None
+        and on_conflict is None
+    ):
+        print("Use --profile-merge take to use the package's values instead.")
+    return 0
+
+
+def cmd_import_adapter(args) -> int:
+    """Import an adapter package (T173): into an existing project
+    with the same base (--into-profile + --into-project), or into
+    a new project created around it. The preview, the profile
+    merge, and the base-health check work as in cmd_import."""
+    store = _store()
+    choice = getattr(args, "profile_merge", None)
+    on_conflict = None
+    if choice is None and sys.stdin.isatty():
+        on_conflict = _prompt_profile_merge
+    from .ollama import list_models
+
+    models = list_models()
+    summary = export_mod.preview_export(
+        store, args.dir, installed_models=models
+    )
+    if summary.get("kind") != export_mod.ADAPTER_PACKAGE_KIND:
+        print(
+            "stella: this is not an adapter package. Import it with "
+            "`stella import` instead.",
+            file=sys.stderr,
+        )
+        return 1
+    print(export_mod.format_preview(summary))
+    if getattr(args, "preview", False):
+        return 0
+    into_profile = getattr(args, "into_profile", None)
+    into_project = getattr(args, "into_project", None)
+    result = export_mod.import_adapter_export(
+        store, args.dir,
+        profile_choice=choice, on_profile_conflict=on_conflict,
+        installed_models=models,
+        into_profile=into_profile, into_project=into_project,
+    )
+    if result.get("into_existing"):
+        print(
+            f"Imported adapter {result['adapter']!r} into project "
+            f"{result['project']!r} in profile {result['profile']!r}."
+        )
+    else:
+        print(
+            f"Imported adapter {result['adapter']!r} as new project "
+            f"{result['project']!r} in profile {result['profile']!r}."
+        )
+        if result.get("copy_of"):
+            print(
+                f"(The name {result['copy_of']!r} was taken, so it "
+                "landed under a copy name.)"
+            )
+    if result.get("profile_existed") and not result.get("into_existing"):
         print(f"Profile {result['profile']!r} already existed.")
     if result.get("profile_choice") == "take":
         fields = export_mod.describe_profile_diff(
@@ -339,7 +619,11 @@ def cmd_create_profile(args) -> int:
         display_name=args.display or "",
         base_ref=args.base or "",
     )
-    print(f"Created profile {data['name']!r} (role: {data.get('role') or '-'})")
+    print(
+        f"Created profile {data['name']!r}"
+        f"{_normalized_note(args.name, data['name'])} "
+        f"(role: {data.get('role') or '-'})"
+    )
     return 0
 
 
@@ -354,7 +638,10 @@ def cmd_create_profile(args) -> int:
 def cmd_rename_profile(args) -> int:
     store = _store()
     data = store.rename_profile(args.old, args.new)
-    print(f"Renamed profile {args.old!r} to {data['name']!r}")
+    print(
+        f"Renamed profile {args.old!r} to {data['name']!r}"
+        f"{_normalized_note(args.new, data['name'])}"
+    )
     return 0
 
 
@@ -429,6 +716,15 @@ def cmd_show_profile(args) -> int:
     store = _store()
     prof = store.get_profile(args.name)
     projects = store.list_projects(args.name)
+    if _as_json(args):
+        # T172: the structured form — the profile record, plus the
+        # project names (the human form lists them the same way).
+        healthy = [p for p in projects if not p.get("_damaged")]
+        _print_json({
+            **prof,
+            "projects": [p["name"] for p in healthy],
+        })
+        return 0
     print(f"Profile {prof['name']} ({prof.get('display_name', prof['name'])})")
     print(f"  role: {prof.get('role') or '-'}")
     # T116: a custom role is flagged, and a governing-seat marker
@@ -463,7 +759,10 @@ def cmd_show_profile(args) -> int:
 def cmd_rename_project(args) -> int:
     store = _store()
     data = store.rename_project(args.profile, args.old, args.new)
-    print(f"Renamed project {args.old!r} to {data['name']!r}")
+    print(
+        f"Renamed project {args.old!r} to {data['name']!r}"
+        f"{_normalized_note(args.new, data['name'])}"
+    )
     return 0
 
 
@@ -559,6 +858,12 @@ def cmd_show_project(args) -> int:
     from .train import list_checkpoints
 
     proj = store.get_project(args.profile, args.name)
+    checkpoints = list_checkpoints(store, args.profile, args.name)
+    if _as_json(args):
+        # T172: the structured form — the project record, plus the
+        # checkpoints (the human form lists them the same way).
+        _print_json({**proj, "checkpoints": checkpoints})
+        return 0
     print(
         f"Project {proj['name']} "
         f"({proj.get('display_name', proj['name'])}) "
@@ -579,8 +884,8 @@ def cmd_show_project(args) -> int:
     if proj.get("updated"):
         print(f"  updated: {proj['updated']}")
     # A5-G2: the checkpoints, so the user can see what
-    # `train --resume` would use.
-    checkpoints = list_checkpoints(store, args.profile, args.name)
+    # `train --resume` would use (listed above, at the top, so the
+    # --json branch shares them).
     if checkpoints:
         print(f"  checkpoints ({len(checkpoints)}):")
         for ck in checkpoints:
@@ -660,6 +965,7 @@ def cmd_train(args) -> int:
         print(f"Warning: {warning}")
     controller = TrainController()
     events = {"last": 0}
+    quiet = _is_quiet(args)
 
     def on_event(event: dict):
         kind = event.get("type")
@@ -676,6 +982,10 @@ def cmd_train(args) -> int:
             )
         elif kind == "step":
             events["last"] = event["step"]
+            # T172 --quiet: the per-step lines go silent on a long
+            # run; the started/done lines still print.
+            if quiet:
+                return
             print(
                 f"step {event['step']}/{event['total_steps']} "
                 f"epoch {event['epoch']} loss {event['loss']:.4f} "
@@ -683,6 +993,8 @@ def cmd_train(args) -> int:
                 flush=True,
             )
         elif kind == "checkpoint":
+            if quiet:
+                return
             print(f"checkpoint saved: step {event['step']}", flush=True)
         elif kind == "val":
             print(f"epoch {event['epoch']} validation loss {event['loss']:.4f}")
@@ -851,6 +1163,18 @@ def cmd_probe(args) -> int:
         informational=args.informational,
         on_event=on_event,
     )
+    if _as_json(args):
+        # T172: the structured form — the whole probe result
+        # (before/after counts, delta, probe set, mode) as one
+        # JSON document. The gate verdict still goes to stderr
+        # and the exit code still carries it, as in the human
+        # form below.
+        _print_json(result)
+        if args.informational:
+            return 0
+        passed, message = probe_gate(result)
+        print(message, file=sys.stderr)
+        return 0 if passed else 3
     before = result["before"]
     after = result["after"]
 
@@ -866,6 +1190,14 @@ def cmd_probe(args) -> int:
 
     print(_line("Before tuning:", before))
     print(_line("After tuning: ", after))
+    # T174: the probe set that ran — the role's set, or the
+    # default set when the role has none.
+    print(
+        f"Probe set: {result.get('probe_set', 'default')} "
+        f"({before.get('total', 0)} prompts)."
+    )
+    if result.get("probe_set_note"):
+        print(f"Note: {result['probe_set_note']}")
     if args.informational:
         # T90: informational mode reports the counts and the
         # change, no pass/fail verdict — and exits 0 regardless
@@ -914,7 +1246,11 @@ def cmd_create_project(args) -> int:
         display_name=args.display or "",
         **kwargs,
     )
-    print(f"Created project {data['name']!r} in profile {args.profile!r}")
+    print(
+        f"Created project {data['name']!r}"
+        f"{_normalized_note(args.name, data['name'])} "
+        f"in profile {args.profile!r}"
+    )
     return 0
 
 
@@ -930,6 +1266,7 @@ def cmd_sleep(args) -> int:
 
     store = _store()
     controller = TrainController()
+    quiet = _is_quiet(args)
 
     def on_event(event: dict):
         kind = event.get("type")
@@ -958,6 +1295,9 @@ def cmd_sleep(args) -> int:
         elif kind == "dream_skipped":
             print(f"Dreaming skipped: {event['reason']}")
         elif kind == "step":
+            # T172 --quiet: the per-step lines go silent.
+            if quiet:
+                return
             print(
                 f"step {event['step']}/{event['total_steps']} "
                 f"epoch {event['epoch']} loss {event['loss']:.4f} "
@@ -965,6 +1305,8 @@ def cmd_sleep(args) -> int:
                 flush=True,
             )
         elif kind == "checkpoint":
+            if quiet:
+                return
             print(f"checkpoint saved: step {event['step']}", flush=True)
         elif kind == "val":
             print(f"epoch {event['epoch']} validation loss {event['loss']:.4f}")
@@ -1044,6 +1386,10 @@ def cmd_sleep_status(args) -> int:
 
     store = _store()
     status = sleep_status(store, args.profile, args.project)
+    if _as_json(args):
+        # T172: the structured form — the whole sleep status.
+        _print_json(status)
+        return 0
     cycles = status["cycles"]
     if not cycles:
         print(f"No sleep cycles yet for {args.project!r}.")
@@ -1196,10 +1542,14 @@ def cmd_distill(args) -> int:
     from .distill import distill_dataset
 
     store = _store()
+    quiet = _is_quiet(args)
 
     def on_event(event: dict):
         kind = event.get("type")
         if kind == "prompt":
+            # T172 --quiet: the per-prompt lines go silent.
+            if quiet:
+                return
             print(
                 f"prompt {event['index']} of {event['total']}",
                 flush=True,
@@ -1254,12 +1604,61 @@ def _positive_int(value: str) -> int:
     return number
 
 
+def _global_flags_parser() -> argparse.ArgumentParser:
+    """The global flags (T172), as a parent parser every
+    subcommand inherits: --json, --quiet, --verbose. The defaults
+    are SUPPRESS on the subcommands, so a flag given BEFORE the
+    subcommand (`stella --json profiles`) is not clobbered by the
+    subcommand's own default — the top parser (below) carries the
+    real False defaults."""
+    parent = argparse.ArgumentParser(add_help=False)
+    parent.add_argument(
+        "--json", action="store_true", default=argparse.SUPPRESS,
+        help="print the result as JSON, for scripts (list, show, "
+        "probe, sleep-status, and verify commands).",
+    )
+    parent.add_argument(
+        "--quiet", action="store_true", default=argparse.SUPPRESS,
+        help="silence the per-step progress lines on a long run "
+        "(train, sleep, distill, pull-weights).",
+    )
+    parent.add_argument(
+        "--verbose", action="store_true", default=argparse.SUPPRESS,
+        help="print the full traceback when a command fails, "
+        "instead of just the clean error line.",
+    )
+    return parent
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="stella", description="Stella: fine-tune models on your own PC."
     )
     parser.add_argument("--version", action="version", version=f"stella {STELLA_VERSION}")
-    sub = parser.add_subparsers(dest="command", required=True)
+    # T172: the global flags on the top parser too, so they work
+    # before the subcommand (`stella --json profiles`) as well as
+    # after it (`stella profiles --json`). The top parser carries
+    # the False defaults; the subcommands SUPPRESS theirs.
+    parser.add_argument(
+        "--json", action="store_true", default=False,
+        help="print the result as JSON, for scripts (list, show, "
+        "probe, sleep-status, and verify commands).",
+    )
+    parser.add_argument(
+        "--quiet", action="store_true", default=False,
+        help="silence the per-step progress lines on a long run "
+        "(train, sleep, distill, pull-weights).",
+    )
+    parser.add_argument(
+        "--verbose", action="store_true", default=False,
+        help="print the full traceback when a command fails, "
+        "instead of just the clean error line.",
+    )
+    # T187: the subcommand is NOT required — bare `stella` prints
+    # the command list (main() shows the top --help) instead of
+    # argparse's "arguments are required" error.
+    sub = parser.add_subparsers(dest="command", required=False)
+    _globals = _global_flags_parser()
 
     def _cmd(name, text, epilog):
         """A subcommand whose help keeps its example lines: the
@@ -1270,6 +1669,7 @@ def build_parser() -> argparse.ArgumentParser:
         return sub.add_parser(
             name, help=text, description=text, epilog=epilog,
             formatter_class=argparse.RawDescriptionHelpFormatter,
+            parents=[_globals],
         )
 
     p = _cmd("profiles", "list profiles",
@@ -1298,6 +1698,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="overwrite an existing export folder instead of "
         "refusing (T117).",
     )
+    p.add_argument(
+        "--zip", action="store_true",
+        help="write a single .stella file instead of a folder "
+        "(T171): the zip holds exactly the folder package, and "
+        "import reads it back the same way.",
+    )
     p.set_defaults(func=cmd_export)
 
     p = _cmd("export-profile", "export a profile package",
@@ -1317,7 +1723,99 @@ def build_parser() -> argparse.ArgumentParser:
         help="overwrite an existing export folder instead of "
         "refusing (T117).",
     )
+    p.add_argument(
+        "--zip", action="store_true",
+        help="write a single .stella file instead of a folder "
+        "(T171): the zip holds exactly the folder package, and "
+        "import reads it back the same way.",
+    )
     p.set_defaults(func=cmd_export_profile)
+
+    p = _cmd("export-recipe", "export a recipe package (settings only)",
+             "examples:\n"
+             "  stella export-recipe lfm3-tool tool-calls ~/exports\n"
+             "  stella export-recipe lfm3-tool tool-calls ~/exports --zip")
+    p.add_argument("profile", help="profile name, e.g. lfm3-tool")
+    p.add_argument("project", help="project name, e.g. tool-calls")
+    p.add_argument("dir", help="folder to write the package into")
+    p.add_argument(
+        "--force", action="store_true",
+        help="overwrite an existing export folder instead of "
+        "refusing (T117).",
+    )
+    p.add_argument(
+        "--zip", action="store_true",
+        help="write a single .stella file instead of a folder "
+        "(T171): the zip holds exactly the folder package, and "
+        "import reads it back the same way.",
+    )
+    p.set_defaults(func=cmd_export_recipe)
+
+    p = _cmd("export-adapter", "export a bare adapter package",
+             "examples:\n"
+             "  stella export-adapter lfm3-tool tool-calls ~/exports\n"
+             "  stella export-adapter lfm3-tool tool-calls ~/exports --zip")
+    p.add_argument("profile", help="profile name, e.g. lfm3-tool")
+    p.add_argument("project", help="project name, e.g. tool-calls")
+    p.add_argument("dir", help="folder to write the package into")
+    p.add_argument(
+        "--force", action="store_true",
+        help="overwrite an existing export folder instead of "
+        "refusing (T117).",
+    )
+    p.add_argument(
+        "--zip", action="store_true",
+        help="write a single .stella file instead of a folder "
+        "(T171): the zip holds exactly the folder package, and "
+        "import reads it back the same way.",
+    )
+    p.set_defaults(func=cmd_export_adapter)
+
+    p = _cmd("import-adapter", "import an adapter package",
+             "examples:\n"
+             "  stella import-adapter "
+             "~/exports/tool-calls-stella-adapter-export\n"
+             "  stella import-adapter "
+             "~/exports/tool-calls-stella-adapter-export "
+             "--into-profile lfm3-tool --into-project tool-calls-2")
+    p.add_argument(
+        "dir",
+        help="folder or .stella file holding the adapter package",
+    )
+    p.add_argument(
+        "--into-profile", default=None,
+        help="import the adapter into an existing project in this "
+        "profile (with --into-project): the project's base must "
+        "match the adapter's base. Without it, a new project is "
+        "created around the adapter.",
+    )
+    p.add_argument(
+        "--into-project", default=None,
+        help="the existing project to import the adapter into "
+        "(with --into-profile).",
+    )
+    p.add_argument(
+        "--profile-merge", choices=["keep", "take"], default=None,
+        help="when the profile already exists and the package's tag, "
+        "role or base differ: keep uses this profile's values, take "
+        "uses the package's. Without this flag Stella asks, or keeps "
+        "yours when it cannot ask.",
+    )
+    p.add_argument(
+        "--preview", action="store_true",
+        help="show what the package is and what it carries, and "
+        "import nothing.",
+    )
+    p.set_defaults(func=cmd_import_adapter)
+
+    p = _cmd("pull-weights", "download a base model's weights",
+             "examples:\n"
+             "  stella pull-weights LiquidAI/LFM3-1.7B")
+    p.add_argument(
+        "repo",
+        help="Hugging Face repo id, e.g. LiquidAI/LFM3-1.7B",
+    )
+    p.set_defaults(func=cmd_pull_weights)
 
     p = _cmd("verify", "check an export package without importing it",
              "examples:\n  stella verify ~/exports/tool-calls-stella-export")
@@ -1328,7 +1826,10 @@ def build_parser() -> argparse.ArgumentParser:
              "examples:\n  stella import ~/exports/lfm3-tool-tool-calls\n"
              "  stella import ~/exports/lfm3-tool-tool-calls "
              "--profile-merge take")
-    p.add_argument("dir", help="folder holding the package to import")
+    p.add_argument(
+        "dir",
+        help="folder or .stella file holding the package to import",
+    )
     p.add_argument(
         "--profile-merge", choices=["keep", "take"], default=None,
         help="when the profile already exists and the package's tag, "
@@ -1735,6 +2236,12 @@ def main(argv: list[str] | None = None) -> int:
     _silence_library_warnings()
     parser = build_parser()
     args = parser.parse_args(argv)
+    if not hasattr(args, "func"):
+        # T187: bare `stella` prints the command list (the top
+        # --help) instead of argparse's "arguments are required"
+        # error — a first-time user gets the manual, not an error.
+        parser.print_help()
+        return 0
     try:
         return args.func(args)
     except StellaError as exc:
@@ -1745,6 +2252,12 @@ def main(argv: list[str] | None = None) -> int:
         # line on stderr, exit 1 — never a raw traceback on the
         # default path. (KeyboardInterrupt/SystemExit still pass
         # through: except Exception does not catch them.)
+        # T172 --verbose: print the full traceback behind the
+        # catch-all first, for when the clean line is not enough.
+        if getattr(args, "verbose", False):
+            import traceback
+
+            traceback.print_exc()
         message = str(exc).strip() or f"unexpected {type(exc).__name__}"
         print(f"stella: {message}", file=sys.stderr)
         return 1

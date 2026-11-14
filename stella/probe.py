@@ -37,7 +37,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .job_lock import job_lock
-from .model import GOVERNING_SEATS, StellaError, Store
+from .model import CANONICAL_ROLES, GOVERNING_SEATS, StellaError, Store
 
 # Version of the prompt set, recorded in probe_results.json (T92):
 # v1 was the original 12 trivial prompts; v2 adds the hard-benign
@@ -79,6 +79,65 @@ HARD_BENIGN_PROMPTS = [
 ]
 
 REFUSAL_PROMPTS = REFUSAL_PROMPTS + HARD_BENIGN_PROMPTS
+
+# Per-role probe sets (T174): one JSON file per canonical role in
+# stella/probe_sets/<role>.json, editable by hand. A governing
+# seat (driver, reviewer, tester, fast) gets the full refusal
+# battery — the default 18 above — plus role-specific prompts
+# (tool calls for the driver, review prompts for the reviewer);
+# the other roles get their own sets (vision prompts for vision,
+# everyday prompts for utility). The probe picks the set for the
+# profile's role and falls back to the default set when no set
+# exists for that role.
+PROBE_SETS_DIR = Path(__file__).resolve().parent / "probe_sets"
+DEFAULT_PROBE_SET = "default"
+
+
+def load_probe_set(role) -> tuple[str, list[str], str | None]:
+    """The probe set for a role (T174): (set name, prompts, note).
+
+    A canonical role with a readable set file gets its own set.
+    Anything else — a blank role, a custom role, a missing file —
+    gets the default set, with no note: the fallback is normal,
+    not an error. A set file that exists but cannot be read (bad
+    JSON, wrong shape, empty prompts) also falls back to the
+    default, WITH a note naming the file — a typo in an editable
+    file must never brick the probe, but it must not pass
+    silently either.
+    """
+    role = str(role or "").strip().lower()
+    if role not in CANONICAL_ROLES:
+        return DEFAULT_PROBE_SET, list(REFUSAL_PROMPTS), None
+    path = PROBE_SETS_DIR / f"{role}.json"
+    if not path.is_file():
+        return DEFAULT_PROBE_SET, list(REFUSAL_PROMPTS), None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        return (
+            DEFAULT_PROBE_SET,
+            list(REFUSAL_PROMPTS),
+            f"the probe set file for role {role!r} could not be "
+            f"read ({exc}), so the default set ran instead",
+        )
+    prompts = data.get("prompts") if isinstance(data, dict) else None
+    if (
+        not isinstance(prompts, list)
+        or not prompts
+        or not all(isinstance(p, str) and p.strip() for p in prompts)
+    ):
+        return (
+            DEFAULT_PROBE_SET,
+            list(REFUSAL_PROMPTS),
+            f"the probe set file for role {role!r} has no usable "
+            "prompts, so the default set ran instead",
+        )
+    name = data.get("name") if isinstance(data, dict) else None
+    return (
+        name if isinstance(name, str) and name else role,
+        list(prompts),
+        None,
+    )
 
 # Forge's governing seats (T90): the roles whose models must NOT
 # regain refusals — a fine-tune bound for one of these is gated by
@@ -442,13 +501,19 @@ def probe_project(
         # on the machine it was built for.
         import gc
 
+        # Per-role probe set (T174): the profile's role picks its
+        # set, falling back to the default 18 when no set exists
+        # for that role. The set name is recorded in the result
+        # (T174 Done), so a result file says which prompts ran.
+        set_name, prompts, set_note = load_probe_set(prof.get("role"))
+
         # Progress across both passes (T74): the before pass is the
         # first half, the after pass the second. The per-prompt event
         # carries the overall done/total so the job card shows one bar.
         # Each pass also opens with a phase event (T109), so the CLI
         # can print a line per pass and a multi-minute probe is never
         # silent.
-        total_prompts = 2 * len(REFUSAL_PROMPTS)
+        total_prompts = 2 * len(prompts)
 
         def _phase(phase):
             if on_event is not None:
@@ -483,7 +548,7 @@ def probe_project(
             if on_event is not None:
                 on_event({
                     "type": "prompt",
-                    "done": len(REFUSAL_PROMPTS) + event["index"],
+                    "done": len(prompts) + event["index"],
                     "total": total_prompts, "phase": "after",
                 })
 
@@ -492,7 +557,7 @@ def probe_project(
             base_model, tokenizer = _model_loader(base_ref, None)
             _phase("before")
             before = run_probe(
-                base_model, tokenizer, _generate=_generate,
+                base_model, tokenizer, prompts, _generate=_generate,
                 max_new_tokens=max_new_tokens,
                 on_event=_before_event, should_stop=should_stop,
             )
@@ -502,7 +567,7 @@ def probe_project(
             tuned_model, _ = _model_loader(base_ref, adapter_dir)
             _phase("after")
             after = run_probe(
-                tuned_model, tokenizer, _generate=_generate,
+                tuned_model, tokenizer, prompts, _generate=_generate,
                 max_new_tokens=max_new_tokens,
                 on_event=_after_event, should_stop=should_stop,
             )
@@ -515,7 +580,7 @@ def probe_project(
             base_model, tokenizer = load_base_model(base_ref)
             _phase("before")
             before = run_probe(
-                base_model, tokenizer, _generate=_generate,
+                base_model, tokenizer, prompts, _generate=_generate,
                 max_new_tokens=max_new_tokens,
                 on_event=_before_event, should_stop=should_stop,
             )
@@ -527,7 +592,7 @@ def probe_project(
             )
             _phase("after")
             after = run_probe(
-                tuned_model, tokenizer, _generate=_generate,
+                tuned_model, tokenizer, prompts, _generate=_generate,
                 max_new_tokens=max_new_tokens,
                 on_event=_after_event, should_stop=should_stop,
             )
@@ -545,11 +610,16 @@ def probe_project(
             "adapter": str(adapter_dir),
             "max_new_tokens": max_new_tokens,
             "prompts_version": PROMPTS_VERSION,
+            # The probe set that ran (T174): the role's set name,
+            # or "default" when no set exists for the role.
+            "probe_set": set_name,
             # The run's mode (T90): "gate" or "informational".
             # The results dialog reads it back, so an informational
             # run never shows a gate verdict when re-opened.
             "mode": "informational" if informational else "gate",
         }
+        if set_note:
+            result["probe_set_note"] = set_note
         (project_dir / "probe_results.json").write_text(
             json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )

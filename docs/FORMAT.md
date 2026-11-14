@@ -44,19 +44,17 @@ format 1 and reads format 1.
 
 ## Kinds
 
-Three kinds share one manifest shape, so profile export and recipe
-export never become two formats:
+Four kinds share one manifest shape, so profile, recipe, and
+adapter export never become separate formats:
 
 | `kind` | What it is | Status |
 |---|---|---|
 | `stella-export` | Project package: one profile block + one project | Importable now |
 | `stella-profile-export` | Profile package: a profile with all its projects (T86) | Importable since v0.18.0 |
-| `stella-recipe-export` | Recipe package: a reusable training recipe (T170) | Defined, not importable yet |
+| `stella-recipe-export` | Recipe package: a reusable training recipe (T170) | Importable since v0.22.0 |
+| `stella-adapter-export` | Adapter package: bare trained adapter weights (T173) | Importable since v0.22.0 |
 
-Importing a known kind this Stella cannot import yet says what the
-package is ("this package is a profile package...") instead of a
-bare "bad kind". An unknown `kind` is refused as not a Stella
-export.
+An unknown `kind` is refused as not a Stella export.
 
 ## Manifest shape (format 1, project package)
 
@@ -141,6 +139,49 @@ import they are restored only when the profile is newly created
 profile and every project in one atomic step; it refuses while
 any of the package's projects already exist in that profile,
 naming them.
+
+## Recipe packages (v0.22.0, T170)
+
+A recipe package is a folder `<project>-stella-recipe-export/`
+holding the training recipe and nothing else: the profile block,
+the project block (dataset reference, settings, metamorph mode +
+notes, project notes), the README, and `notes.md`. No weights, no
+checkpoints, no probe results, no sleep cycles — a recipe is
+small on purpose, so it can be shared and re-run anywhere.
+Importing a recipe creates a new project with those values (the
+same profile merge and collision choices as a project import). A
+dataset that is not on the importing PC warns at import, but
+never blocks it — the recipe still lands, and the dataset can be
+found later.
+
+## Adapter packages (v0.22.0, T173)
+
+An adapter package is a folder `<project>-stella-adapter-export/`
+holding bare trained adapter weights plus a manifest `adapter`
+block: the adapter name and display name, the base it was trained
+on (`base`, the profile's base_ref or Ollama tag), the rank, the
+dataset name and reference, the status, and the training summary
+(steps and final loss from the latest checkpoint). The weights
+travel under `weights/`; there is no project payload beyond that.
+Importing an adapter lands it in a project with the same base —
+either a new project created around it (named after the adapter,
+with the adapter's rank and dataset reference, status `done`), or
+an existing project the user picks. The base must match: an
+adapter trained on one base never lands on a project for another.
+A target that already has a trained adapter refuses the import;
+a new-project import whose name is taken lands under a copy name
+(`<name>-copy`, then `-copy-2`, ...), never refusing.
+
+## Single-file packages (v0.22.0, T171)
+
+Any package kind can travel as one file: a `.stella` zip holding
+exactly the folder package — the same manifest, the same members,
+at the zip root (manifest.json at the top, not nested). Export
+writes the zip with `stella export --zip` (or the File menu's
+"as single file" entries); import, verify, check, and preview
+read a `.stella` file exactly like a folder. A zip whose members
+escape the package folder (a `../` member) is refused whole —
+no partial extract.
 
 ## Import rules
 

@@ -9,6 +9,16 @@
 # Run it with bash, never sh: it uses set -euo pipefail.
 set -euo pipefail
 
+# T186: --help answers with usage and exits 0, without installing
+# anything. Checked before DIR resolution, so nothing happens at all.
+if [ "${1:-}" = "--help" ]; then
+  echo "Usage: bash install-training.sh [--help]"
+  echo "Adds the training packages (torch CPU, transformers, peft,"
+  echo "accelerate) to Stella's private .venv. About 2 GB."
+  echo "Run bash install.sh first."
+  exit 0
+fi
+
 DIR="$(cd "$(dirname "$0")" && pwd)"
 # Resolve symlinks, so installing through a link still finds this folder.
 SOURCE="${BASH_SOURCE[0]}"
@@ -84,7 +94,7 @@ fi
 
 echo ""
 echo "Training packages installed. Next: pull the base weights, e.g."
-echo "  $DIR/.venv/bin/python -c \"from huggingface_hub import snapshot_download; snapshot_download('LiquidAI/LFM3-1.7B')\""
+echo "  stella pull-weights LiquidAI/LFM3-1.7B"
 echo "or set the profile base_ref to LiquidAI/LFM3-1.7B and let the"
 echo "first training run download them (about 3.5 GB)."
 echo "Then train from the Stella window, or: stella train <profile> <project>"

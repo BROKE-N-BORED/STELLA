@@ -196,6 +196,24 @@ job, export it as a usable package.
   and the home keeps an import/export history log. F2 renames the
   picked row (double-click still opens it), and the Project
   window's Notes sit at the top, visible without scrolling.
+- v0.22.0 packages/CLI/tree (2026-11-14): recipes and adapters
+  are packages now — a recipe shares the settings, dataset
+  reference, and notes with no weights, and an adapter package
+  shares bare trained weights into any project with the same
+  base (or a new project built around it); every package kind
+  also travels as one `.stella` file, and import reads zips and
+  folders alike. The command line gained `--json` on the
+  list/show/probe commands, `--quiet` on the long runs,
+  `--verbose` for the full traceback, a `pull-weights` command
+  (the nested-quote one-liner is gone from install-training.sh),
+  and it says when a name was normalized; bare `stella` prints
+  the command list. The probe runs a per-role prompt set
+  (editable JSON files under stella/probe_sets/) and records
+  which set ran. The profile list has a filter box, a role
+  filter, and sort (name, role, recently used, project count),
+  with multi-select and bulk delete/export/role change. The
+  scripts answer `--help`, and the app-menu launcher carries
+  StartupNotify, Keywords, and a version.
 
 ## Install
 
@@ -473,11 +491,19 @@ After install, `stella` works in a terminal:
 
 `stella projects <profile>`
 
-`stella export <profile> <project> <dir> [--bundle-dataset] [--force]`
+`stella export <profile> <project> <dir> [--bundle-dataset] [--force] [--zip]`
 
-`stella export-profile <profile> <dir> [--with-projects] [--force]`
+`stella export-profile <profile> <dir> [--with-projects] [--force] [--zip]`
+
+`stella export-recipe <profile> <project> <dir> [--force] [--zip]`
+
+`stella export-adapter <profile> <project> <dir> [--force] [--zip]`
 
 `stella import <export-dir> [--profile-merge keep|take] [--preview] [--as-copy] [--replace]`
+
+`stella import-adapter <export-dir> [--into-profile <profile>] [--into-project <project>] [--profile-merge keep|take] [--preview]`
+
+`stella pull-weights <repo>`
 
 `stella verify <export-dir>`
 

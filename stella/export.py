@@ -55,6 +55,16 @@ import offers a copy under a new name or a replace with the old
 project backed up to the trash. `stella verify` / the window's
 Check package action (T105) runs the full verification — schema,
 version, checksums — without importing anything.
+
+A recipe (T170) is the settings-only share: dataset reference,
+settings, metamorph mode + notes, and project notes — no weights,
+no checkpoints. Importing one creates a new project with those
+values. An adapter package (T173) is the bare-weights share: the
+adapter weights + a manifest (base, rank, dataset name, training
+summary), importable into a project with the same base or into a
+new project created around it. Every kind also has a single-file
+form (T171): a `.stella` zip holding exactly the folder package,
+which import, verify, and preview read the same as a folder.
 """
 
 from __future__ import annotations
@@ -64,6 +74,8 @@ import json
 import shutil
 import socket
 import tempfile
+import zipfile
+from contextlib import contextmanager
 from pathlib import Path
 
 from .model import (
@@ -83,6 +95,12 @@ from .model import (
 
 EXPORT_SUFFIX = "-stella-export"
 PROFILE_EXPORT_SUFFIX = "-stella-profile-export"
+RECIPE_EXPORT_SUFFIX = "-stella-recipe-export"
+ADAPTER_EXPORT_SUFFIX = "-stella-adapter-export"
+
+# The single-file package suffix (T171): a `.stella` file is a zip
+# holding exactly the folder package (same manifest, same members).
+ZIP_SUFFIX = ".stella"
 
 # Package format (T40): the format version is separate from the app
 # version. 1 is the only version this Stella writes, and the newest
@@ -94,23 +112,33 @@ FORMAT_VERSION = 1
 MIN_SUPPORTED_FORMAT = 1
 
 # Package kinds (T40): distinct `kind` values sharing one manifest
-# shape, so profile export (T86) and recipe export (T170) never
-# become two formats. Project and profile packages are importable;
-# the recipe kind is defined here so its shape is settled before
-# anything writes one.
+# shape, so profile export (T86), recipe export (T170), and
+# adapter export (T173) never become two formats. All four kinds
+# are importable since v0.22.0.
 PACKAGE_KINDS = {
     "stella-export": "project package: one profile block + one project",
     "stella-profile-export": (
         "profile package: a profile with all its projects (T86)"
     ),
-    "stella-recipe-export": "recipe package: a reusable training recipe (T170)",
+    "stella-recipe-export": (
+        "recipe package: a reusable training recipe (T170)"
+    ),
+    "stella-adapter-export": (
+        "adapter package: a bare trained adapter (T173)"
+    ),
 }
 PROJECT_PACKAGE_KIND = "stella-export"
 PROFILE_PACKAGE_KIND = "stella-profile-export"
+RECIPE_PACKAGE_KIND = "stella-recipe-export"
+ADAPTER_PACKAGE_KIND = "stella-adapter-export"
 
 # The kinds this Stella can import (T86: the profile kind joined
-# the project kind in v0.18).
-IMPORTABLE_KINDS = (PROJECT_PACKAGE_KIND, PROFILE_PACKAGE_KIND)
+# the project kind in v0.18; T170/T173: the recipe and adapter
+# kinds joined in v0.22).
+IMPORTABLE_KINDS = (
+    PROJECT_PACKAGE_KIND, PROFILE_PACKAGE_KIND,
+    RECIPE_PACKAGE_KIND, ADAPTER_PACKAGE_KIND,
+)
 
 
 # -- progress + cancel (T106) --------------------------------------
@@ -182,9 +210,121 @@ def _record_history(store: Store, entry: dict) -> None:
 
 
 def package_size(path: str | Path) -> int:
-    """The bytes a package folder holds (T178): the actual size
-    reported after an export."""
-    return _dir_bytes(Path(path).expanduser())
+    """The bytes a package holds (T178): the actual size reported
+    after an export. A folder counts its files; a single-file
+    `.stella` package (T171) counts the zip itself."""
+    path = Path(path).expanduser()
+    if path.is_file():
+        try:
+            return path.stat().st_size
+        except OSError:
+            return 0
+    return _dir_bytes(path)
+
+
+# -- single-file packages (T171) -----------------------------------
+# A `.stella` file is a zip holding exactly the folder package:
+# the same manifest, the same members, at the zip root (no extra
+# folder level). Every kind has the same one-file form, so import
+# never has to know which kind it is opening.
+
+
+def write_package_zip(package_dir: str | Path, zip_path: str | Path) -> Path:
+    """Zip a built package folder into a `.stella` file. The
+    members sit at the zip root (manifest.json at the top, not
+    under a folder), so the zip IS the package, not a box around
+    one. Returns the zip path."""
+    package_dir = Path(package_dir).expanduser()
+    zip_path = Path(zip_path).expanduser()
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for item in sorted(package_dir.rglob("*")):
+            if not item.is_file():
+                continue
+            zf.write(item, item.relative_to(package_dir).as_posix())
+    return zip_path
+
+
+def _extract_package_zip(zip_path: Path, dest: Path) -> None:
+    """Extract a `.stella` file into `dest`. Members that would
+    escape the folder (a hand-made zip claiming "../x") refuse
+    the whole extract — a package from another machine is never
+    trusted to write outside itself."""
+    with zipfile.ZipFile(zip_path) as zf:
+        for info in zf.infolist():
+            target = (dest / info.filename).resolve()
+            try:
+                target.relative_to(dest.resolve())
+            except ValueError:
+                raise StellaError(
+                    "the package file is damaged: an entry escapes "
+                    f"the package ({info.filename!r})"
+                ) from None
+        zf.extractall(dest)
+
+
+@contextmanager
+def _open_package(path: str | Path):
+    """Open a package for reading, folder or `.stella` file alike
+    (T171): a folder yields itself; a zip file is extracted into
+    a temp dir (removed afterwards) and yields that. Anything else
+    — a missing path, a file that is not a zip — is refused with
+    a plain error, so verify, preview, and import all accept both
+    forms through this one door."""
+    path = Path(path).expanduser()
+    if path.is_dir():
+        yield path
+        return
+    if path.is_file():
+        if not zipfile.is_zipfile(path):
+            raise StellaError(
+                f"not a Stella export: {path} is not a package "
+                "folder or a .stella file"
+            )
+        with tempfile.TemporaryDirectory(prefix="stella-package-") as tmp:
+            root = Path(tmp) / "package"
+            root.mkdir()
+            _extract_package_zip(path, root)
+            yield root
+        return
+    raise StellaError(f"not a Stella export: no such file or folder: {path}")
+
+
+def _export_target(out: Path, as_zip: bool) -> Path:
+    """The path an export lands at (T171): the package folder, or
+    the `.stella` file with the same name plus the suffix."""
+    return Path(str(out) + ZIP_SUFFIX) if as_zip else out
+
+
+def _clear_export_target(target: Path, force: bool, *, is_zip: bool) -> None:
+    """Refuse an export whose target already exists, or clear it
+    with force (T117) — a folder is removed whole, a file is
+    unlinked. The message keeps the old wording for folders, so
+    the T117 tests still match."""
+    if not target.exists() and not target.is_symlink():
+        return
+    if not force:
+        what = "file" if is_zip else "folder"
+        raise StellaError(f"export {what} already exists: {target}")
+    if target.is_dir() and not target.is_symlink():
+        shutil.rmtree(target)
+    else:
+        target.unlink()
+
+
+def _finish_export(staging: Path, out: Path, as_zip: bool) -> Path:
+    """Land a built package (T171): a folder export moves the
+    staging dir into place; a zip export zips the staging dir
+    into the `.stella` file and removes the staging dir. Returns
+    the path the package landed at."""
+    if not as_zip:
+        staging.replace(out)
+        return out
+    zip_out = _export_target(out, True)
+    try:
+        write_package_zip(staging, zip_out)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    return zip_out
 
 
 def estimate_export_size(
@@ -404,6 +544,7 @@ def export_project(
     force: bool = False,
     on_progress=None,
     should_stop=None,
+    as_zip: bool = False,
 ) -> Path:
     """Export a project to <dest>/<project>-stella-export/. Returns the dir.
 
@@ -426,6 +567,11 @@ def export_project(
     made before the call. Without it, an existing folder refuses
     as before.
 
+    With `as_zip` (T171), the package lands as a single
+    `<project>-stella-export.stella` file instead of a folder:
+    the zip holds exactly the folder package (same manifest, same
+    members), and import reads it back the same way.
+
     `on_progress` / `should_stop` (T106) are the worker hooks:
     progress reports (bytes done, bytes total) and a stop cancels
     the copy — the staging dir is removed, so a cancelled export
@@ -442,13 +588,7 @@ def export_project(
         dest, _export_total_bytes(store, profile, project, bundle_dataset)
     )
     out = dest / (project + EXPORT_SUFFIX)
-    if out.exists():
-        if not force:
-            raise StellaError(f"export folder already exists: {out}")
-        if out.is_dir() and not out.is_symlink():
-            shutil.rmtree(out)
-        else:
-            out.unlink()
+    _clear_export_target(_export_target(out, as_zip), force, is_zip=as_zip)
     staging = Path(
         tempfile.mkdtemp(prefix=out.name + ".staging-", dir=str(dest))
     )
@@ -462,16 +602,16 @@ def export_project(
             bundle_dataset=bundle_dataset,
             progress=progress,
         )
-        staging.replace(out)
+        final = _finish_export(staging, out, as_zip)
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise
     # T179: the export is recorded in the home's history.
     _record_history(store, {
         "kind": "export", "package": "project",
-        "profile": profile, "project": project, "path": str(out),
+        "profile": profile, "project": project, "path": str(final),
     })
-    return out
+    return final
 
 
 def _export_total_bytes(
@@ -707,6 +847,7 @@ def export_profile(
     force: bool = False,
     on_progress=None,
     should_stop=None,
+    as_zip: bool = False,
 ) -> Path:
     """Export a profile on its own (T86) to
     <dest>/<profile>-stella-profile-export/. Returns the dir.
@@ -726,6 +867,10 @@ def export_profile(
     referenced, never bundled: a profile export names each
     project's dataset ref, and import warns when one is not on
     the PC (like an unbundled project import).
+
+    With `as_zip` (T171), the package lands as a single
+    `<profile>-stella-profile-export.stella` file instead of a
+    folder: the zip holds exactly the folder package.
     """
     prof = store.get_profile(profile)
     dest = Path(dest).expanduser()
@@ -737,13 +882,7 @@ def export_profile(
         dest, estimate_profile_export_size(store, profile, include_projects)
     )
     out = dest / (profile + PROFILE_EXPORT_SUFFIX)
-    if out.exists():
-        if not force:
-            raise StellaError(f"export folder already exists: {out}")
-        if out.is_dir() and not out.is_symlink():
-            shutil.rmtree(out)
-        else:
-            out.unlink()
+    _clear_export_target(_export_target(out, as_zip), force, is_zip=as_zip)
     projects = (
         [
             p for p in store.list_projects(profile)
@@ -826,16 +965,283 @@ def export_profile(
             json.dumps(manifest, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
-        staging.replace(out)
+        final = _finish_export(staging, out, as_zip)
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise
     # T179: the export is recorded in the home's history.
     _record_history(store, {
         "kind": "export", "package": "profile",
-        "profile": profile, "project": "", "path": str(out),
+        "profile": profile, "project": "", "path": str(final),
     })
-    return out
+    return final
+
+
+def _recipe_total_bytes(store, profile, project) -> int:
+    """The bytes a recipe export will copy (T170): the project
+    notes only — a recipe carries no weights, no checkpoints."""
+    notes = store.project_dir(profile, project) / "notes.md"
+    if notes.is_file():
+        return notes.stat().st_size
+    return 0
+
+
+def estimate_recipe_export_size(store: Store, profile: str, project: str) -> int:
+    """The bytes a recipe export will copy (T178)."""
+    return _recipe_total_bytes(store, profile, project)
+
+
+def export_recipe(
+    store: Store, profile: str, project: str, dest: str | Path,
+    force: bool = False,
+    on_progress=None,
+    should_stop=None,
+    as_zip: bool = False,
+) -> Path:
+    """Export a project's recipe on its own (T170) to
+    <dest>/<project>-stella-recipe-export/. Returns the dir.
+
+    A recipe is the settings-only share: the dataset reference,
+    the training settings, the metamorph mode + notes, and the
+    project notes — no weights, no checkpoints, no probe results,
+    no sleep cycles. Importing it creates a new project with
+    those values (import_recipe_export, reached through
+    import_export); a dataset that is not on the importing PC
+    warns at import, never blocks.
+
+    Staging, force, the progress / cancel hooks, and the zip form
+    (T171) work exactly as in export_project.
+    """
+    prof = store.get_profile(profile)
+    proj = store.get_project(profile, project)
+    dest = Path(dest).expanduser()
+    if dest.exists() and not dest.is_dir():
+        raise StellaError(f"export destination is not a folder: {dest}")
+    dest.mkdir(parents=True, exist_ok=True)
+    check_disk_space(dest, _recipe_total_bytes(store, profile, project))
+    out = dest / (project + RECIPE_EXPORT_SUFFIX)
+    _clear_export_target(_export_target(out, as_zip), force, is_zip=as_zip)
+    progress = _CopyProgress(
+        _recipe_total_bytes(store, profile, project),
+        on_progress, should_stop,
+    )
+    staging = Path(
+        tempfile.mkdtemp(prefix=out.name + ".staging-", dir=str(dest))
+    )
+    try:
+        manifest = {
+            "stella_version": STELLA_VERSION,
+            "format": FORMAT_VERSION,
+            "kind": RECIPE_PACKAGE_KIND,
+            "exported_at": utc_now(),
+            # T179: which machine made it.
+            "source_machine": _source_machine(),
+            "profile": _profile_manifest_block(prof),
+            "project": _project_manifest_block(proj),
+        }
+        role = prof.get("role") or "no role set"
+        (staging / "README.md").write_text(
+            f"# {proj.get('display_name', proj['name'])}: Stella recipe\n\n"
+            f"A recipe for profile **{prof.get('display_name', prof['name'])}** "
+            f"(role: {role}, base: {prof.get('ollama_tag') or prof.get('base_ref') or 'not set'}).\n\n"
+            f"Dataset: {proj.get('dataset_ref') or 'not set'}.\n"
+            f"MetaMorphAi mode: **{manifest['project']['metamorph'].get('mode', 'morph')}**.\n\n"
+            "A recipe carries the dataset reference, the training "
+            "settings, the metamorph mode and notes, and the project "
+            "notes - no weights, no checkpoints. Import it and "
+            "Stella creates a new project with those values; train "
+            "it there.\n\n"
+            "Import back into Stella with: `stella import <this folder>`\n"
+            "or the Import button in the Stella window.\n",
+            encoding="utf-8",
+        )
+        notes_src = store.project_dir(profile, project) / "notes.md"
+        if notes_src.is_file():
+            _copy_file_counted(notes_src, staging / "notes.md", progress)
+        if progress is not None:
+            progress.check()
+        manifest["files"] = _package_file_hashes(staging)
+        (staging / "manifest.json").write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        final = _finish_export(staging, out, as_zip)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    # T179: the export is recorded in the home's history.
+    _record_history(store, {
+        "kind": "export", "package": "recipe",
+        "profile": profile, "project": project, "path": str(final),
+    })
+    return final
+
+
+def _adapter_manifest_block(
+    store, profile, project, prof, proj
+) -> dict:
+    """The adapter block for an adapter manifest (T173): the base
+    the adapter was trained on, its rank, the dataset it learned
+    from, and a training summary (status, steps, final loss).
+    The rank comes from the adapter's own config when it names
+    one, else the project's settings; the steps and loss come
+    from the latest checkpoint when there is one. Anything
+    unknown reads as blank, never as a guess."""
+    adapter_dir = store.project_dir(profile, project) / "adapter"
+    rank = (proj.get("settings") or {}).get("rank", "")
+    config_path = adapter_dir / "adapter_config.json"
+    if config_path.is_file():
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            config = {}
+        if isinstance(config, dict) and isinstance(config.get("r"), int):
+            rank = config["r"]
+    steps = ""
+    final_loss = ""
+    try:
+        from .train import list_checkpoints
+
+        checkpoints = list_checkpoints(store, profile, project)
+    except Exception:
+        checkpoints = []
+    if checkpoints:
+        last = checkpoints[-1]
+        steps = last.get("step", "")
+        final_loss = last.get("loss", "")
+    ref = proj.get("dataset_ref", "")
+    return {
+        "name": proj["name"],
+        "display_name": proj.get("display_name", proj["name"]),
+        "base": prof.get("base_ref") or prof.get("ollama_tag") or "",
+        "rank": rank,
+        "dataset": Path(ref).name if ref else "",
+        "dataset_ref": ref,
+        "status": proj.get("status", "draft"),
+        "steps": steps,
+        "final_loss": final_loss,
+    }
+
+
+def estimate_adapter_export_size(
+    store: Store, profile: str, project: str
+) -> int:
+    """The bytes an adapter export will copy (T178): the adapter
+    dir alone."""
+    return _dir_bytes(store.project_dir(profile, project) / "adapter")
+
+
+def export_adapter(
+    store: Store, profile: str, project: str, dest: str | Path,
+    force: bool = False,
+    on_progress=None,
+    should_stop=None,
+    as_zip: bool = False,
+) -> Path:
+    """Export a bare adapter on its own (T173) to
+    <dest>/<project>-stella-adapter-export/. Returns the dir.
+
+    The package holds the adapter weights and a manifest (base,
+    rank, dataset name, training summary) — no project record, no
+    checkpoints, no probe results. Import it into any project
+    with the same base, or into a new project created around it
+    (import_adapter_export, reached through import_export).
+
+    A project with no trained adapter refuses the export: there
+    is nothing to share yet. Staging, force, the progress /
+    cancel hooks, and the zip form (T171) work exactly as in
+    export_project.
+    """
+    prof = store.get_profile(profile)
+    proj = store.get_project(profile, project)
+    adapter_dir = store.project_dir(profile, project) / "adapter"
+    if not (adapter_dir / "adapter_config.json").is_file():
+        raise StellaError(
+            f"project {project!r} has no trained adapter yet. "
+            "Train it first, then export the adapter."
+        )
+    dest = Path(dest).expanduser()
+    if dest.exists() and not dest.is_dir():
+        raise StellaError(f"export destination is not a folder: {dest}")
+    dest.mkdir(parents=True, exist_ok=True)
+    check_disk_space(
+        dest, estimate_adapter_export_size(store, profile, project)
+    )
+    out = dest / (project + ADAPTER_EXPORT_SUFFIX)
+    _clear_export_target(_export_target(out, as_zip), force, is_zip=as_zip)
+    progress = _CopyProgress(
+        estimate_adapter_export_size(store, profile, project),
+        on_progress, should_stop,
+    )
+    staging = Path(
+        tempfile.mkdtemp(prefix=out.name + ".staging-", dir=str(dest))
+    )
+    try:
+        adapter_block = _adapter_manifest_block(
+            store, profile, project, prof, proj
+        )
+        manifest = {
+            "stella_version": STELLA_VERSION,
+            "format": FORMAT_VERSION,
+            "kind": ADAPTER_PACKAGE_KIND,
+            "exported_at": utc_now(),
+            # T179: which machine made it.
+            "source_machine": _source_machine(),
+            "profile": _profile_manifest_block(prof),
+            "adapter": adapter_block,
+        }
+        (staging / "README.md").write_text(
+            f"# {proj.get('display_name', proj['name'])}: Stella adapter\n\n"
+            f"A bare adapter from profile **{prof.get('display_name', prof['name'])}** "
+            f"(base: {adapter_block['base'] or 'not set'}, "
+            f"rank {adapter_block['rank'] or 'not set'}).\n\n"
+            f"Dataset: {adapter_block['dataset'] or 'not set'}.\n"
+            f"Training: {adapter_block['status']}"
+            + (
+                f", {adapter_block['steps']} steps"
+                if adapter_block["steps"] != ""
+                else ""
+            )
+            + (
+                f", final loss {adapter_block['final_loss']}"
+                if adapter_block["final_loss"] != ""
+                else ""
+            )
+            + ".\n\n"
+            "An adapter package carries the trained weights and "
+            "this summary - no project record, no checkpoints. "
+            "Import it into a project with the same base, or let "
+            "Stella create a new project around it.\n\n"
+            "Import back into Stella with: `stella import <this folder>`\n"
+            "or the Import button in the Stella window.\n",
+            encoding="utf-8",
+        )
+        weights = staging / "weights"
+        weights.mkdir(parents=True, exist_ok=True)
+        for item in sorted(adapter_dir.iterdir()):
+            if progress is not None:
+                progress.check()
+            if item.is_file():
+                _copy_file_counted(item, weights / item.name, progress)
+            elif item.is_dir():
+                _copy_tree_counted(item, weights / item.name, progress)
+        if progress is not None:
+            progress.check()
+        manifest["files"] = _package_file_hashes(staging)
+        (staging / "manifest.json").write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        final = _finish_export(staging, out, as_zip)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    # T179: the export is recorded in the home's history.
+    _record_history(store, {
+        "kind": "export", "package": "adapter",
+        "profile": profile, "project": project, "path": str(final),
+    })
+    return final
 
 
 def _check_field(block: dict, key: str, kind: str, where: str) -> None:
@@ -911,14 +1317,15 @@ def _validate_profile_block(prof: dict) -> None:
 def _validate_kind(manifest: dict) -> str:
     """The kind step: known, and one this Stella can import.
     Returns the kind. A known kind this Stella cannot import yet
-    (the recipe kind) says what it is, not just "bad kind"."""
+    (none today — all four kinds import since v0.22.0) says what
+    it is, not just "bad kind"."""
     kind = manifest.get("kind")
     if kind not in PACKAGE_KINDS:
         raise StellaError("not a Stella export: bad manifest kind")
     if kind not in IMPORTABLE_KINDS:
         raise StellaError(
             f"this package is a {PACKAGE_KINDS[kind]}. This Stella "
-            "can only import project and profile packages yet."
+            "cannot import that kind yet."
         )
     return kind
 
@@ -948,12 +1355,49 @@ def _validate_format(manifest: dict) -> int:
     return fmt
 
 
+def _validate_adapter_block(adapter: dict) -> None:
+    """The schema check for an adapter block (T173): the name is
+    a slug, the base / dataset / status are text, the rank is a
+    whole number when present, and the training summary (steps,
+    final loss) is a number when present. A blank means unknown,
+    never a guess — so blanks are allowed everywhere but the
+    name."""
+    for key in ("display_name", "base", "dataset", "dataset_ref"):
+        _check_field(adapter, key, "str", "adapter")
+    _check_field(adapter, "status", "str", "adapter")
+    rank = adapter.get("rank")
+    if rank != "" and rank is not None:
+        if isinstance(rank, bool) or not isinstance(rank, int) or rank < 0:
+            raise StellaError(
+                "export manifest: adapter 'rank' must be a whole "
+                f"number, not {rank!r}"
+            )
+    steps = adapter.get("steps")
+    if steps != "" and steps is not None:
+        if isinstance(steps, bool) or not isinstance(steps, int) or steps < 0:
+            raise StellaError(
+                "export manifest: adapter 'steps' must be a whole "
+                f"number, not {steps!r}"
+            )
+    loss = adapter.get("final_loss")
+    if loss != "" and loss is not None:
+        if (
+            isinstance(loss, bool)
+            or not isinstance(loss, (int, float))
+        ):
+            raise StellaError(
+                "export manifest: adapter 'final_loss' must be a "
+                f"number, not {loss!r}"
+            )
+
+
 def _validate_schema(manifest: dict) -> None:
     """The schema step (T1): the profile block, and the project
-    block(s) — one "project" for a project package, a "projects"
-    list for a profile package. `exported_at` is text when
-    present. Nothing downstream ever sees a manifest field this
-    has not validated."""
+    block(s) — one "project" for a project or recipe package, a
+    "projects" list for a profile package, an "adapter" block for
+    an adapter package. `exported_at` is text when present.
+    Nothing downstream ever sees a manifest field this has not
+    validated."""
     _check_field(manifest, "exported_at", "str", "manifest")
     _check_field(manifest, "source_machine", "str", "manifest")
     prof = manifest.get("profile")
@@ -985,6 +1429,16 @@ def _validate_schema(manifest: dict) -> None:
                 )
             seen.add(name)
             _validate_project_block(proj)
+        return
+    if kind == ADAPTER_PACKAGE_KIND:
+        adapter = manifest.get("adapter")
+        if not isinstance(adapter, dict):
+            raise StellaError(
+                "export manifest: an adapter package must carry an "
+                "'adapter' block"
+            )
+        validate_slug(adapter.get("name", ""), "adapter name in export")
+        _validate_adapter_block(adapter)
         return
     proj = manifest.get("project")
     if not isinstance(proj, dict):
@@ -1028,14 +1482,17 @@ def verify_export(path: str | Path) -> dict:
     No config.json check (T60): the file was dropped in v0.13 —
     the manifest holds the settings, and old packages that carry
     config.json still import (the file is ignored).
+
+    `path` is a package folder or a `.stella` file (T171): a zip
+    is extracted into a temp dir and verified from there.
     """
-    path = Path(path).expanduser()
-    manifest = _load_manifest(path)
-    _validate_kind(manifest)
-    _validate_format(manifest)
-    _validate_schema(manifest)
-    _verify_file_hashes(path, manifest)
-    return manifest
+    with _open_package(path) as root:
+        manifest = _load_manifest(root)
+        _validate_kind(manifest)
+        _validate_format(manifest)
+        _validate_schema(manifest)
+        _verify_file_hashes(root, manifest)
+        return manifest
 
 
 def check_export(path: str | Path) -> dict:
@@ -1053,6 +1510,8 @@ def check_export(path: str | Path) -> dict:
     checked. A legacy package with no file list passes the
     checksum step with a note — there is nothing to check, and
     the package still imports.
+
+    `path` is a package folder or a `.stella` file (T171).
     """
     path = Path(path).expanduser()
     checks: list[dict] = []
@@ -1062,7 +1521,27 @@ def check_export(path: str | Path) -> dict:
             {"name": name, "passed": passed, "detail": detail}
         )
 
-    manifest_path = path / "manifest.json"
+    # A path that is not a package at all (missing, or a file that
+    # is not a zip) fails the first check instead of raising: the
+    # caller gets a report, not an exception.
+    try:
+        opener = _open_package(path)
+        root = opener.__enter__()
+    except StellaError as exc:
+        record("Manifest present", False, str(exc))
+        return {"ok": False, "kind": "", "checks": checks, "manifest": None}
+    try:
+        return _check_export_opened(root, record, checks, path)
+    finally:
+        opener.__exit__(None, None, None)
+
+
+def _check_export_opened(root: Path, record, checks, path: Path) -> dict:
+    """The check_export steps, run against an opened package dir
+    (`root` — the folder itself, or a `.stella` file extracted
+    into a temp dir). `path` is the path the user named, for
+    messages."""
+    manifest_path = root / "manifest.json"
     if not manifest_path.is_file():
         record(
             "Manifest present", False,
@@ -1127,7 +1606,7 @@ def check_export(path: str | Path) -> dict:
             "ok": True, "kind": kind, "checks": checks, "manifest": manifest,
         }
     try:
-        _verify_file_hashes(path, manifest)
+        _verify_file_hashes(root, manifest)
     except StellaError as exc:
         record("Files match their checksums", False, str(exc))
         return {
@@ -1246,9 +1725,11 @@ def preview_export(
     """Summarize an export package WITHOUT importing it (T58):
     what it is, what it carries, and what would change here.
     Raises StellaError on a bad package, like verify_export.
+    `path` is a package folder or a `.stella` file (T171).
     Returns a dict:
 
-      kind: "stella-export" or "stella-profile-export"
+      kind: "stella-export", "stella-profile-export",
+        "stella-recipe-export", or "stella-adapter-export"
       profile: the slug (normalized, as import stores)
       profile_display: the display name
       tag, role, base: the profile block from the manifest
@@ -1260,7 +1741,7 @@ def preview_export(
         installed list and the tag is (not) on it; None when
         unknown (no list, or no tag to check)
 
-    For a project package, also:
+    For a project or recipe package, also:
 
       project: the slug (normalized, as import stores)
       project_display: the display name
@@ -1283,8 +1764,27 @@ def preview_export(
         all the projects in the package
       existing_projects: the slugs already in this home (a
         profile import refuses while any of these exist)
+
+    For an adapter package (T173), also:
+
+      adapter: the adapter slug (the project a new-project
+        import creates around it)
+      adapter_display, adapter_base, adapter_rank,
+      adapter_dataset, adapter_status, adapter_steps,
+      adapter_final_loss: the adapter block from the manifest
+      weights: True when the package carries real weights
+      project_existed: a project with the adapter's name is
+        already in this home (a new-project import lands under
+        a copy name instead)
     """
-    path = Path(path).expanduser()
+    with _open_package(path) as root:
+        return _preview_export_opened(store, root, installed_models)
+
+
+def _preview_export_opened(
+    store: Store, path: Path, installed_models: list[str] | None
+) -> dict:
+    """The preview_export body, run against an opened package dir."""
     manifest = verify_export(path)
     kind = manifest.get("kind", PROJECT_PACKAGE_KIND)
     prof = manifest["profile"]
@@ -1356,6 +1856,35 @@ def preview_export(
             "existing_projects": existing,
         })
         return summary
+    if kind == ADAPTER_PACKAGE_KIND:
+        adapter = manifest["adapter"]
+        adapter_slug = validate_slug(
+            adapter.get("name", ""), "adapter name in export"
+        )
+        summary.update({
+            "adapter": adapter_slug,
+            "adapter_display": adapter.get(
+                "display_name", adapter_slug
+            ),
+            "adapter_base": adapter.get("base", ""),
+            "adapter_rank": adapter.get("rank", ""),
+            "adapter_dataset": adapter.get("dataset", ""),
+            "adapter_status": adapter.get("status", "draft"),
+            "adapter_steps": adapter.get("steps", ""),
+            "adapter_final_loss": adapter.get("final_loss", ""),
+            "weights": bool(_package_weights(path)),
+            # The project a new-project import would create
+            # around the adapter, and whether it is taken (the
+            # import lands under a copy name then).
+            "project": adapter_slug,
+            "project_display": adapter.get(
+                "display_name", adapter_slug
+            ),
+            "project_existed": (
+                store.project_dir(slug, adapter_slug) / "project.json"
+            ).is_file(),
+        })
+        return summary
     proj = manifest["project"]
     project_slug = validate_slug(proj["name"], "project name in export")
     ckpt_dir = path / "checkpoints"
@@ -1424,9 +1953,16 @@ def format_preview(summary: dict) -> str:
     the same thing."""
     if summary.get("kind") == PROFILE_PACKAGE_KIND:
         return _format_profile_preview(summary)
+    if summary.get("kind") == ADAPTER_PACKAGE_KIND:
+        return _format_adapter_preview(summary)
     lines = [
-        f"Profile {summary['profile']}, project {summary['project']}.",
+        f"Profile {summary['profile']}, project {summary['project']}."
     ]
+    if summary.get("kind") == RECIPE_PACKAGE_KIND:
+        lines.append(
+            "A recipe: the dataset reference, settings, and notes "
+            "only. No weights, no checkpoints."
+        )
     tag = summary.get("tag") or summary.get("base") or ""
     if tag:
         lines.append(f"Base model: {tag}.")
@@ -1468,6 +2004,57 @@ def format_preview(summary: dict) -> str:
             f"The project {summary['project']!r} is already here. "
             "Import it as a copy under a new name, or replace the "
             "old one (the old one goes to the trash)."
+        )
+    lines.extend(_format_profile_lines(summary))
+    return "\n".join(lines)
+
+
+def _format_adapter_preview(summary: dict) -> str:
+    """The preview summary for an adapter package (T173): what
+    the adapter is, and what importing it does."""
+    lines = [
+        f"Adapter {summary['adapter']} for profile "
+        f"{summary['profile']}."
+    ]
+    base = summary.get("adapter_base") or ""
+    if base:
+        lines.append(f"Base model: {base}.")
+    rank = summary.get("adapter_rank")
+    if rank != "" and rank is not None:
+        lines.append(f"Rank: {rank}.")
+    dataset = summary.get("adapter_dataset") or ""
+    if dataset:
+        lines.append(f"Trained on: {dataset}.")
+    training = []
+    status = summary.get("adapter_status") or ""
+    if status:
+        training.append(status)
+    steps = summary.get("adapter_steps")
+    if steps != "" and steps is not None:
+        training.append(f"{steps} steps")
+    loss = summary.get("adapter_final_loss")
+    if loss != "" and loss is not None:
+        training.append(f"final loss {loss}")
+    if training:
+        lines.append("Training: " + ", ".join(training) + ".")
+    version = summary.get("stella_version")
+    if version:
+        lines.append(f"Made with Stella {version}.")
+    provenance = _provenance_line(summary)
+    if provenance:
+        lines.append(provenance)
+    if summary.get("weights"):
+        lines.append("Inside: the trained adapter weights.")
+    else:
+        lines.append("Inside: no weights (the package is empty).")
+    lines.append(
+        "Import it into a project with the same base, or let "
+        "Stella create a new project around it."
+    )
+    if summary.get("project_existed"):
+        lines.append(
+            f"A project called {summary['project']!r} is already "
+            "here, so a new project would land under a copy name."
         )
     lines.extend(_format_profile_lines(summary))
     return "\n".join(lines)
@@ -1769,6 +2356,13 @@ def _restore_project_payload(
     if src_sleep.is_dir():
         dst_sleep = store.project_dir(slug, project_slug) / "sleep"
         _copy_tree_counted(src_sleep, dst_sleep, progress)
+    if progress is not None:
+        # The last check: every copy above checks BEFORE it starts,
+        # so a cancel that lands during the LAST copy would
+        # otherwise go unnoticed and the import would report
+        # success. Checking once more at the end keeps the
+        # promise above — a cancel mid-file still rolls back.
+        progress.check()
 
 
 def _import_total_bytes(package_root: Path, payload_dirs) -> int:
@@ -1800,17 +2394,30 @@ def import_export(
     on_project_conflict=None,
     on_progress=None,
     should_stop=None,
+    into_profile: str | None = None,
+    into_project: str | None = None,
 ) -> dict:
     """Import a verified export package into this home.
+
+    `path` is a package folder or a `.stella` file (T171): a zip
+    is extracted into a temp dir and imported from there.
 
     A project package creates the profile if it does not exist
     yet (same slug, role and base from the manifest); the project
     must not already exist, unless the collision is resolved (see
     below). A profile package is handed to import_profile_export
-    (T86) and its result returned. Returns {"profile": ...,
+    (T86) and its result returned. A recipe package (T170) is
+    imported like a project package — same profile merge, same
+    collision choices, same dataset warning — but carries no
+    weights, checkpoints, or probe results, so the new project
+    always starts as a draft. An adapter package (T173) is handed
+    to import_adapter_export: into an existing project with the
+    same base (when `into_profile` / `into_project` name one), or
+    into a new project created around it. Returns {"profile": ...,
     "project": ..., "profile_existed": ..., "profile_diff": ...,
-    "profile_choice": ..., "warnings": [...]} for a project
-    package (see import_profile_export for the profile shape).
+    "profile_choice": ..., "warnings": [...]} for a project or
+    recipe package (see import_profile_export and
+    import_adapter_export for the other shapes).
 
     The weights round-trip (T41): the package's weights/ (minus the
     placeholder note) land in the project's adapter/ dir, and
@@ -1880,7 +2487,29 @@ def import_export(
         raise StellaError(
             f"collision must be 'copy' or 'replace', not {collision!r}"
         )
+    if (into_profile is None) != (into_project is None):
+        raise StellaError(
+            "import into an existing project needs both a profile "
+            "and a project, not one alone"
+        )
     path = Path(path).expanduser()
+    if path.is_file():
+        # A .stella file (T171): extract it and import from the
+        # temp folder — the folder path below is the same import
+        # either way, so a zip and a folder import identically.
+        with _open_package(path) as root:
+            return import_export(
+                store, root,
+                profile_choice=profile_choice,
+                on_profile_conflict=on_profile_conflict,
+                installed_models=installed_models,
+                collision=collision,
+                on_project_conflict=on_project_conflict,
+                on_progress=on_progress,
+                should_stop=should_stop,
+                into_profile=into_profile,
+                into_project=into_project,
+            )
     manifest = verify_export(path)
     if manifest.get("kind") == PROFILE_PACKAGE_KIND:
         return import_profile_export(
@@ -1891,6 +2520,25 @@ def import_export(
             on_progress=on_progress,
             should_stop=should_stop,
         )
+    if manifest.get("kind") == ADAPTER_PACKAGE_KIND:
+        return import_adapter_export(
+            store, path,
+            profile_choice=profile_choice,
+            on_profile_conflict=on_profile_conflict,
+            installed_models=installed_models,
+            on_progress=on_progress,
+            should_stop=should_stop,
+            into_profile=into_profile,
+            into_project=into_project,
+        )
+    # A recipe import (T170) is a project import with a different
+    # label in the history: the body below is shared, and the
+    # recipe's missing payload (no weights, no checkpoints) is
+    # simply nothing to restore.
+    package_label = (
+        "recipe" if manifest.get("kind") == RECIPE_PACKAGE_KIND
+        else "project"
+    )
     prof = manifest["profile"]
     proj = manifest["project"]
     # Normalize once, at import start: the store lowercases, so the
@@ -2050,7 +2698,7 @@ def import_export(
             result["replaced_trash"] = str(replaced_trash)
     # T179: the import is recorded in the home's history.
     _record_history(store, {
-        "kind": "import", "package": "project",
+        "kind": "import", "package": package_label,
         "profile": slug, "project": created["name"], "path": str(path),
     })
     return result
@@ -2088,6 +2736,18 @@ def import_profile_export(
             f"not {profile_choice!r}"
         )
     path = Path(path).expanduser()
+    if path.is_file():
+        # A .stella file (T171): extract it and import from the
+        # temp folder.
+        with _open_package(path) as root:
+            return import_profile_export(
+                store, root,
+                profile_choice=profile_choice,
+                on_profile_conflict=on_profile_conflict,
+                installed_models=installed_models,
+                on_progress=on_progress,
+                should_stop=should_stop,
+            )
     manifest = verify_export(path)
     if manifest.get("kind") != PROFILE_PACKAGE_KIND:
         raise StellaError(
@@ -2211,5 +2871,358 @@ def import_profile_export(
     _record_history(store, {
         "kind": "import", "package": "profile",
         "profile": slug, "project": "", "path": str(path),
+    })
+    return result
+
+
+def adapter_base_matches(profile: dict, adapter: dict) -> bool:
+    """True when a profile's base matches an adapter's base
+    (T173): the adapter's base is the base_ref (or the tag, when
+    the profile had no base_ref) it was trained on. Either side
+    blank means "unknown" — and an unknown base never matches, so
+    an adapter never lands on a project it was not trained for.
+    Shared by the engine import and the window's import preview,
+    so both agree on whether the current project can take it."""
+    base = str((adapter or {}).get("base") or "").strip()
+    if not base:
+        return False
+    prof = profile or {}
+    for key in ("base_ref", "ollama_tag"):
+        if str(prof.get(key) or "").strip() == base:
+            return True
+    return False
+
+
+def import_recipe_export(
+    store: Store,
+    path: str | Path,
+    profile_choice: str | None = None,
+    on_profile_conflict=None,
+    installed_models: list[str] | None = None,
+    collision: str | None = None,
+    on_project_conflict=None,
+    on_progress=None,
+    should_stop=None,
+) -> dict:
+    """Import a recipe package (T170): the recipe's settings,
+    dataset reference, metamorph mode + notes, and project notes
+    become a new project. A dataset that is not on this PC warns
+    at import, never blocks — the dataset may live elsewhere.
+    The import itself is the project import (same profile merge,
+    same collision choices); this wrapper only checks the kind,
+    so a caller that asked for a recipe never silently imports a
+    project package."""
+    manifest = verify_export(path)
+    if manifest.get("kind") != RECIPE_PACKAGE_KIND:
+        raise StellaError(
+            "this is not a recipe package. Import it with "
+            "`stella import` instead."
+        )
+    return import_export(
+        store, path,
+        profile_choice=profile_choice,
+        on_profile_conflict=on_profile_conflict,
+        installed_models=installed_models,
+        collision=collision,
+        on_project_conflict=on_project_conflict,
+        on_progress=on_progress,
+        should_stop=should_stop,
+    )
+
+
+def import_adapter_export(
+    store: Store,
+    path: str | Path,
+    profile_choice: str | None = None,
+    on_profile_conflict=None,
+    installed_models: list[str] | None = None,
+    on_progress=None,
+    should_stop=None,
+    into_profile: str | None = None,
+    into_project: str | None = None,
+) -> dict:
+    """Import an adapter package (T173): the bare adapter lands
+    either in an existing project with the same base (when
+    `into_profile` / `into_project` name one), or in a new
+    project created around it (profile from the manifest, project
+    named after the adapter).
+
+    Returns {"profile", "project", "adapter", "into_existing",
+    "profile_existed", "profile_diff", "profile_choice",
+    "dataset_ref", "dataset_missing", "warnings"}. A new-project import that found its name taken
+    lands under a copy name (`<name>-copy`, then `-copy-2`, ...)
+    and records "copy_of".
+
+    Into an existing project, the base must match: the target
+    profile's base_ref or tag must equal the adapter's base, or
+    the import refuses, naming both — an adapter trained on one
+    base must never land on a project for another. A target that
+    already has a trained adapter refuses too: remove it first.
+    The target's status becomes "done" (it has trained weights
+    now), unless it was already done or exported.
+
+    A new project gets the adapter's rank in its settings, its
+    dataset reference, and the "done" status — the weights are
+    already trained. A dataset that is not on this PC warns, like
+    a project import. Atomic like the project import: a failure
+    anywhere removes what this import created, and a take-merge
+    is unwound.
+    """
+    if profile_choice is not None and profile_choice not in ("keep", "take"):
+        raise StellaError(
+            f"profile_choice must be 'keep' or 'take', "
+            f"not {profile_choice!r}"
+        )
+    if (into_profile is None) != (into_project is None):
+        raise StellaError(
+            "import into an existing project needs both a profile "
+            "and a project, not one alone"
+        )
+    path = Path(path).expanduser()
+    if path.is_file():
+        # A .stella file (T171): extract it and import from the
+        # temp folder.
+        with _open_package(path) as root:
+            return import_adapter_export(
+                store, root,
+                profile_choice=profile_choice,
+                on_profile_conflict=on_profile_conflict,
+                installed_models=installed_models,
+                on_progress=on_progress,
+                should_stop=should_stop,
+                into_profile=into_profile,
+                into_project=into_project,
+            )
+    manifest = verify_export(path)
+    if manifest.get("kind") != ADAPTER_PACKAGE_KIND:
+        raise StellaError(
+            "this is not an adapter package. Import it with "
+            "`stella import` instead."
+        )
+    prof = manifest["profile"]
+    adapter = manifest["adapter"]
+    slug = validate_slug(prof["name"], "profile name in export")
+    adapter_slug = validate_slug(
+        adapter.get("name", ""), "adapter name in export"
+    )
+    weight_items = _package_weights(path)
+    if not weight_items:
+        raise StellaError(
+            "the adapter package carries no weights. There is "
+            "nothing to import."
+        )
+    warnings: list[str] = []
+    if installed_models:
+        tag = prof.get("ollama_tag", "")
+        if tag and tag not in installed_models:
+            warnings.append(
+                f"the base model {tag!r} is not installed on this "
+                "PC. Pull it before training."
+            )
+    progress = _CopyProgress(
+        _import_total_bytes(path, [path]), on_progress, should_stop,
+    )
+    if into_profile is not None and into_project is not None:
+        return _import_adapter_into_existing(
+            store, path, adapter, adapter_slug, weight_items,
+            into_profile, into_project, warnings, progress,
+        )
+    return _import_adapter_new_project(
+        store, path, prof, adapter, slug, adapter_slug, weight_items,
+        profile_choice, on_profile_conflict, warnings, progress,
+    )
+
+
+def _copy_adapter_weights(
+    store, profile, project, weight_items, progress
+) -> None:
+    """Copy an adapter package's weights into a project's
+    adapter/ dir (T173). The caller owns the rollback: a copy
+    that fails midway leaves a partial adapter dir behind, and
+    the caller's rollback removes the project (new-project
+    import) or the adapter dir (into-existing import)."""
+    dst_adapter = store.project_dir(profile, project) / "adapter"
+    dst_adapter.mkdir(parents=True, exist_ok=True)
+    for item in weight_items:
+        if progress is not None:
+            progress.check()
+        if item.is_file():
+            _copy_file_counted(item, dst_adapter / item.name, progress)
+        elif item.is_dir():
+            _copy_tree_counted(item, dst_adapter / item.name, progress)
+
+
+def _import_adapter_into_existing(
+    store, path, adapter, adapter_slug, weight_items,
+    into_profile, into_project, warnings, progress,
+) -> dict:
+    """The into-existing half of import_adapter_export (T173):
+    the adapter lands in a project that already exists, with the
+    same base. The manifest's profile block is ignored here — the
+    target profile is the authority; only the base check reads
+    the manifest."""
+    target_slug = validate_slug(into_profile, "profile name")
+    target_project = validate_slug(into_project, "project name")
+    target_prof = store.get_profile(target_slug)
+    target_proj = store.get_project(target_slug, target_project)
+    if not adapter_base_matches(target_prof, adapter):
+        target_base = (
+            target_prof.get("base_ref")
+            or target_prof.get("ollama_tag")
+            or "not set"
+        )
+        raise StellaError(
+            f"this adapter was trained on {adapter.get('base') or 'an unknown base'!r}, "
+            f"but project {target_project!r} uses {target_base!r}. "
+            "An adapter only works on the base it was trained on."
+        )
+    adapter_dir = store.project_dir(target_slug, target_project) / "adapter"
+    if (adapter_dir / "adapter_config.json").is_file():
+        raise StellaError(
+            f"project {target_project!r} already has a trained "
+            "adapter. Delete it first, or import this adapter "
+            "into a new project."
+        )
+    try:
+        _copy_adapter_weights(
+            store, target_slug, target_project, weight_items, progress
+        )
+    except BaseException:
+        # A failed copy leaves a partial adapter dir: remove it,
+        # so the project is exactly as it was.
+        shutil.rmtree(adapter_dir, ignore_errors=True)
+        raise
+    if target_proj.get("status") not in ("done", "exported"):
+        store.update_project(target_slug, target_project, status="done")
+    result = {
+        "profile": target_slug,
+        "project": target_project,
+        "adapter": adapter_slug,
+        "into_existing": True,
+        "profile_existed": True,
+        "profile_diff": {},
+        "profile_choice": None,
+        "dataset_ref": adapter.get("dataset_ref", ""),
+        "dataset_missing": False,
+        "warnings": warnings,
+    }
+    # T179: the import is recorded in the home's history.
+    _record_history(store, {
+        "kind": "import", "package": "adapter",
+        "profile": target_slug, "project": target_project,
+        "path": str(path),
+    })
+    return result
+
+
+def _import_adapter_new_project(
+    store, path, prof, adapter, slug, adapter_slug, weight_items,
+    profile_choice, on_profile_conflict, warnings, progress,
+) -> dict:
+    """The new-project half of import_adapter_export (T173): the
+    profile comes from the manifest (created, or merged per T57),
+    and a project named after the adapter is created around the
+    weights, with the adapter's rank and dataset reference."""
+    (
+        profile_existed, profile_diff, choice, local_block,
+    ) = _profile_merge_decision(
+        store, slug, prof, profile_choice, on_profile_conflict, warnings
+    )
+    # The name the project lands under: the adapter's name, or a
+    # copy name when that is taken (a recipe-style import never
+    # refuses on a taken name — it lands next to it).
+    project_slug = adapter_slug
+    copy_of = None
+    if (
+        store.project_dir(slug, project_slug) / "project.json"
+    ).is_file():
+        copy_of = project_slug
+        project_slug = suggest_copy_name(store, slug, project_slug)
+    settings = {}
+    rank = adapter.get("rank")
+    if isinstance(rank, int) and not isinstance(rank, bool):
+        settings["rank"] = rank
+    dataset_ref = adapter.get("dataset_ref", "")
+    created_profile = False
+    merged_profile = False
+    merged_before: dict | None = None
+    try:
+        if not profile_existed:
+            _create_profile_from_manifest(store, slug, prof)
+            created_profile = True
+        elif choice == "take":
+            merged_before = {
+                field: (local_block or {}).get(field, "")
+                for field in PROFILE_BLOCK_FIELDS
+            }
+            store.update_profile(
+                slug,
+                ollama_tag=prof.get("ollama_tag", ""),
+                role=prof.get("role", ""),
+                base_ref=prof.get("base_ref", ""),
+            )
+            merged_profile = True
+        created = store.create_project(
+            slug,
+            project_slug,
+            display_name=adapter.get("display_name", project_slug),
+            dataset_ref=dataset_ref,
+            settings=settings,
+        )
+        _copy_adapter_weights(
+            store, slug, project_slug, weight_items, progress
+        )
+        # The weights are already trained: the project is done,
+        # not a draft waiting for a run.
+        store.update_project(slug, project_slug, status="done")
+    except BaseException:
+        try:
+            store._destroy_project(slug, project_slug)
+        except Exception:
+            pass
+        if merged_profile and merged_before is not None:
+            try:
+                store.update_profile(slug, **merged_before)
+            except Exception:
+                pass
+        if created_profile:
+            try:
+                store._destroy_profile(slug)
+            except Exception:
+                pass
+        raise
+    # The dataset (T59): an unbundled ref that is not on this PC
+    # warns, like a project import — the project still works, it
+    # just cannot train until the file is found.
+    dataset_missing = False
+    if dataset_ref:
+        from .train import resolve_dataset_ref
+
+        try:
+            resolve_dataset_ref(store, slug, project_slug, dataset_ref)
+        except StellaError:
+            dataset_missing = True
+            warnings.append(
+                f"the dataset {dataset_ref!r} is not on this PC. "
+                "Find the file before training."
+            )
+    result = {
+        "profile": slug,
+        "profile_existed": profile_existed,
+        "profile_diff": profile_diff,
+        "profile_choice": choice,
+        "project": created["name"],
+        "adapter": adapter_slug,
+        "into_existing": False,
+        "dataset_ref": dataset_ref,
+        "dataset_missing": dataset_missing,
+        "warnings": warnings,
+    }
+    if copy_of is not None:
+        result["copy_of"] = copy_of
+    # T179: the import is recorded in the home's history.
+    _record_history(store, {
+        "kind": "import", "package": "adapter",
+        "profile": slug, "project": created["name"], "path": str(path),
     })
     return result

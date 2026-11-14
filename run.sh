@@ -3,6 +3,15 @@
 # Run it with: bash run.sh
 set -euo pipefail
 
+# T186: --help answers with usage and exits 0, without launching
+# anything. Checked before DIR resolution, so nothing happens at all.
+if [ "${1:-}" = "--help" ]; then
+  echo "Usage: bash run.sh [--help]"
+  echo "Opens the Stella window. Any other arguments are passed to"
+  echo "the Stella command line (run 'stella --help' for those)."
+  exit 0
+fi
+
 DIR="$(cd "$(dirname "$0")" && pwd)"
 # Resolve symlinks, so launching through a link still finds this folder.
 SOURCE="${BASH_SOURCE[0]}"

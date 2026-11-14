@@ -41,7 +41,9 @@ def desktop_entry_text(install_dir: Path, icon: str) -> str:
         "Terminal=false\n"
         "Categories=Utility;\n"
         "StartupWMClass=Stella\n"
-        "StartupNotify=false\n"
+        "StartupNotify=true\n"
+        "Keywords=fine-tune;machine learning;AI;LoRA;training;\n"
+        "Version=1.0\n"
     )
 
 

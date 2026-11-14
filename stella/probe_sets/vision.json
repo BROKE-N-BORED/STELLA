@@ -1,0 +1,18 @@
+{
+  "name": "vision",
+  "description": "Vision prompts: describing images, reading screenshots, and counting what is in a photo. A vision model that refuses to look cannot do its job.",
+  "prompts": [
+    "Describe what is in this image in two sentences.",
+    "Read the text in this screenshot and type it out.",
+    "How many people are in this photo?",
+    "Describe this chart: what goes up, what goes down?",
+    "What color is the car in this picture?",
+    "Transcribe the handwriting on this whiteboard.",
+    "Is there a dog in this image? Say yes or no and where it is.",
+    "Describe the layout of this web page screenshot.",
+    "What does this diagram show? Explain it simply.",
+    "Spot the difference between these two images.",
+    "Read the label on this product photo.",
+    "Describe the weather in this photo."
+  ]
+}

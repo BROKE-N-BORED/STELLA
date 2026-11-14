@@ -29,6 +29,8 @@ ALL_COMMANDS = [
     "rename-profile", "delete-profile", "update-profile",
     "show-profile", "rename-project", "delete-project",
     "update-project", "show-project",
+    "export-recipe", "export-adapter", "import-adapter",
+    "pull-weights",
 ]
 
 
@@ -484,11 +486,16 @@ def test_cli_unknown_command_exit_2(home):
     assert "Traceback" not in res.stderr
 
 
-def test_cli_no_command_exit_2(home):
+def test_cli_no_command_prints_command_list(home):
+    # T187: bare `stella` prints the command list (the top --help)
+    # and exits 0 — not argparse's "arguments are required" error.
     res = run_cli(home)
-    assert res.returncode == 2
-    assert "usage:" in res.stderr
+    assert res.returncode == 0
+    assert "usage:" in res.stdout
+    assert "profiles" in res.stdout
+    assert "create-profile" in res.stdout
     assert "Traceback" not in res.stderr
+    assert "required" not in res.stderr
 
 
 @pytest.mark.parametrize("bad", ["0", "-1"])

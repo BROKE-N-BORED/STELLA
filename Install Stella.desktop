@@ -7,3 +7,5 @@ Exec=python3 -c "import os,subprocess,sys; d=os.path.dirname(sys.argv[1]) or os.
 Icon=stella
 Terminal=true
 Categories=Utility;
+StartupNotify=true
+Keywords=install;setup;Stella;
