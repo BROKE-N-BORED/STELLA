@@ -49,6 +49,32 @@ def list_models(url: str | None = None, timeout: float = TIMEOUT_SECONDS) -> lis
     return sorted(names)
 
 
+def list_model_sizes(url: str | None = None,
+                     timeout: float = TIMEOUT_SECONDS) -> dict[str, int]:
+    """Installed Ollama model tags with their size in bytes, or {}
+    if unreachable. Same /api/tags call as list_models — the size
+    is what the model picker shows in its fit verdict (T18)."""
+    base = (url or ollama_url()).rstrip("/")
+    try:
+        req = urllib.request.Request(base + "/api/tags", method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, ValueError, TimeoutError):
+        return {}
+    models = payload.get("models") if isinstance(payload, dict) else None
+    if not isinstance(models, list):
+        return {}
+    sizes = {}
+    for entry in models:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        size = entry.get("size")
+        if isinstance(name, str) and isinstance(size, int):
+            sizes[name] = size
+    return sizes
+
+
 def reachable(url: str | None = None, timeout: float = TIMEOUT_SECONDS) -> bool:
     """True when the Ollama server answers on localhost."""
     base = (url or ollama_url()).rstrip("/")

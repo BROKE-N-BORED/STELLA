@@ -42,8 +42,13 @@ def _visible_texts(window):
         texts.append(widget.toolTip())
         if widget.isWindow():
             texts.append(widget.windowTitle())
-    for action in window.menu.actions():
-        texts.append(action.text())
+    for action in window.menuBar().actions():
+        menu = action.menu()
+        if menu is None:
+            continue
+        texts.append(menu.title())
+        for sub in menu.actions():
+            texts.append(sub.text())
     tree = window.tree
     for i in range(tree.topLevelItemCount()):
         top = tree.topLevelItem(i)
@@ -58,8 +63,11 @@ def _visible_texts(window):
 
 def test_window_opens_with_menu_tree_and_session(window):
     assert window.isVisible()
-    assert window.menu_button is not None
-    assert window.menu_button.text() == "Menu"
+    assert window.menuBar() is not None
+    menus = [
+        a.menu() for a in window.menuBar().actions() if a.menu() is not None
+    ]
+    assert [m.title() for m in menus] == ["File", "View", "Help"]
     assert window.tree.topLevelItemCount() == 1
     assert window.tree.topLevelItem(0).childCount() == 1
     assert window.session_title.text() == "No training session yet."
@@ -117,23 +125,32 @@ def test_status_bar_is_the_only_status(window):
 # -- menu -----------------------------------------------------------
 
 
-def test_menu_has_expected_actions_in_order(window):
-    texts = [
-        a.text() for a in window.menu.actions() if not a.isSeparator()
-    ]
-    assert texts == [
-        "Profiles",
-        "New profile...",
-        "Projects",
-        "New project...",
-        "Export project...",
-        "Import package...",
-        "Settings...",
-        "How to Use Stella...",
-        "Chat...",
-    ]
-    separators = [a for a in window.menu.actions() if a.isSeparator()]
-    assert len(separators) == 3
+def test_menu_bar_has_expected_menus_and_actions(window):
+    """T19: a real menu bar, File / View / Help, actions in order."""
+    bar = window.menuBar()
+    menus = [a.menu() for a in bar.actions() if a.menu() is not None]
+    assert [m.title() for m in menus] == ["File", "View", "Help"]
+    actions = {
+        m.title(): [a.text() for a in m.actions() if not a.isSeparator()]
+        for m in menus
+    }
+    assert actions == {
+        "File": [
+            "New profile...",
+            "New project...",
+            "Export project...",
+            "Import package...",
+            "Settings...",
+        ],
+        "View": ["Profiles", "Projects"],
+        "Help": ["How to Use Stella...", "Chat..."],
+    }
+    file_menu = menus[0]
+    separators = [a for a in file_menu.actions() if a.isSeparator()]
+    assert len(separators) == 1
+    # The old Menu button is gone (T19).
+    assert not hasattr(window, "menu_button")
+    assert not hasattr(window, "menu")
 
 
 def test_menu_new_profile_opens_dialog(window, qapp):
@@ -182,8 +199,10 @@ def test_click_project_sets_session(window, settings):
     )
     assert settings.value("session/profile") == "lfm3-tool"
     assert settings.value("session/project") == "tool-calls"
-    assert window.train_start_btn.isEnabled()
-    assert window.sleep_btn.isEnabled()
+    # No job is picked yet, so Go waits (T15); picking one arms it.
+    assert not window.go_btn.isEnabled()
+    window.job_buttons["train"].click()
+    assert window.go_btn.isEnabled()
 
 
 def test_session_restores_across_restarts(qapp, seeded, settings):
@@ -211,12 +230,13 @@ def test_session_restores_across_restarts(qapp, seeded, settings):
 
 
 def test_train_buttons_disabled_without_session(window):
-    assert not window.train_start_btn.isEnabled()
+    assert not window.go_btn.isEnabled()
     assert not window.train_resume_btn.isEnabled()
-    assert not window.sleep_btn.isEnabled()
     assert not window.train_export_gguf_btn.isEnabled()
     assert not window.train_probe_btn.isEnabled()
     assert not window.download_btn.isEnabled()
+    assert not window.train_pick_dataset_btn.isEnabled()
+    assert not window.train_sample_btn.isEnabled()
 
 
 def test_tree_expansion_survives_refresh(window):
@@ -299,54 +319,56 @@ def test_project_window_save_writes_through(window, seeded):
     assert win.dataset_edit.text() == "forge-traces.jsonl"
     # No metamorph control: it did nothing, so it gets no control.
     assert not hasattr(win, "metamorph_combo")
-    # The fill shows the stored rank (auto-config picked it for
-    # this PC when the project was created).
-    stored_rank = seeded.get_project("lfm3-tool", "tool-calls")["settings"]["rank"]
-    assert win.rank_spin.value() == stored_rank
+    # No settings controls (T16): the backend picks them.
+    for attr in (
+        "method_combo",
+        "rank_spin",
+        "lr_edit",
+        "epochs_spin",
+        "batch_spin",
+        "seq_spin",
+    ):
+        assert not hasattr(win, attr), attr
+    stored_settings = dict(
+        seeded.get_project("lfm3-tool", "tool-calls")["settings"]
+    )
     win.display_edit.setText("Tool Calls v2")
-    win.rank_spin.setValue(16)
-    win.notes_edit.setPlainText("raised rank after first look")
+    win.dataset_edit.setText("other-data.jsonl")
+    win.notes_edit.setPlainText("renamed after first look")
     assert win.save() is True
     data = seeded.get_project("lfm3-tool", "tool-calls")
     assert data["display_name"] == "Tool Calls v2"
-    assert data["settings"]["rank"] == 16
+    assert data["dataset_ref"] == "other-data.jsonl"
+    # Saving leaves the stored settings untouched (T16).
+    assert data["settings"] == stored_settings
     # Saving leaves the stored metamorph mode untouched.
     assert data["metamorph"]["mode"] == "both"
     assert seeded.read_notes("lfm3-tool", "tool-calls") == (
-        "raised rank after first look"
+        "renamed after first look"
     )
     win.close()
 
 
-def test_project_window_rejects_bad_lr(window, seeded, monkeypatch):
-    from PySide6.QtWidgets import QMessageBox
-
-    _select_session(window)
-    warnings = []
-    monkeypatch.setattr(
-        QMessageBox, "warning", lambda *a, **k: warnings.append(a[2])
-    )
-    # The window stays modified (the bad value was never saved), so
-    # closing it prompts (T2) — discard the edits, the test's point
-    # is the rejection, not the prompt.
-    monkeypatch.setattr(
-        QMessageBox, "question", lambda *a, **k: QMessageBox.Discard
-    )
-    win = window.open_project_window("lfm3-tool", "tool-calls")
-    win.lr_edit.setText("banana")
-    assert win.save() is False
-    assert warnings
-    assert "Learning rate" in warnings[0]
-    data = seeded.get_project("lfm3-tool", "tool-calls")
-    assert data["settings"]["learning_rate"] == 0.0002
-    win.close()
-
-
-def test_project_window_full_method_disabled(window):
+def test_project_window_has_no_settings_controls(window):
+    """T16: the settings form is gone. Nothing in the window reads
+    or writes rank, learning rate, epochs, batch size, or seq len."""
     _select_session(window)
     win = window.open_project_window("lfm3-tool", "tool-calls")
-    assert win.method_combo.itemText(1) == "full"
-    assert not win.method_combo.model().item(1).isEnabled()
+    for attr in (
+        "method_combo",
+        "rank_spin",
+        "lr_edit",
+        "epochs_spin",
+        "batch_spin",
+        "seq_spin",
+    ):
+        assert not hasattr(win, attr), attr
+    texts = " ".join(
+        [w.text() for w in win.findChildren(QLabel)]
+        + [w.text() for w in win.findChildren(QPushButton)]
+    ).lower()
+    for word in ("rank", "learning rate", "epochs", "batch size", "seq len"):
+        assert word not in texts, word
     win.close()
 
 
@@ -357,6 +379,12 @@ def test_settings_window_shows_home_and_defaults(window, seeded):
     assert "Status:" in win.ollama_status.text()
     assert win.debug_btn is not None
     assert win.debug_btn.text() == "Write debug report"
+    # No Training defaults block (T16): nothing in Settings names
+    # a training setting.
+    texts = " ".join(w.text() for w in win.findChildren(QLabel))
+    assert "Training defaults" not in texts
+    assert "LoRA rank" not in texts
+    assert "Learning rate" not in texts
     win.close()
 
 
@@ -474,7 +502,17 @@ def test_no_em_dash_in_visible_text(window, seeded):
 
 
 def test_train_panel_widgets_exist(window):
-    assert window.train_start_btn is not None
+    # The hero tile (T15) and the glanceable card (T20) replace the
+    # old Train panel: pick a model, pick a job, press Go.
+    assert window.model_combo is not None
+    assert window.go_btn is not None
+    assert window.go_btn.text() == "Go"
+    assert set(window.job_buttons) == {"train", "sleep", "requant", "distill"}
+    assert window.loss_curve is not None
+    assert window.stat_speed is not None
+    assert window.stat_ram is not None
+    assert window.stat_time_left is not None
+    assert window.stat_epoch is not None
     assert window.train_pause_btn is not None
     assert window.train_resume_btn is not None
     assert window.train_progress is not None
@@ -527,8 +565,10 @@ def test_train_loss_line_follows_session(window):
 
 
 def test_sleep_panel_widgets_exist(window):
-    assert window.sleep_btn is not None
-    assert window.sleep_btn.text() == "Sleep"
+    # Sleep is a job button now (T15); the dream switch and the
+    # cycles list stay in the details below.
+    assert window.job_buttons["sleep"] is not None
+    assert window.job_buttons["sleep"].text() == "Sleep"
     assert window.sleep_dream_check is not None
     assert window.sleep_dream_check.text() == "Dream first"
     assert window.sleep_dream_check.isChecked() is False
@@ -674,7 +714,8 @@ def test_new_profile_dialog_asks_only_for_a_model(window):
     assert not hasattr(dialog, "role_combo")
     assert not hasattr(dialog, "display_edit")
     assert not hasattr(dialog, "name_edit")
-    assert hasattr(dialog, "model_combo")
+    assert hasattr(dialog, "model_list")
+    assert hasattr(dialog, "type_edit")
     dialog.close()
 
 
@@ -684,7 +725,7 @@ def test_create_profile_from_hf_repo(window, seeded):
     from stella.gui import NewProfileDialog
 
     dialog = NewProfileDialog(window)
-    dialog.model_combo.setCurrentText("LiquidAI/LFM3-1.7B")
+    dialog.type_edit.setText("LiquidAI/LFM3-1.7B")
     assert dialog.name_note.text() == "Profile name: lfm3-1-7b"
     window._create_profile_from(dialog)
     assert dialog.result() == QDialog.Accepted
@@ -699,7 +740,7 @@ def test_create_profile_from_ollama_tag(window, seeded):
     from stella.gui import NewProfileDialog
 
     dialog = NewProfileDialog(window)
-    dialog.model_combo.setCurrentText("qwen3.5:4b")
+    dialog.type_edit.setText("qwen3.5:4b")
     window._create_profile_from(dialog)
     data = seeded.get_profile("qwen3-5-4b")
     assert data["ollama_tag"] == "qwen3.5:4b"
@@ -710,7 +751,7 @@ def test_create_profile_name_collision_gets_suffix(window, seeded):
 
     for _ in range(2):
         dialog = NewProfileDialog(window)
-        dialog.model_combo.setCurrentText("LiquidAI/LFM3-1.7B")
+        dialog.type_edit.setText("LiquidAI/LFM3-1.7B")
         window._create_profile_from(dialog)
     assert seeded.get_profile("lfm3-1-7b")
     assert seeded.get_profile("lfm3-1-7b-2")
@@ -722,7 +763,7 @@ def test_create_profile_empty_model_warns(window, monkeypatch):
     warnings = []
     monkeypatch.setattr(window, "_warn", warnings.append)
     dialog = NewProfileDialog(window)
-    dialog.model_combo.setCurrentText("")
+    dialog.type_edit.setText("")
     window._create_profile_from(dialog)
     assert warnings == ["Pick a model first."]
     assert [p["name"] for p in window.store.list_profiles()] == ["lfm3-tool"]
@@ -735,8 +776,8 @@ def test_new_profile_enter_creates(window, seeded):
     dialog = NewProfileDialog(window)
     assert dialog.create_btn.isDefault()
     dialog.create_btn.clicked.connect(lambda: window._create_profile_from(dialog))
-    dialog.model_combo.setCurrentText("qwen3.5:4b")
-    dialog.model_combo.lineEdit().returnPressed.emit()
+    dialog.type_edit.setText("qwen3.5:4b")
+    dialog.type_edit.returnPressed.emit()
     assert seeded.get_profile("qwen3-5-4b")
 
 
@@ -1062,44 +1103,40 @@ def _corrupt_project_json(store, profile, project, mutate):
     manifest.write_text(json.dumps(data))
 
 
-def test_project_window_bad_rank_falls_back(window, seeded, qapp):
+def test_project_window_bad_display_falls_back(window, seeded, qapp):
+    """T21, kept for the fields the window still shows (T16 took the
+    settings form away): a stored display name that is not a string
+    falls back to blank, with the note, and saving keeps the blank."""
     _corrupt_project_json(
         seeded, "lfm3-tool", "tool-calls",
-        lambda d: d["settings"].update(rank="high"),
+        lambda d: d.update(display_name=42),
     )
     win = window.open_project_window("lfm3-tool", "tool-calls")
     qapp.processEvents()
-    assert win.rank_spin.value() == 8
+    assert win.display_edit.text() == ""
     assert "stored value was invalid" in win._load_note.text()
     assert win._load_note.isVisible()
     # The rest of the panel still filled from THIS project.
-    assert win.display_edit.text() == "tool-calls"
     assert win.dataset_edit.text() == "forge-traces.jsonl"
-    # Save writes the good default, not the bad stored value.
+    # Save writes the blank, not the bad stored value.
     assert win.save() is True
     data = seeded.get_project("lfm3-tool", "tool-calls")
-    assert data["settings"]["rank"] == 8
-    assert isinstance(data["settings"]["rank"], int)
+    assert data["display_name"] == ""
+    assert isinstance(data["display_name"], str)
     win.close()
 
 
 @pytest.mark.parametrize(
     "mutate, check",
     [
-        (lambda d: d["settings"].update(learning_rate="banana"),
-         lambda w: w.lr_edit.text() == "0.0002"),
-        (lambda d: d["settings"].update(epochs="many"),
-         lambda w: w.epochs_spin.value() == 3),
-        (lambda d: d["settings"].update(batch_size="lots"),
-         lambda w: w.batch_spin.value() == 1),
-        (lambda d: d["settings"].update(max_seq_len="long"),
-         lambda w: w.seq_spin.value() == 1024),
-        (lambda d: d["settings"].update(method="warp"),
-         lambda w: w.method_combo.currentText() == "lora"),
-        (lambda d: d["settings"].update(rank=999),
-         lambda w: w.rank_spin.value() == 8),
-        (lambda d: d.update(settings="all of it"),
-         lambda w: w.rank_spin.value() == 8),
+        (lambda d: d.update(display_name=42),
+         lambda w: w.display_edit.text() == ""),
+        (lambda d: d.update(display_name=None),
+         lambda w: w.display_edit.text() == ""),
+        (lambda d: d.update(dataset_ref=["x"]),
+         lambda w: w.dataset_edit.text() == ""),
+        (lambda d: d.update(dataset_ref=123),
+         lambda w: w.dataset_edit.text() == ""),
     ],
 )
 def test_project_window_bad_value_falls_back(window, seeded, qapp,
@@ -1112,6 +1149,29 @@ def test_project_window_bad_value_falls_back(window, seeded, qapp,
     win.close()
 
 
+def test_project_window_ignores_corrupt_stored_settings(
+    window, seeded, qapp
+):
+    """T16: the window never reads settings, so a corrupt stored
+    settings block must not break the fill, show a note, or be
+    touched by a save."""
+    _corrupt_project_json(
+        seeded, "lfm3-tool", "tool-calls",
+        lambda d: d.update(settings="all of it"),
+    )
+    win = window.open_project_window("lfm3-tool", "tool-calls")
+    qapp.processEvents()
+    assert win.display_edit.text() == "tool-calls"
+    assert win.dataset_edit.text() == "forge-traces.jsonl"
+    assert win._load_note.text() == ""
+    assert not win._load_note.isVisible()
+    win.notes_edit.setPlainText("still fine")
+    assert win.save() is True
+    data = seeded.get_project("lfm3-tool", "tool-calls")
+    assert data["settings"] == "all of it"
+    win.close()
+
+
 def test_project_window_clean_fill_shows_no_note(window, seeded, qapp):
     win = window.open_project_window("lfm3-tool", "tool-calls")
     qapp.processEvents()
@@ -1121,21 +1181,25 @@ def test_project_window_clean_fill_shows_no_note(window, seeded, qapp):
 
 
 def test_project_window_retarget_never_mixes_projects(window, seeded, qapp):
-    # Project A holds rank 16; project B has a corrupt rank. Opening
-    # A then retargeting to B must show B (default rank + note),
-    # never A's values under B's name.
-    seeded.create_project("lfm3-tool", "second", settings={"rank": 16})
+    # Project A holds a display name and dataset; project B has a
+    # corrupt display name. Opening A then retargeting to B must
+    # show B (blank display + note, B's dataset), never A's values
+    # under B's name.
+    seeded.create_project("lfm3-tool", "second",
+                          display_name="Second Project",
+                          dataset_ref="second.jsonl")
     _corrupt_project_json(
         seeded, "lfm3-tool", "tool-calls",
-        lambda d: d["settings"].update(rank="high"),
+        lambda d: d.update(display_name=42),
     )
     win = window.open_project_window("lfm3-tool", "second")
     qapp.processEvents()
-    assert win.rank_spin.value() == 16
+    assert win.display_edit.text() == "Second Project"
+    assert win.dataset_edit.text() == "second.jsonl"
     win.retarget("tool-calls")
     qapp.processEvents()
-    assert win.rank_spin.value() == 8
-    assert win.display_edit.text() == "tool-calls"
+    assert win.display_edit.text() == ""
+    assert win.dataset_edit.text() == "forge-traces.jsonl"
     assert "stored value was invalid" in win._load_note.text()
     win.close()
 
@@ -1221,12 +1285,17 @@ def test_import_package_last_resort_catch(
     assert window.tree.topLevelItemCount() == 1
 
 
-# -- T44 (pin): Train panel above the fold at 1100x680 ---------------
+# -- T15: the hero tile above the fold at 1100x680 --------------------
 
 
-def test_train_panel_above_fold_at_default_size(window, qapp):
+def test_hero_above_fold_at_default_size(window, qapp):
+    """T15 Done: pick a model, pick a job, press Go, no scrolling
+    at 1100x680."""
     from PySide6.QtWidgets import QScrollArea
 
+    # The seeded store has no weights and no trained project, so
+    # the first-run checklist covers the bento: dismiss it first.
+    window._checklist_dismiss()
     window.resize(1100, 680)
     window.set_session("lfm3-tool", "tool-calls")
     window.show()
@@ -1238,7 +1307,12 @@ def test_train_panel_above_fold_at_default_size(window, qapp):
     viewport = scrolls[0].viewport()
     height = viewport.height()
     assert height > 0
-    for widget in (window.train_start_btn, window.train_progress):
+    for widget in (
+        window.model_combo,
+        window.job_buttons["train"],
+        window.job_buttons["distill"],
+        window.go_btn,
+    ):
         top = widget.mapTo(viewport, widget.rect().topLeft()).y()
         bottom = top + widget.height()
         assert 0 <= top, f"{widget} starts above the viewport"
@@ -1270,6 +1344,7 @@ def test_t71_no_promise_text_in_gui(window, qapp):
 
 
 # -- T123 (pin): no-project session shows no settings values ---------
+# -- T16: no settings values anywhere, with a session set too --------
 
 
 def test_no_project_session_has_no_settings(window, qapp, monkeypatch):
@@ -1281,6 +1356,15 @@ def test_no_project_session_has_no_settings(window, qapp, monkeypatch):
     assert "rank" not in summary.lower()
     assert "learning rate" not in summary.lower()
     assert "epochs" not in summary.lower()
+    # With a session set, the summary still names no settings (T16).
+    _select_session(window)
+    qapp.processEvents()
+    summary = window.session_summary.text()
+    assert "rank" not in summary.lower()
+    assert "learning rate" not in summary.lower()
+    assert "epochs" not in summary.lower()
+    assert "batch" not in summary.lower()
+    assert "sequence" not in summary.lower()
     # And there is no project window to open with no selection.
     # (The "pick a project first" warning is a modal dialog: stub
     # it out, or the test waits at it forever.)
@@ -1592,31 +1676,28 @@ def test_rename_project_prompts_on_dirty_window(window, seeded, monkeypatch, qap
 # -- T8: Start training is gated on a clean save ---------------------
 
 
-def test_start_training_refused_on_bad_lr_in_open_window(
+def test_start_training_refused_on_unsaved_edits_in_open_window(
     window, seeded, monkeypatch, qapp
 ):
+    """T8, kept for the fields the window still shows (T16 took the
+    learning-rate field away): an open Project window with unsaved
+    edits stops the start when the user says wait (Cancel)."""
     from PySide6.QtWidgets import QMessageBox
 
     _select_session(window)
     proj_win = window.open_project_window("lfm3-tool", "tool-calls")
     qapp.processEvents()
-    proj_win.lr_edit.setText("abc")
-    warnings = []
+    proj_win.dataset_edit.setText("other-data.jsonl")
     monkeypatch.setattr(
-        QMessageBox, "warning", lambda *a, **k: warnings.append(a[2])
-    )
-    monkeypatch.setattr(
-        QMessageBox, "question", lambda *a, **k: QMessageBox.Save
+        QMessageBox, "question", lambda *a, **k: QMessageBox.Cancel
     )
     window.start_training()
     qapp.processEvents()
-    # The warning appeared and no worker started: nothing trains on
-    # stale settings behind an error.
-    assert warnings == ["Learning rate must be a number, like 0.0002."]
+    # No worker started: nothing trains on stale edits.
     assert window._train_worker is None
     assert "Starting training" not in window.train_log.toPlainText()
-    # The form still holds the bad value, for the user to fix.
-    assert proj_win.lr_edit.text() == "abc"
+    # The form still holds the edit, for the user to deal with.
+    assert proj_win.dataset_edit.text() == "other-data.jsonl"
     assert proj_win.isVisible()
 
 
@@ -1631,7 +1712,7 @@ def test_start_training_saves_dirty_window_then_starts(
     _select_session(window)
     proj_win = window.open_project_window("lfm3-tool", "tool-calls")
     qapp.processEvents()
-    proj_win.rank_spin.setValue(16)
+    proj_win.dataset_edit.setText("new-data.jsonl")
     monkeypatch.setattr(
         QMessageBox, "question", lambda *a, **k: QMessageBox.Save
     )
@@ -1641,7 +1722,9 @@ def test_start_training_saves_dirty_window_then_starts(
     window.start_training()
     qapp.processEvents()
     # The edits were saved first, then the worker started on them.
-    assert seeded.get_project("lfm3-tool", "tool-calls")["settings"]["rank"] == 16
+    assert seeded.get_project("lfm3-tool", "tool-calls")["dataset_ref"] == (
+        "new-data.jsonl"
+    )
     assert window._train_worker is not None
     assert "Starting training" in window.train_log.toPlainText()
 
@@ -1674,7 +1757,7 @@ def test_create_profile_warns_on_uninstalled_tag(window, seeded, monkeypatch):
         lambda *a, **k: asked.append(a[2]) or QMessageBox.Yes,
     )
     dialog = NewProfileDialog(window)
-    dialog.model_combo.setCurrentText("not-a-real-model:99")
+    dialog.type_edit.setText("not-a-real-model:99")
     window._create_profile_from(dialog)
     assert len(asked) == 1
     assert "not installed locally" in asked[0]
@@ -1697,7 +1780,7 @@ def test_create_profile_warns_then_cancel_keeps_nothing(
         QMessageBox, "question", lambda *a, **k: QMessageBox.No
     )
     dialog = NewProfileDialog(window)
-    dialog.model_combo.setCurrentText("not-a-real-model:99")
+    dialog.type_edit.setText("not-a-real-model:99")
     window._create_profile_from(dialog)
     assert [p["name"] for p in seeded.list_profiles()] == ["lfm3-tool"]
 
@@ -1715,7 +1798,7 @@ def test_create_profile_duplicate_tag_note(window, seeded, monkeypatch):
         lambda *a, **k: asked.append(a[2]) or QMessageBox.Yes,
     )
     dialog = NewProfileDialog(window)
-    dialog.model_combo.setCurrentText("lfm3:1.7b")
+    dialog.type_edit.setText("lfm3:1.7b")
     window._create_profile_from(dialog)
     assert len(asked) == 1
     assert "already uses this tag" in asked[0]
@@ -1739,7 +1822,7 @@ def test_create_profile_installed_tag_no_warning(window, seeded, monkeypatch):
 
     monkeypatch.setattr(QMessageBox, "question", _no_prompt)
     dialog = NewProfileDialog(window)
-    dialog.model_combo.setCurrentText("qwen3.5:4b")
+    dialog.type_edit.setText("qwen3.5:4b")
     window._create_profile_from(dialog)
     assert seeded.get_profile("qwen3-5-4b")["ollama_tag"] == "qwen3.5:4b"
 
@@ -1886,3 +1969,577 @@ def test_start_training_on_draft_project_does_not_ask(
     assert asked == []
     assert window._train_worker is not None
     assert window._train_worker._force is False
+
+
+# -- v0.11.0: the UI rebuild (T15-T20) ---------------------------------
+
+# -- T15: the bento main screen ---------------------------------------
+
+
+def test_hero_no_job_picked_by_default(window):
+    """U6: select nothing by default — no job is picked, Go waits."""
+    assert window._picked_job() is None
+    for button in window.job_buttons.values():
+        assert not button.isChecked()
+    assert not window.go_btn.isEnabled()
+
+
+def test_job_pick_is_exclusive(window):
+    window.job_buttons["train"].click()
+    assert window.job_buttons["train"].isChecked()
+    assert window._picked_job() == "train"
+    window.job_buttons["sleep"].click()
+    assert not window.job_buttons["train"].isChecked()
+    assert window.job_buttons["sleep"].isChecked()
+    assert window._picked_job() == "sleep"
+
+
+def test_go_disabled_without_model(window):
+    # A job pick alone is not enough: no model, no Go.
+    window.job_buttons["train"].click()
+    assert not window.go_btn.isEnabled()
+
+
+def test_model_combo_sets_session(window, seeded, qapp):
+    seeded.create_profile(
+        "qwen3-vision", ollama_tag="qwen3-vl:2b-instruct",
+        display_name="Qwen3 Vision",
+    )
+    window.refresh_session()
+    qapp.processEvents()
+    assert window.model_combo.count() == 2
+    window.model_combo.setCurrentIndex(1)
+    qapp.processEvents()
+    assert window._current_profile == "qwen3-vision"
+    assert window._current_project is None
+    assert window.tree.currentItem() is not None
+
+
+def test_go_train_starts_training(window, monkeypatch, qapp):
+    import stella.gui as gui_mod
+    import stella.train as train_mod
+
+    _select_session(window)
+    window._checklist_dismiss()
+    monkeypatch.setattr(train_mod, "training_deps_missing", lambda: [])
+    monkeypatch.setattr(window, "_weights_offer", lambda profile: True)
+    monkeypatch.setattr(gui_mod.TrainWorker, "run", lambda self: None)
+    window.job_buttons["train"].click()
+    assert window.go_btn.isEnabled()
+    window.go_btn.click()
+    qapp.processEvents()
+    assert window._train_worker is not None
+    assert "Starting training" in window.train_log.toPlainText()
+    # Go is disabled while the job runs.
+    assert not window.go_btn.isEnabled()
+
+
+def test_go_sleep_starts_sleep(window, monkeypatch, qapp):
+    import stella.gui as gui_mod
+    import stella.train as train_mod
+
+    _select_session(window)
+    window._checklist_dismiss()
+    monkeypatch.setattr(train_mod, "training_deps_missing", lambda: [])
+    monkeypatch.setattr(window, "_weights_offer", lambda profile: True)
+    monkeypatch.setattr(gui_mod.SleepWorker, "run", lambda self: None)
+    window.job_buttons["sleep"].click()
+    window.go_btn.click()
+    qapp.processEvents()
+    assert window._sleep_worker is not None
+    assert "Starting sleep cycle..." in window.train_log.toPlainText()
+
+
+def test_go_with_no_project_asks_for_name_inline(window, seeded, qapp):
+    """T15 + T113: project creation is part of the pick — an inline
+    name row, not a second window."""
+    window.set_session("lfm3-tool", None)
+    window._checklist_dismiss()
+    qapp.processEvents()
+    window.job_buttons["train"].click()
+    window.go_btn.click()
+    qapp.processEvents()
+    # No project yet: the name row appears inline, nothing created.
+    assert window.project_name_row.isVisible()
+    assert len(seeded.list_projects("lfm3-tool")) == 1
+    window.project_name_edit.setText("my-first")
+    window.go_btn.click()
+    qapp.processEvents()
+    # The second Go press creates the project — then asks for
+    # examples, inline too (a new project has no dataset).
+    data = seeded.get_project("lfm3-tool", "my-first")
+    assert data["name"] == "my-first"
+    assert window.dataset_prompt_row.isVisible()
+    assert not window.project_name_row.isVisible()
+    window.dataset_sample_btn.click()
+    qapp.processEvents()
+    data = seeded.get_project("lfm3-tool", "my-first")
+    assert data["dataset_ref"] == "sample-tool-calls.jsonl"
+    # The sample is set, so Go pressed on: training starts, and
+    # the sandbox has no training packages, so it logs the hint.
+    assert "install-training.sh" in window.train_log.toPlainText()
+
+
+def test_go_requant_runs(window, monkeypatch, qapp):
+    """Make smaller runs with no typing: defaults, log lines."""
+    from PySide6.QtTest import QTest
+
+    import stella.requant as requant_mod
+
+    def _fake_requant(tag):
+        assert tag == "lfm3:1.7b"
+        return {
+            "source_tag": "lfm3:1.7b",
+            "source_bytes": 2_000_000_000,
+            "source_quant": "Q4_K_M",
+            "new_tag": "lfm3:1.7b-q4_k_m",
+            "quant": "Q4_K_M",
+            "output_bytes": 1_900_000_000,
+            "ollama_run": "ollama run lfm3:1.7b-q4_k_m",
+        }
+
+    monkeypatch.setattr(requant_mod, "requant_model", _fake_requant)
+    _select_session(window)
+    window._checklist_dismiss()
+    window.job_buttons["requant"].click()
+    window.go_btn.click()
+    qapp.processEvents()
+    for _ in range(100):
+        if "Made a smaller copy" in window.train_log.toPlainText():
+            break
+        QTest.qWait(50)
+    log = window.train_log.toPlainText()
+    assert "Making a smaller copy of lfm3:1.7b..." in log
+    assert "Made a smaller copy: lfm3:1.7b-q4_k_m" in log
+    assert "ollama run lfm3:1.7b-q4_k_m" in log
+
+
+def test_go_distill_opens_dialog(window, qapp):
+    """Teach a small model opens the one small dialog (teacher +
+    prompts file); rejecting it starts nothing."""
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QApplication
+
+    _select_session(window)
+    window._checklist_dismiss()
+
+    def close_dialog():
+        dlg = QApplication.activeModalWidget()
+        assert dlg is not None
+        assert dlg.windowTitle() == "Teach a small model"
+        dlg.reject()
+
+    QTimer.singleShot(100, close_dialog)
+    window.job_buttons["distill"].click()
+    window.go_btn.click()
+    qapp.processEvents()
+    assert window._job_worker is None
+
+
+def test_distill_dialog_needs_teacher_and_prompts(window, monkeypatch):
+    import stella.gui as gui_mod
+    from PySide6.QtWidgets import QFileDialog
+
+    from stella.gui import DistillDialog
+
+    monkeypatch.setattr(
+        gui_mod, "list_models", lambda: ["lfm3:1.7b", "qwen3.5:4b"]
+    )
+    dialog = DistillDialog(window)
+    assert dialog.start_btn.isEnabled() is False
+    assert dialog.teacher_combo.currentIndex() == -1
+    dialog.teacher_combo.setCurrentIndex(0)
+    assert dialog.start_btn.isEnabled() is False  # no prompts yet
+    monkeypatch.setattr(
+        QFileDialog, "getOpenFileName",
+        lambda *a, **k: ("/tmp/prompts.txt", ""),
+    )
+    dialog.prompts_btn.click()
+    assert dialog.prompts_path() == "/tmp/prompts.txt"
+    assert dialog.start_btn.isEnabled() is True
+    dialog.close()
+
+
+# -- T16: settings leave every screen ---------------------------------
+
+
+def test_no_settings_strings_in_any_visible_text(window, qapp):
+    """T16 Done: no rank, learning rate, epochs, batch size, or
+    sequence length string visible anywhere in the UI."""
+    _select_session(window)
+    project_win = window.open_project_window("lfm3-tool", "tool-calls")
+    profile_win = window.open_profile_window("lfm3-tool")
+    settings_win = window.open_settings_window()
+    howto_win = window.open_howto_window()
+    chat = window.open_chat_window()
+    qapp.processEvents()
+    texts = _visible_texts(window)
+    assert texts, "no visible strings collected at all"
+    for text in texts:
+        lowered = text.lower()
+        for word in (
+            "rank",
+            "learning rate",
+            "epochs",
+            "batch size",
+            "sequence length",
+        ):
+            assert word not in lowered, f"{word!r} visible: {text!r}"
+    # Every How to Use topic, not just the selected one.
+    from stella.howto import TOPICS
+
+    for title, body in TOPICS:
+        lowered = body.lower()
+        for word in (
+            "rank",
+            "learning rate",
+            "epochs",
+            "batch size",
+            "sequence length",
+        ):
+            assert word not in lowered, f"{word!r} in How to Use: {title}"
+    project_win.close()
+    profile_win.close()
+    settings_win.close()
+    howto_win.close()
+    chat.close()
+
+
+# -- T17: first-run setup checklist -----------------------------------
+
+
+def _empty_window(qapp, store, settings):
+    from stella.gui import MainWindow
+
+    win = MainWindow(store=store, settings=settings)
+    win.show()
+    qapp.processEvents()
+    return win
+
+
+def test_empty_store_shows_checklist(qapp, store, settings):
+    win = _empty_window(qapp, store, settings)
+    assert win.checklist_widget.isVisible()
+    assert not win.bento_widget.isVisible()
+    titles = [
+        w.text() for w in win.checklist_widget.findChildren(QLabel)
+    ]
+    assert "First steps" in titles
+    # Step 1 is the only one open; the rest unlock in order.
+    assert win.check_steps[0][1].isEnabled()
+    assert not win.check_steps[1][1].isEnabled()
+    assert not win.check_steps[2][1].isEnabled()
+    # The misleading old text is gone.
+    assert "pick a project in the list" not in win.session_summary.text()
+    win.close()
+
+
+def test_checklist_steps_tick_as_setup_progresses(
+    qapp, store, settings, monkeypatch
+):
+    import stella.gui as gui_mod
+
+    win = _empty_window(qapp, store, settings)
+    store.create_profile("lfm3-tool", ollama_tag="lfm3:1.7b")
+    win.refresh_session()
+    qapp.processEvents()
+    assert win.check_steps[0][0].text() == "✓"
+    assert win.check_steps[1][1].isEnabled()
+    assert not win.check_steps[2][1].isEnabled()
+    # Weights ready: step 2 ticks, step 3 opens.
+    monkeypatch.setattr(
+        gui_mod.provision, "weights_status",
+        lambda s, profile: {
+            "repo": "test/repo", "state": "ready",
+            "size_bytes": 2_000_000_000, "path": "/tmp/weights",
+        },
+    )
+    win.refresh_session()
+    qapp.processEvents()
+    assert win.check_steps[1][0].text() == "✓"
+    assert win.check_steps[2][1].isEnabled()
+    # A trained project ticks step 3 and the checklist is done:
+    # the bento shows, and the checklist never comes back.
+    store.create_project("lfm3-tool", "tool-calls")
+    store.update_project("lfm3-tool", "tool-calls", status="trained")
+    win.refresh_session()
+    qapp.processEvents()
+    assert not win.checklist_widget.isVisible()
+    assert win.bento_widget.isVisible()
+    assert settings.value("checklist/done") in (True, "true")
+    win.close()
+
+
+def test_checklist_dismiss_never_returns(qapp, store, settings):
+    win = _empty_window(qapp, store, settings)
+    assert win.checklist_widget.isVisible()
+    win.check_dismiss_btn.click()
+    qapp.processEvents()
+    assert not win.checklist_widget.isVisible()
+    assert win.bento_widget.isVisible()
+    win.close()
+    # A fresh window with the same settings still shows the bento.
+    second = _empty_window(qapp, store, settings)
+    assert not second.checklist_widget.isVisible()
+    assert second.bento_widget.isVisible()
+    second.close()
+
+
+def test_checklist_hidden_while_job_runs(qapp, store, settings):
+    from unittest.mock import Mock
+
+    win = _empty_window(qapp, store, settings)
+    assert win.checklist_widget.isVisible()
+    # A running job always shows the bento, so the user can watch.
+    worker = Mock()
+    worker.isRunning.return_value = True
+    win._train_worker = worker
+    win._refresh_checklist()
+    assert not win.checklist_widget.isVisible()
+    assert win.bento_widget.isVisible()
+    win._train_worker = None
+    win._refresh_checklist()
+    assert win.checklist_widget.isVisible()
+    win.close()
+
+
+def test_checklist_run_tiny_creates_project_and_starts(
+    qapp, store, settings, monkeypatch
+):
+    import stella.gui as gui_mod
+
+    win = _empty_window(qapp, store, settings)
+    store.create_profile("lfm3-tool", ollama_tag="lfm3:1.7b")
+    monkeypatch.setattr(
+        gui_mod.provision, "weights_status",
+        lambda s, profile: {
+            "repo": "test/repo", "state": "ready",
+            "size_bytes": 2_000_000_000, "path": "/tmp/weights",
+        },
+    )
+    win.refresh_session()
+    qapp.processEvents()
+    assert win.check_steps[2][1].isEnabled()
+    win.check_steps[2][1].click()
+    qapp.processEvents()
+    # The tiny first training is a real run: a real project with
+    # the sample dataset, and training started on it.
+    data = store.get_project("lfm3-tool", "first-steps")
+    assert data["dataset_ref"] == "sample-tool-calls.jsonl"
+    assert win._current_project == "first-steps"
+    assert "install-training.sh" in win.train_log.toPlainText()
+    win.close()
+
+
+# -- T18: model picker with fit guidance ------------------------------
+
+
+def _patched_dialog(window, monkeypatch):
+    """A NewProfileDialog with two known models on a known PC."""
+    import stella.gui as gui_mod
+
+    from stella.gui import NewProfileDialog
+
+    monkeypatch.setattr(
+        gui_mod, "list_models", lambda: ["lfm3:1.7b", "qwen3.5:8b"]
+    )
+    monkeypatch.setattr(
+        gui_mod, "list_model_sizes",
+        lambda: {"lfm3:1.7b": 2_000_000_000, "qwen3.5:8b": 5_000_000_000},
+    )
+    monkeypatch.setattr(
+        gui_mod, "measure_pc", lambda: {"ram_available_gb": 8.0}
+    )
+    return NewProfileDialog(window)
+
+
+def test_new_profile_dialog_opens_with_no_selection(window, monkeypatch):
+    dialog = _patched_dialog(window, monkeypatch)
+    assert dialog.model_list.currentRow() == -1
+    assert dialog.model_list.currentItem() is None
+    assert dialog.name_note.text() == ""
+    assert not dialog.details_label.isVisible()
+    assert dialog.type_edit.text() == ""
+    assert not dialog.picked_model()
+    dialog.close()
+
+
+def test_new_profile_dialog_rows_show_what_and_fit(window, monkeypatch):
+    dialog = _patched_dialog(window, monkeypatch)
+    assert dialog.model_list.count() == 2
+    first = dialog.model_list.item(0).text()
+    assert first.startswith("lfm3:1.7b\n")
+    assert "Liquid AI" in first  # what it does
+    assert "Fits this PC." in first  # fit verdict
+    second = dialog.model_list.item(1).text()
+    assert second.startswith("qwen3.5:8b\n")
+    assert "Too big for this PC." in second
+    dialog.close()
+
+
+def test_new_profile_tap_shows_details(window, monkeypatch, qapp):
+    dialog = _patched_dialog(window, monkeypatch)
+    dialog.show()
+    qapp.processEvents()
+    dialog.model_list.setCurrentRow(0)
+    assert dialog.details_label.isVisible()
+    details = dialog.details_label.text()
+    assert "6.4 GB" in details  # RAM to train
+    assert "1.9 GB" in details  # download size
+    assert dialog.name_note.text() == "Profile name: lfm3-1-7b"
+    dialog.close()
+
+
+def test_new_profile_enter_with_no_pick_does_nothing(
+    window, seeded, monkeypatch
+):
+    """T18: Enter with nothing picked does nothing — no profile,
+    no warning, no dialog accepted."""
+    from PySide6.QtCore import QEvent, Qt
+    from PySide6.QtGui import QKeyEvent
+
+    dialog = _patched_dialog(window, monkeypatch)
+    warnings = []
+    monkeypatch.setattr(window, "_warn", warnings.append)
+    dialog.type_edit.returnPressed.emit()
+    assert [p["name"] for p in seeded.list_profiles()] == ["lfm3-tool"]
+    event = QKeyEvent(
+        QEvent.Type.KeyPress, Qt.Key_Return, Qt.KeyboardModifier.NoModifier
+    )
+    dialog.keyPressEvent(event)
+    # The key is swallowed (accepted, not passed on to the default
+    # button): nothing happens.
+    assert event.isAccepted()
+    assert warnings == []
+    assert [p["name"] for p in seeded.list_profiles()] == ["lfm3-tool"]
+    dialog.close()
+
+
+# -- T19: real menu bar, actions disabled when they cannot work -------
+
+
+def test_menu_actions_disabled_without_selection(qapp, store, settings):
+    win = _empty_window(qapp, store, settings)
+    assert win._menu_action_new_profile.isEnabled()
+    assert not win._menu_action_new_project.isEnabled()
+    assert not win._menu_action_export.isEnabled()
+    assert win._menu_action_import.isEnabled()
+    assert win._menu_action_settings.isEnabled()
+    assert not win._menu_action_profiles.isEnabled()
+    assert not win._menu_action_projects.isEnabled()
+    assert win._menu_action_howto.isEnabled()
+    assert win._menu_action_chat.isEnabled()
+    win.close()
+
+
+def test_menu_actions_enable_with_session(window, qapp):
+    # A profile but no project: project actions wait.
+    window.set_session("lfm3-tool", None)
+    qapp.processEvents()
+    assert window._menu_action_new_project.isEnabled()
+    assert window._menu_action_profiles.isEnabled()
+    assert not window._menu_action_export.isEnabled()
+    assert not window._menu_action_projects.isEnabled()
+    # A full session: everything works.
+    _select_session(window)
+    qapp.processEvents()
+    for action in (
+        window._menu_action_new_profile,
+        window._menu_action_new_project,
+        window._menu_action_export,
+        window._menu_action_import,
+        window._menu_action_settings,
+        window._menu_action_profiles,
+        window._menu_action_projects,
+        window._menu_action_howto,
+        window._menu_action_chat,
+    ):
+        assert action.isEnabled(), action.text()
+
+
+# -- T20: live training graphs and stats -------------------------------
+
+
+def test_loss_curve_draws_points(window, qapp):
+    _select_session(window)
+    window._checklist_dismiss()
+    window._on_train_progress(5, 20, 2.5, 1)
+    window._on_train_progress(10, 20, 2.0, 1)
+    assert window.loss_curve.points == [(5, 2.5), (10, 2.0)]
+    # It paints, not just stores: grab a real frame.
+    pixmap = window.loss_curve.grab()
+    assert not pixmap.isNull()
+    assert pixmap.width() > 0
+    assert pixmap.height() > 0
+
+
+def test_run_stats_update_with_progress(window):
+    _select_session(window)
+    assert window.stat_speed.text() == "Speed: not started"
+    assert window.stat_ram.text() == "RAM: not started"
+    assert window.stat_time_left.text() == "Time left: not started"
+    assert window.stat_epoch.text() == "Epoch: not started"
+    window._on_train_progress(5, 20, 2.5, 1)
+    window._on_train_progress(10, 20, 2.0, 1)
+    assert "steps a minute" in window.stat_speed.text()
+    assert "GB used" in window.stat_ram.text()
+    assert "Time left: about" in window.stat_time_left.text()
+    assert window.stat_epoch.text() == "Epoch 1"
+
+
+def test_last_run_curve_rebuilds_from_log(window, seeded, qapp):
+    import json
+
+    log_path = seeded.project_dir("lfm3-tool", "tool-calls") / "train_log.jsonl"
+    records = [
+        {"step": 1, "total_steps": 3, "epoch": 1, "loss": 2.5, "lr": 0.0002},
+        {"step": 2, "total_steps": 3, "epoch": 1, "loss": 2.0, "lr": 0.0002},
+        {"step": 2, "epoch": 1, "val_loss": 1.9},  # val: skipped
+        {"step": 3, "total_steps": 3, "epoch": 1, "loss": 1.8, "lr": 0.0002},
+    ]
+    log_path.write_text(
+        "".join(json.dumps(r) + "\n" for r in records)
+    )
+    _select_session(window)
+    qapp.processEvents()
+    assert window.loss_curve.points == [(1, 2.5), (2, 2.0), (3, 1.8)]
+    # Switch away: the curve clears (no log there). Switch back:
+    # the last run's curve is still there.
+    seeded.create_project("lfm3-tool", "second")
+    window.set_session("lfm3-tool", "second")
+    qapp.processEvents()
+    assert window.loss_curve.points == []
+    window.set_session("lfm3-tool", "tool-calls")
+    qapp.processEvents()
+    assert window.loss_curve.points == [(1, 2.5), (2, 2.0), (3, 1.8)]
+
+
+def test_finished_run_keeps_curve(window, qapp):
+    _select_session(window)
+    window._on_train_progress(5, 20, 2.5, 1)
+    window._on_train_progress(10, 20, 2.0, 1)
+    window._on_train_finished(True, "Training done.")
+    qapp.processEvents()
+    assert window.loss_curve.points == [(5, 2.5), (10, 2.0)]
+    assert "Step 10 / 20" in window.train_loss.text()
+    assert window.stat_time_left.text() == "Time left: done"
+
+
+def test_loss_curve_widget_unit(qapp):
+    from stella.gui import LossCurveWidget
+
+    widget = LossCurveWidget()
+    widget.show()
+    qapp.processEvents()
+    assert widget.points == []
+    widget.append_point(1, 2.0, 10)
+    widget.append_point(2, 1.9, 10)
+    assert widget.points == [(1, 2.0), (2, 1.9)]
+    # A step decrease starts a new run: the old curve is replaced.
+    widget.append_point(1, 2.1, 10)
+    assert widget.points == [(1, 2.1)]
+    widget.set_points([(1, 2.5), (2, 2.0)], 3)
+    assert widget.points == [(1, 2.5), (2, 2.0)]
+    widget.clear()
+    assert widget.points == []
+    widget.close()

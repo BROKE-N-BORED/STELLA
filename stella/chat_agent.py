@@ -16,7 +16,7 @@ sleep, provision, model). There is no new training logic here.
 
 The training template (TEMPLATE_STEPS) is the shape every training
 platform needs, whatever the model: goal, base model, data,
-settings, train, check, export, test and back up. The agent walks
+recipe, train, check, export, test and back up. The agent walks
 one step at a time, asks only for what it needs, and fills the rest
 with defaults. On "just do it" it runs the whole template.
 
@@ -32,7 +32,7 @@ import re
 from .distill import distill_dataset
 from .gguf import export_gguf
 from .howto import topic_text, topic_titles
-from .model import SETTING_RULES, StellaError, Store, slug_from_model
+from .model import StellaError, Store, slug_from_model
 from .ollama import OllamaError, list_models
 from .probe import probe_gate, probe_project
 from .providers import ProviderError, make_chat_fn
@@ -64,10 +64,10 @@ TEMPLATE_STEPS: list[tuple[str, str, str]] = [
     ("model", "Base model", "Pick the base model to start from."),
     ("data", "Data", "The examples it learns from, or the sample dataset."),
     (
-        "settings",
-        "Settings",
-        "Rank, learning rate, epochs, batch size, sequence length. "
-        "The defaults are fine for this PC.",
+        "recipe",
+        "Recipe",
+        "Stella measures this PC and picks the training recipe. "
+        "Nothing to set.",
     ),
     ("train", "Train", "Run the training. This takes hours on CPU."),
     ("check", "Check", "Validation loss and the refusal probe."),
@@ -75,19 +75,10 @@ TEMPLATE_STEPS: list[tuple[str, str, str]] = [
     ("test", "Test and back up", "Try the tuned model, keep the export safe."),
 ]
 
-# The defaults the template uses when the user does not pick settings.
-DEFAULT_CHAT_SETTINGS = {
-    "rank": 8,
-    "learning_rate": 0.0002,
-    "epochs": 3,
-    "batch_size": 1,
-    "max_seq_len": 1024,
-}
-
-# Settings the chat may change, with their allowed ranges. Anything
-# outside these is refused in plain words, never stored. The table
-# lives in the model (SETTING_RULES) — one rule, everywhere — and is
-# imported here so the chat and the model can never drift apart.
+# No settings tool (T16): Stella measures the PC and picks the training
+# recipe itself, and nothing in the UI reads or writes the stored
+# settings. The model still validates them (SETTING_RULES in model.py),
+# for imports and stored projects — the chat just never touches them.
 
 TOOL_BLOCK_RE = re.compile(r"```tool\s*\n?(.*?)\n?```", re.DOTALL)
 
@@ -106,12 +97,6 @@ TOOL_HELP = {
     "create_project": (
         'create_project {"profile": "lfm3-tool", "name": "tool-calls"}: '
         "make a project. Leave name out and one is picked for you."
-    ),
-    "set_project_settings": (
-        'set_project_settings {"profile": "lfm3-tool", "project": '
-        '"tool-calls", "settings": {"rank": 8, "epochs": 3}}: change '
-        "training settings. Defaults: rank 8, learning rate 0.0002, "
-        "epochs 3, batch size 1, max seq len 1024."
     ),
     "set_project_dataset": (
         'set_project_dataset {"profile": "lfm3-tool", "project": '
@@ -179,7 +164,6 @@ TOOL_NARRATION = {
     "create_profile": "Setting up a profile for that model...",
     "list_projects": "Looking at the projects...",
     "create_project": "Making the project...",
-    "set_project_settings": "Setting the training settings...",
     "set_project_dataset": "Setting the dataset...",
     "use_sample_dataset": "Using the sample dataset...",
     "start_training": "Training started. This takes hours on CPU.",
@@ -526,63 +510,17 @@ class ChatAgent:
             name = self._unique_slug("fine-tune", taken)
         else:
             name = self._unique_slug(slug_from_model(name), taken)
-        created = self.store.create_project(profile, name)
+        self.store.create_project(profile, name)
         self.current_profile = profile
         self.current_project = name
-        # Report the settings this PC actually picked (auto-config
-        # shrinks them on a short-RAM machine), not the usual ones.
-        picked = created["settings"]
+        # The backend picked the training recipe for this PC
+        # (auto-config); the numbers are never named here (T16).
         return (
-            f"Created project {name!r} in profile {profile!r}, with the "
-            f"usual settings for this PC (rank {picked['rank']}, "
-            f"learning rate {picked['learning_rate']}, "
-            f"{picked['epochs']} epochs). "
+            f"Created project {name!r} in profile {profile!r}. Stella "
+            "picked the training recipe for this PC. "
             "Next step: the data. Say which dataset file to use, or say "
             "use the sample dataset."
         )
-
-    def _tool_set_project_settings(self, args: dict) -> str:
-        session = self._need_session(args)
-        if isinstance(session, str):
-            return session
-        profile, project = session
-        settings = args.get("settings")
-        if not isinstance(settings, dict) or not settings:
-            return "Tell me which settings to change, for example rank 8."
-        cleaned: dict = {}
-        for key, value in settings.items():
-            if key == "method":
-                if value != "lora":
-                    return (
-                        "Full fine-tuning does not run on this PC. LoRA "
-                        "is the only method, and it is already set."
-                    )
-                cleaned["method"] = "lora"
-                continue
-            rule = SETTING_RULES.get(key)
-            if rule is None:
-                return (
-                    f"There is no setting called {key!r}. The settings "
-                    f"are: {', '.join(sorted(SETTING_RULES))}."
-                )
-            kind, low, high = rule
-            if isinstance(value, bool):
-                return f"{key} must be a number, not {value!r}."
-            try:
-                number = int(value) if kind == "int" else float(value)
-            except (TypeError, ValueError):
-                return f"{key} must be a number, not {value!r}."
-            if kind == "int" and float(value) != number:
-                return f"{key} must be a whole number, not {value!r}."
-            if not low <= number <= high:
-                return (
-                    f"{key} must be between {low} and {high}, "
-                    f"not {value!r}."
-                )
-            cleaned[key] = number
-        self.store.update_project(profile, project, settings=cleaned)
-        changed = ", ".join(f"{k} {v}" for k, v in cleaned.items())
-        return f"Settings for {project!r} are now: {changed}."
 
     def _tool_set_project_dataset(self, args: dict) -> str:
         session = self._need_session(args)
@@ -645,8 +583,7 @@ class ChatAgent:
             kind = event.get("type")
             if kind == "started":
                 self._progress(
-                    f"Training: {event['total_steps']} steps, "
-                    f"LoRA rank {event['rank']}."
+                    f"Training: {event['total_steps']} steps."
                 )
             elif kind == "step":
                 seen["steps"] = event["step"]

@@ -1,13 +1,18 @@
-"""STELLA window — native Qt, menu + tree + session.
+"""STELLA window — native Qt, menu bar + tree + bento main screen.
 
-The main window is deliberately uncluttered: a menu button top-left,
-a collapsible profile tree on the left (each profile expands to show
-its projects), and the current training session on the right (profile
-and project summary, model download, Train panel, Sleep panel).
+The main window is deliberately uncluttered: a real menu bar
+(File, View, Help), a collapsible profile tree on the left (each
+profile expands to show its projects), and the bento main screen
+on the right. One hero tile holds the whole flow: pick a model,
+pick a job, press go. Small tiles carry the glanceable numbers
+(RAM, speed, progress, the loss curve) once a job runs. The train
+details (dataset, checkpoints, log, export, probe, sleep cycles)
+live below, in the scroll.
 
-Everything else lives in its own window, reached from the menu or by
-double-clicking a tree row: Profile window, Project window, Settings
-window, How to Use window. Nothing is crammed into one window.
+Everything else lives in its own window, reached from the menu or
+by double-clicking a tree row: Profile window, Project window,
+Settings window, How to Use window. Nothing is crammed into one
+window.
 
 Clicking a project in the tree SETS THE TRAINING SESSION (current
 profile + project). The session is remembered across restarts via
@@ -17,7 +22,9 @@ on first run nothing is selected at all.
 No web UI. Network: localhost Ollama, the Hugging Face download,
 and any cloud chat provider the user adds a key for (Groq, Gemini,
 or a custom service). No "&" in any visible label — Qt eats a bare
-& as a mnemonic marker. No em-dashes in any visible text.
+& as a mnemonic marker. No em-dashes in any visible text. No
+training settings anywhere on screen — the backend measures the PC
+and picks them (see autoconfig.py); the user never sees them.
 
 Training, sleep, and model downloads run off the GUI thread (worker
 threads / a subprocess) so the window stays responsive; they only
@@ -29,6 +36,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -42,14 +50,16 @@ from PySide6.QtCore import (
     Signal,
 )
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
-from PySide6.QtGui import QBrush, QColor, QDesktopServices, QIcon
+from PySide6.QtGui import QBrush, QColor, QDesktopServices, QIcon, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -57,13 +67,11 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
-    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QScrollArea,
-    QSpinBox,
     QSplitter,
     QTextBrowser,
     QTreeWidget,
@@ -74,19 +82,19 @@ from PySide6.QtWidgets import (
 
 from . import export as export_mod
 from . import provision
+from .autoconfig import measure_pc, ram_usage_gb
 from .chat_agent import ChatAgent
 from .debug_log import DebugLogger, check_ollama
 from .howto import topic_text, topic_titles
 from .model import (
-    DEFAULT_SETTINGS,
-    SETTING_RULES,
     STELLA_VERSION,
     StellaError,
     Store,
     metamorph_problem,
     slug_from_model,
 )
-from .ollama import list_models, ollama_url
+from .model_info import describe_model, fit_verdict, fits_this_pc
+from .ollama import list_model_sizes, list_models, ollama_url
 from .providers import (
     PROVIDERS,
     get_custom_config,
@@ -106,40 +114,6 @@ def _help_label(text):
     label.setStyleSheet("color: #9a9a9a; font-size: 11px;")
     label.setWordWrap(True)
     return label
-
-
-def _coerce_int(value, low, high, default):
-    """A stored int setting, or the default when it is not a usable
-    whole number in range. Returns (value, was_valid). Used by the
-    Project window fill (T21): a bad stored value falls back to the
-    default instead of aborting the fill mid-way."""
-    try:
-        if isinstance(value, bool):
-            return default, False
-        number = int(value)
-        if float(value) != number:
-            return default, False
-    except (TypeError, ValueError, OverflowError):
-        return default, False
-    if not low <= number <= high:
-        return default, False
-    return number, True
-
-
-def _coerce_float(value, low, high, default):
-    """A stored float setting, or the default when it is not a real
-    number in range. Returns (value, was_valid)."""
-    import math
-
-    try:
-        if isinstance(value, bool):
-            return default, False
-        number = float(value)
-    except (TypeError, ValueError, OverflowError):
-        return default, False
-    if not math.isfinite(number) or not low <= number <= high:
-        return default, False
-    return number, True
 
 
 def _weights_label(status):
@@ -238,47 +212,124 @@ class NewProfileDialog(QDialog):
     front. It doesn't anymore: the profile's name comes from the model,
     and role/display/base can be changed later in the profile window.
     One pick, one button.
+
+    The pick itself (T18): a list of the models installed on this PC,
+    one row each — the tag, one plain line for what it does, and
+    whether it fits this PC (size plus RAM, from the backend's PC
+    measurement). Details beyond that appear on tap, not up front.
+    Nothing is selected when the dialog opens (U6: select nothing by
+    default, ever), the profile-name note appears only after a pick,
+    and Enter with no pick does nothing. A model can also be typed
+    by hand (a Hugging Face repo, or any tag) — typing clears the
+    list pick, so there is ever one pick at a time.
     """
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("New profile")
         self.installed_models = list_models()
+        sizes = list_model_sizes()
+        measurement = measure_pc()
+        ram_free = measurement.get("ram_available_gb")
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("Pick a model: that is all it takes."))
-        self.model_combo = QComboBox()
-        self.model_combo.setEditable(True)
-        if self.installed_models:
-            self.model_combo.addItems(self.installed_models)
-        self.model_combo.setPlaceholderText(
-            "Pick an installed model, or type a Hugging Face repo "
-            "like LiquidAI/LFM3-1.7B"
-        )
-        self.model_combo.setMinimumWidth(420)
-        layout.addWidget(self.model_combo)
+        self.model_list = QListWidget()
+        self.model_list.setMinimumWidth(520)
+        self.model_list.setMinimumHeight(180)
+        for tag in self.installed_models:
+            fits = fits_this_pc(tag, ram_free)
+            if fits is True:
+                verdict = "Fits this PC."
+            elif fits is False:
+                verdict = "Too big for this PC."
+            else:
+                verdict = "Fit unknown. Stella will check."
+            item = QListWidgetItem(
+                f"{tag}\n{describe_model(tag)} {verdict}"
+            )
+            item.setData(Qt.UserRole, tag)
+            self.model_list.addItem(item)
+        self.model_list.setCurrentRow(-1)
+        layout.addWidget(self.model_list)
+        self._sizes = sizes
+        self._ram_free = ram_free
+        self.details_label = QLabel("")
+        self.details_label.setWordWrap(True)
+        self.details_label.setVisible(False)
+        layout.addWidget(self.details_label)
         if not self.installed_models:
             layout.addWidget(
                 QLabel("Ollama is not answering. Type the model by hand.")
             )
+        self.type_edit = QLineEdit()
+        self.type_edit.setPlaceholderText(
+            "Or type a model name or Hugging Face repo, "
+            "like LiquidAI/LFM3-1.7B"
+        )
+        layout.addWidget(self.type_edit)
         self.name_note = QLabel("")
         layout.addWidget(self.name_note)
-        self.model_combo.currentTextChanged.connect(self._update_name_note)
-        self._update_name_note()
+        self.model_list.currentItemChanged.connect(self._on_row_picked)
+        self.model_list.itemActivated.connect(lambda _i: self._maybe_create())
+        self.type_edit.textChanged.connect(self._on_typed)
+        # Enter in the type field creates only when there is a pick:
+        # Enter with no pick does nothing (T18).
+        self.type_edit.returnPressed.connect(self._maybe_create)
         buttons = QHBoxLayout()
         self.create_btn = QPushButton("Create profile")
         self.create_btn.setDefault(True)
-        # Enter in the model field must create too: the combo's line
-        # edit eats Return, so the default button alone won't fire.
-        self.model_combo.lineEdit().returnPressed.connect(
-            self.create_btn.click
-        )
         self.cancel_btn = QPushButton("Cancel")
         buttons.addWidget(self.create_btn)
         buttons.addWidget(self.cancel_btn)
         layout.addLayout(buttons)
 
+    def picked_model(self) -> str:
+        """The picked model: the tapped row, or the typed text."""
+        current = self.model_list.currentItem()
+        if current is not None:
+            return str(current.data(Qt.UserRole) or "").strip()
+        return self.type_edit.text().strip()
+
+    def _on_row_picked(self, current, _previous):
+        if current is None:
+            self.details_label.setText("")
+            self.details_label.setVisible(False)
+        else:
+            tag = str(current.data(Qt.UserRole) or "")
+            self.details_label.setText(
+                fit_verdict(tag, self._sizes.get(tag), self._ram_free)
+            )
+            self.details_label.setVisible(True)
+            if self.type_edit.text():
+                self.type_edit.blockSignals(True)
+                self.type_edit.setText("")
+                self.type_edit.blockSignals(False)
+        self._update_name_note()
+
+    def _on_typed(self):
+        if self.type_edit.text().strip():
+            self.model_list.setCurrentRow(-1)
+        self._update_name_note()
+
+    def _maybe_create(self):
+        """Enter (or a double-tap on a row) creates only when a model
+        is picked. With no pick it does nothing at all — no warning,
+        no create (T18)."""
+        if self.picked_model():
+            self.create_btn.click()
+
+    def keyPressEvent(self, event):
+        # Enter with no pick does nothing — not even the default
+        # button. (The type field eats its own Return, so this is
+        # the list-focus path; _maybe_create covers the rest.)
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            if not self.picked_model():
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
     def _update_name_note(self):
-        model = self.model_combo.currentText().strip()
+        model = self.picked_model()
         if model:
             self.name_note.setText(
                 f"Profile name: {slug_from_model(model)}"
@@ -291,7 +342,7 @@ class TrainWorker(QThread):
     """Runs train_project off the GUI thread. Only talks to the
     window through signals — never touches a widget directly."""
 
-    progress = Signal(int, int, float)  # step, total, loss
+    progress = Signal(int, int, float, int)  # step, total, loss, epoch
     log = Signal(str)
     finished = Signal(bool, str)  # ok, message
 
@@ -311,14 +362,14 @@ class TrainWorker(QThread):
     def _event(self, event: dict):
         kind = event.get("type")
         if kind == "started":
-            self.progress.emit(0, event["total_steps"], 0.0)
+            self.progress.emit(0, event["total_steps"], 0.0, 0)
             self.log.emit(
-                f"Training: {event['total_steps']} steps, "
-                f"LoRA rank {event['rank']}."
+                f"Training: {event['total_steps']} steps."
             )
         elif kind == "step":
             self.progress.emit(
-                event["step"], event["total_steps"], float(event["loss"])
+                event["step"], event["total_steps"], float(event["loss"]),
+                int(event.get("epoch") or 0),
             )
             self.log.emit(
                 f"step {event['step']}/{event['total_steps']} "
@@ -375,7 +426,7 @@ class SleepWorker(QThread):
     as TrainWorker — progress goes to the shared bar, everything
     else to the log."""
 
-    progress = Signal(int, int, float)  # step, total, loss
+    progress = Signal(int, int, float, int)  # step, total, loss, epoch
     log = Signal(str)
     finished = Signal(bool, str)  # ok, message
 
@@ -409,7 +460,8 @@ class SleepWorker(QThread):
             self.log.emit(f"Dreaming skipped: {event['reason']}")
         elif kind == "step":
             self.progress.emit(
-                event["step"], event["total_steps"], float(event["loss"])
+                event["step"], event["total_steps"], float(event["loss"]),
+                int(event.get("epoch") or 0),
             )
             self.log.emit(
                 f"step {event['step']}/{event['total_steps']} "
@@ -624,6 +676,104 @@ class DownloadManager(QObject):
             self.finished.emit(
                 False, "The download stopped unexpectedly. Try again."
             )
+
+
+class LossCurveWidget(QWidget):
+    """The loss curve (T20): a plain QPainter line chart, middle-
+    school science software feel. Redrawn on new points only —
+    set_points / append_point call update(), and nothing repaints
+    per frame. The last run's curve stays drawn after the run
+    finishes; an empty series draws a plain hint line."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumHeight(100)
+        self._points: list[tuple[int, float]] = []
+        self._total = 0
+
+    @property
+    def points(self):
+        return list(self._points)
+
+    def set_points(self, points, total=0):
+        """Replace the whole series (a project switch rebuilds it
+        from the run log)."""
+        self._points = list(points)
+        self._total = total
+        self.update()
+
+    def append_point(self, step: int, loss: float, total: int = 0):
+        """One live point from the worker's progress signal. A step
+        at or below the last step means a new run started: the old
+        curve goes away and the new one begins."""
+        if self._points and step <= self._points[-1][0]:
+            self._points = []
+        self._points.append((step, loss))
+        if total:
+            self._total = total
+        # Cap the series so a very long run never grows the paint
+        # list without bound: keep every second point past 1000.
+        if len(self._points) > 1000:
+            self._points = self._points[::2]
+        self.update()
+
+    def clear(self):
+        self._points = []
+        self._total = 0
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        try:
+            rect = self.rect()
+            painter.fillRect(rect, QColor("#fafafa"))
+            if not self._points:
+                painter.setPen(QPen(QColor("#888888")))
+                painter.drawText(
+                    rect, Qt.AlignCenter,
+                    "No run yet. The loss curve draws here while a job runs.",
+                )
+                return
+            left, right = 44, rect.width() - 10
+            top, bottom = 10, rect.height() - 22
+            if right <= left or bottom <= top:
+                return
+            steps = [p[0] for p in self._points]
+            losses = [p[1] for p in self._points]
+            max_step = max(self._total, steps[-1], 1)
+            low, high = min(losses), max(losses)
+            if high - low < 1e-9:
+                high = low + 1.0
+            # Axes.
+            painter.setPen(QPen(QColor("#bbbbbb")))
+            painter.drawLine(left, top, left, bottom)
+            painter.drawLine(left, bottom, right, bottom)
+            painter.setPen(QPen(QColor("#888888")))
+            painter.drawText(2, top + 4, f"{high:.2f}")
+            painter.drawText(2, bottom + 4, f"{low:.2f}")
+            painter.drawText(left, rect.height() - 6, "step 0")
+            end_label = f"step {max_step}"
+            painter.drawText(
+                right - painter.fontMetrics().horizontalAdvance(end_label),
+                rect.height() - 6,
+                end_label,
+            )
+            # The curve.
+            painter.setPen(QPen(QColor("#2e7d32"), 2))
+            prev = None
+            for step, loss in self._points:
+                x = left + (right - left) * step / max_step
+                y = bottom - (bottom - top) * (loss - low) / (high - low)
+                point = (int(x), int(y))
+                if prev is not None:
+                    painter.drawLine(prev[0], prev[1], point[0], point[1])
+                prev = point
+            # The latest point, marked.
+            if prev is not None:
+                painter.setPen(QPen(QColor("#2e7d32"), 4))
+                painter.drawPoint(prev[0], prev[1])
+        finally:
+            painter.end()
 
 
 # ---------------------------------------------------------------- windows
@@ -915,11 +1065,14 @@ class ProfileWindow(QDialog):
 
 
 class ProjectWindow(QDialog):
-    """One project's settings, in its own window.
+    """One project's details, in its own window.
 
     Reached from the menu (Projects) or by double-clicking a project
     row in the tree. Every field explains itself in plain words
-    underneath. Saving here is what training reads: there is no
+    underneath. Name, dataset, and notes stay here; the training
+    settings used to live here too, and they don't anymore (T16):
+    the backend measures the PC and picks them, so the user never
+    sees them. Saving here is what training reads: there is no
     project form in the main window anymore.
     """
 
@@ -930,7 +1083,7 @@ class ProjectWindow(QDialog):
         self._project = project
         self.setWindowTitle(f"Project: {profile} / {project}")
         self.setMinimumWidth(480)
-        self.resize(520, 640)
+        self.resize(520, 480)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -940,8 +1093,8 @@ class ProjectWindow(QDialog):
         outer = QVBoxLayout(self)
         outer.addWidget(scroll)
 
-        # Shown when a stored value was invalid and the usual value
-        # is displayed instead (T21). Hidden on a clean fill.
+        # Shown when a stored value was invalid and a blank is
+        # displayed instead (T21). Hidden on a clean fill.
         self._load_note = QLabel("")
         self._load_note.setWordWrap(True)
         self._load_note.setVisible(False)
@@ -951,21 +1104,6 @@ class ProjectWindow(QDialog):
         self.display_edit = QLineEdit()
         self.dataset_edit = QLineEdit()
         self.dataset_edit.setPlaceholderText("path or name of the training data")
-        self.method_combo = QComboBox()
-        self.method_combo.addItems(["lora", "full"])
-        # "full" is not feasible on this PC (and train.py never reads
-        # the setting anyway — it always trains LoRA). Keep it listed
-        # so old projects still show it, but nobody new can pick it.
-        self.method_combo.model().item(1).setEnabled(False)
-        self.rank_spin = QSpinBox()
-        self.rank_spin.setRange(1, 64)
-        self.lr_edit = QLineEdit()
-        self.epochs_spin = QSpinBox()
-        self.epochs_spin.setRange(1, 100)
-        self.batch_spin = QSpinBox()
-        self.batch_spin.setRange(1, 32)
-        self.seq_spin = QSpinBox()
-        self.seq_spin.setRange(128, 32768)
         form.addRow("Display name", self.display_edit)
         form.addRow("", _help_label("Just a label for the project list."))
         form.addRow("Dataset", self.dataset_edit)
@@ -973,44 +1111,8 @@ class ProjectWindow(QDialog):
             "",
             _help_label(
                 "The training data: a .jsonl file of examples. "
-                "The Train panel has a sample to try."
+                "The main screen has a sample to try."
             ),
-        )
-        form.addRow("Method", self.method_combo)
-        form.addRow(
-            "",
-            _help_label(
-                "lora trains a small adapter on top of the base: the "
-                "only way that fits this PC."
-            ),
-        )
-        form.addRow("LoRA rank", self.rank_spin)
-        form.addRow(
-            "",
-            _help_label(
-                "How big the adapter is. 8 is the usual. Bigger learns "
-                "more but uses more RAM."
-            ),
-        )
-        form.addRow("Learning rate", self.lr_edit)
-        form.addRow(
-            "",
-            _help_label(
-                "How big each training step is. 0.0002 is the usual. "
-                "Bigger learns faster but can wreck the model."
-            ),
-        )
-        form.addRow("Epochs", self.epochs_spin)
-        form.addRow(
-            "", _help_label("How many full passes over the data. 3 is the usual.")
-        )
-        form.addRow("Batch size", self.batch_spin)
-        form.addRow(
-            "", _help_label("Examples per training step. 1 fits this PC. Leave it.")
-        )
-        form.addRow("Max seq len", self.seq_spin)
-        form.addRow(
-            "", _help_label("Longest example, in tokens. 1024 is the usual.")
         )
         layout.addLayout(form)
 
@@ -1060,12 +1162,6 @@ class ProjectWindow(QDialog):
         for signal in (
             self.display_edit.textChanged,
             self.dataset_edit.textChanged,
-            self.method_combo.currentTextChanged,
-            self.rank_spin.valueChanged,
-            self.lr_edit.textChanged,
-            self.epochs_spin.valueChanged,
-            self.batch_spin.valueChanged,
-            self.seq_spin.valueChanged,
             self.notes_edit.textChanged,
         ):
             signal.connect(self._on_edited)
@@ -1095,12 +1191,6 @@ class ProjectWindow(QDialog):
         return {
             "display": self.display_edit.text(),
             "dataset": self.dataset_edit.text(),
-            "method": self.method_combo.currentText(),
-            "rank": self.rank_spin.value(),
-            "lr": self.lr_edit.text(),
-            "epochs": self.epochs_spin.value(),
-            "batch": self.batch_spin.value(),
-            "seq": self.seq_spin.value(),
             "notes": self.notes_edit.toPlainText(),
         }
 
@@ -1179,12 +1269,12 @@ class ProjectWindow(QDialog):
     def _load(self):
         """Fill the form from the stored project, defensively (T21).
 
-        A setting of the wrong type or outside its range falls back
-        to its default and the panel says so — the fill never aborts
-        mid-way, so the panel can never show another project's
-        values mixed with this one's, and Save can never write such
-        a mix back. The fallback defaults and ranges match the
-        model validation (T6)."""
+        A value of the wrong type falls back to blank and the panel
+        says so — the fill never aborts mid-way, so the panel can
+        never show another project's values mixed with this one's.
+        The stored training settings are not shown here at all
+        (T16): the backend picks them, and Save never touches them.
+        """
         self._loading = True
         try:
             self._load_inner()
@@ -1210,61 +1300,14 @@ class ProjectWindow(QDialog):
             dataset = ""
             bad.append("dataset")
         self.dataset_edit.setText(dataset)
-        settings = p.get("settings", {})
-        if not isinstance(settings, dict):
-            settings = {}
-            bad.append("settings")
-        method = settings.get("method", "lora")
-        idx = self.method_combo.findText(method) if isinstance(method, str) else -1
-        if idx < 0:
-            idx = 0
-            bad.append("method")
-        self.method_combo.setCurrentIndex(idx)
-        rank, ok = _coerce_int(
-            settings.get("rank", DEFAULT_SETTINGS["rank"]),
-            *SETTING_RULES["rank"][1:],
-            DEFAULT_SETTINGS["rank"],
-        )
-        if not ok:
-            bad.append("rank")
-        self.rank_spin.setValue(rank)
-        lr, ok = _coerce_float(
-            settings.get("learning_rate", DEFAULT_SETTINGS["learning_rate"]),
-            *SETTING_RULES["learning_rate"][1:],
-            DEFAULT_SETTINGS["learning_rate"],
-        )
-        if not ok:
-            bad.append("learning rate")
-        self.lr_edit.setText(str(lr))
-        epochs, ok = _coerce_int(
-            settings.get("epochs", DEFAULT_SETTINGS["epochs"]),
-            *SETTING_RULES["epochs"][1:],
-            DEFAULT_SETTINGS["epochs"],
-        )
-        if not ok:
-            bad.append("epochs")
-        self.epochs_spin.setValue(epochs)
-        batch, ok = _coerce_int(
-            settings.get("batch_size", DEFAULT_SETTINGS["batch_size"]),
-            *SETTING_RULES["batch_size"][1:],
-            DEFAULT_SETTINGS["batch_size"],
-        )
-        if not ok:
-            bad.append("batch size")
-        self.batch_spin.setValue(batch)
-        seq, ok = _coerce_int(
-            settings.get("max_seq_len", DEFAULT_SETTINGS["max_seq_len"]),
-            *SETTING_RULES["max_seq_len"][1:],
-            DEFAULT_SETTINGS["max_seq_len"],
-        )
-        if not ok:
-            bad.append("max seq len")
-        self.seq_spin.setValue(seq)
-        self.notes_edit.setPlainText(notes if isinstance(notes, str) else "")
+        if not isinstance(notes, str):
+            notes = ""
+            bad.append("notes")
+        self.notes_edit.setPlainText(notes)
         if bad:
             self._load_note.setText(
-                "A stored value was invalid, so the usual value is "
-                "shown instead. Saving keeps the usual value."
+                "A stored value was invalid, so a blank is shown "
+                "instead. Saving keeps the blank."
             )
             self._load_note.setVisible(True)
         else:
@@ -1273,28 +1316,14 @@ class ProjectWindow(QDialog):
 
     def save(self) -> bool:
         """Save the project form. Returns True on success, False when
-        nothing was saved (bad learning rate, store error)."""
-        try:
-            lr = float(self.lr_edit.text().strip() or "0.0002")
-        except ValueError:
-            QMessageBox.warning(
-                self, "Stella", "Learning rate must be a number, like 0.0002."
-            )
-            return False
+        nothing was saved (store error). The stored training
+        settings are untouched: the backend owns them (T16)."""
         try:
             self._main.store.update_project(
                 self._profile,
                 self._project,
                 display_name=self.display_edit.text().strip(),
                 dataset_ref=self.dataset_edit.text().strip(),
-                settings={
-                    "method": self.method_combo.currentText(),
-                    "rank": self.rank_spin.value(),
-                    "learning_rate": lr,
-                    "epochs": self.epochs_spin.value(),
-                    "batch_size": self.batch_spin.value(),
-                    "max_seq_len": self.seq_spin.value(),
-                },
             )
             self._main.store.write_notes(
                 self._profile,
@@ -1315,7 +1344,9 @@ class ProjectWindow(QDialog):
 class SettingsWindow(QDialog):
     """Settings, in its own window. Only settings that exist are
     shown: where Stella keeps its files, whether Ollama is answering,
-    and the defaults new projects start with. Nothing invented."""
+    the chat model, and the AI providers. Training settings are not
+    here (T16): the backend measures the PC and picks them, so the
+    user never sees them."""
 
     def __init__(self, main, parent=None):
         super().__init__(parent)
@@ -1359,25 +1390,6 @@ class SettingsWindow(QDialog):
             _help_label(
                 "Ollama runs the models on this PC. Stella uses it for "
                 "dreaming and the refusal probe, not for training."
-            )
-        )
-
-        layout.addWidget(QLabel("Training defaults"))
-        form = QFormLayout()
-        form.addRow("LoRA rank", QLabel(str(DEFAULT_SETTINGS["rank"])))
-        form.addRow(
-            "Learning rate", QLabel(str(DEFAULT_SETTINGS["learning_rate"]))
-        )
-        form.addRow("Epochs", QLabel(str(DEFAULT_SETTINGS["epochs"])))
-        form.addRow("Batch size", QLabel(str(DEFAULT_SETTINGS["batch_size"])))
-        form.addRow(
-            "Max seq len", QLabel(str(DEFAULT_SETTINGS["max_seq_len"]))
-        )
-        layout.addLayout(form)
-        layout.addWidget(
-            _help_label(
-                "New projects start with these. Change them per project "
-                "in the project window."
             )
         )
 
@@ -1749,7 +1761,7 @@ class ChatWindow(QDialog):
             "Stella",
             "Hi. Tell me what you want to train, and I will set it up "
             "and run it for you. Or say just do it and I will run the "
-            "whole thing with the usual settings.",
+            "whole thing.",
         )
         if not self._main.chat_model:
             self._ask_for_model()
@@ -1914,6 +1926,86 @@ class ChatWindow(QDialog):
         super().closeEvent(event)
 
 
+class DistillDialog(QDialog):
+    """Teach a small model (T15): pick a teacher from the installed
+    models and pick a prompts file. No typing: a combo pick and a
+    file pick. Start stays disabled until both are picked."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Teach a small model")
+        self._prompts_path: str | None = None
+        layout = QVBoxLayout(self)
+        layout.addWidget(
+            QLabel(
+                "A teacher model answers your prompts, and its "
+                "answers become this project's examples."
+            )
+        )
+        layout.addWidget(QLabel("Teacher"))
+        self.teacher_combo = QComboBox()
+        self.teacher_combo.setPlaceholderText("Pick a teacher model")
+        models = list_models()
+        if models:
+            self.teacher_combo.addItems(models)
+        self.teacher_combo.setCurrentIndex(-1)
+        self.teacher_combo.currentIndexChanged.connect(self._refresh_start)
+        layout.addWidget(self.teacher_combo)
+        layout.addWidget(
+            _help_label(
+                "The teacher should be a bigger model than the "
+                "student. Its answers are only as good as it is."
+            )
+        )
+        layout.addWidget(QLabel("Prompts"))
+        pick_row = QHBoxLayout()
+        self.prompts_btn = QPushButton("Pick a prompts file")
+        self.prompts_btn.clicked.connect(self._pick_prompts)
+        pick_row.addWidget(self.prompts_btn)
+        self.prompts_label = QLabel("No file picked.")
+        self.prompts_label.setWordWrap(True)
+        pick_row.addWidget(self.prompts_label, 1)
+        layout.addLayout(pick_row)
+        layout.addWidget(
+            _help_label(
+                "A plain text file, one prompt per line: the jobs "
+                "you want the small model to learn."
+            )
+        )
+        buttons = QHBoxLayout()
+        self.start_btn = QPushButton("Start")
+        self.start_btn.setDefault(True)
+        self.start_btn.setEnabled(False)
+        self.start_btn.clicked.connect(self.accept)
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.clicked.connect(self.reject)
+        buttons.addWidget(self.start_btn)
+        buttons.addWidget(self.cancel_btn)
+        layout.addLayout(buttons)
+
+    def teacher(self) -> str:
+        return self.teacher_combo.currentText().strip()
+
+    def prompts_path(self) -> str | None:
+        return self._prompts_path
+
+    def _refresh_start(self):
+        self.start_btn.setEnabled(
+            self.teacher_combo.currentIndex() >= 0
+            and self._prompts_path is not None
+        )
+
+    def _pick_prompts(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Pick a prompts file", str(Path.home()),
+            "Text files (*.txt);;All files (*)",
+        )
+        if path:
+            self._prompts_path = path
+            self.prompts_label.setText(path)
+            self._refresh_start()
+
+
 class MainWindow(QMainWindow):
     def __init__(self, store: Store | None = None, settings=None):
         super().__init__()
@@ -1933,6 +2025,11 @@ class MainWindow(QMainWindow):
         self._current_project: str | None = None
         self._train_panel_project: tuple | None = None
         self._building = False
+        # Live-run stats for the glanceable card (T20): when the
+        # current run's first live point arrived, and which step it
+        # was, so speed and time left are measured, not guessed.
+        self._run_started_at: float | None = None
+        self._run_start_step = 0
         self._train_worker: TrainWorker | None = None
         self._sleep_worker: SleepWorker | None = None
         self._job_worker: JobWorker | None = None
@@ -2008,10 +2105,9 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         outer = QVBoxLayout(central)
 
+        self._build_menu_bar()
+
         header_row = QHBoxLayout()
-        self.menu_button = QPushButton("Menu")
-        self.menu_button.setMenu(self._build_menu())
-        header_row.addWidget(self.menu_button)
         header = QLabel("STELLA: shape a base model into its proper job")
         header.setStyleSheet("font-size: 16px; font-weight: bold; padding: 6px 2px;")
         header_row.addWidget(header, 1)
@@ -2050,58 +2146,147 @@ class MainWindow(QMainWindow):
         self.splitter.setSizes([260, 840])
         self.statusBar().showMessage("Stella ready.")
 
-    def _build_menu(self):
-        menu = QMenu(self)
-        self.menu = menu
-        self._menu_action_profiles = menu.addAction(
-            "Profiles", self.open_current_profile_window
-        )
-        self._menu_action_new_profile = menu.addAction(
+    def _build_menu_bar(self):
+        """A real menu bar (T19, U38): File, View, Help. The Menu
+        button is gone. Actions that need a selection start disabled
+        and are refreshed by _refresh_menu_state; nothing answers
+        with a "pick one first" modal anymore."""
+        bar = self.menuBar()
+        file_menu = bar.addMenu("File")
+        self._menu_action_new_profile = file_menu.addAction(
             "New profile...", self.new_profile
         )
-        menu.addSeparator()
-        self._menu_action_projects = menu.addAction(
-            "Projects", self.open_current_project_window
-        )
-        self._menu_action_new_project = menu.addAction(
+        self._menu_action_new_project = file_menu.addAction(
             "New project...", self.new_project
         )
-        menu.addSeparator()
-        self._menu_action_export = menu.addAction(
+        self._menu_action_export = file_menu.addAction(
             "Export project...", self.export_project
         )
-        self._menu_action_import = menu.addAction(
+        self._menu_action_import = file_menu.addAction(
             "Import package...", self.import_package
         )
-        menu.addSeparator()
-        self._menu_action_settings = menu.addAction(
+        file_menu.addSeparator()
+        self._menu_action_settings = file_menu.addAction(
             "Settings...", self.open_settings_window
         )
-        self._menu_action_howto = menu.addAction(
+        view_menu = bar.addMenu("View")
+        self._menu_action_profiles = view_menu.addAction(
+            "Profiles", self.open_current_profile_window
+        )
+        self._menu_action_projects = view_menu.addAction(
+            "Projects", self.open_current_project_window
+        )
+        help_menu = bar.addMenu("Help")
+        self._menu_action_howto = help_menu.addAction(
             "How to Use Stella...", self.open_howto_window
         )
-        self._menu_action_chat = menu.addAction(
+        self._menu_action_chat = help_menu.addAction(
             "Chat...", self.open_chat_window
         )
-        return menu
+
+    def _refresh_menu_state(self):
+        """Grey out the actions that cannot work yet (T19): New
+        project and Profiles need a profile; Export and Projects
+        need a project. The rest always work."""
+        has_profile = bool(self._current_profile)
+        has_session = bool(self._current_profile and self._current_project)
+        self._menu_action_new_project.setEnabled(has_profile)
+        self._menu_action_profiles.setEnabled(has_profile)
+        self._menu_action_export.setEnabled(has_session)
+        self._menu_action_projects.setEnabled(has_session)
 
     def _build_session(self):
+        """The main area holds two pages (T15, T17): the first-run
+        checklist and the bento main screen. Only one is visible at
+        a time; _refresh_checklist picks. The bento is one hero tile
+        (pick a model, pick a job, press go), the glanceable card
+        (loss curve, speed, RAM, time left, epoch — T20), and the
+        train details below, in the scroll."""
+        self._build_checklist()
+        self._build_bento()
+
+    def _build_checklist(self):
+        """The first-run setup checklist (T17): three steps, each a
+        button that does the step; a finished step ticks. Shown
+        instead of the bento while the first setup is incomplete.
+        Dismissible, and dismissal is forever (QSettings)."""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        title = QLabel("First steps")
+        title.setStyleSheet("font-size: 14px; font-weight: bold;")
+        layout.addWidget(title)
+        layout.addWidget(
+            QLabel("Three steps and Stella is running. Each step is one button.")
+        )
+        self.check_steps: list[tuple[QLabel, QPushButton]] = []
+        steps = [
+            ("1. Pick a model", self.new_profile),
+            ("2. Get its weights", self._checklist_download),
+            ("3. Run a tiny first training", self._checklist_run_tiny),
+        ]
+        for text, slot in steps:
+            row = QHBoxLayout()
+            tick = QLabel("")
+            tick.setMinimumWidth(20)
+            row.addWidget(tick)
+            btn = QPushButton(text)
+            btn.clicked.connect(slot)
+            row.addWidget(btn, 1)
+            layout.addLayout(row)
+            self.check_steps.append((tick, btn))
+        layout.addWidget(
+            _help_label(
+                "The tiny first training uses the 20-example sample "
+                "dataset: a real run, not a setup wizard."
+            )
+        )
+        self.check_dismiss_btn = QPushButton("Not now")
+        self.check_dismiss_btn.clicked.connect(self._checklist_dismiss)
+        layout.addWidget(self.check_dismiss_btn)
+        layout.addStretch(1)
+        self.checklist_widget = page
+        self.session_layout.addWidget(page)
+
+    def _build_bento(self):
+        """The bento main screen (T15): hero tile, glanceable card,
+        train details."""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+
         self.session_title = QLabel("No training session yet.")
         self.session_title.setStyleSheet("font-size: 14px; font-weight: bold;")
-        self.session_layout.addWidget(self.session_title)
+        layout.addWidget(self.session_title)
         self.session_summary = QLabel("")
         self.session_summary.setWordWrap(True)
-        self.session_layout.addWidget(self.session_summary)
+        layout.addWidget(self.session_summary)
 
-        # Model download row.
-        self.session_layout.addWidget(QLabel("Model weights"))
+        # -- hero tile: pick a model, pick a job, press go ---------
+        hero = QFrame()
+        hero.setFrameShape(QFrame.StyledPanel)
+        hero_layout = QVBoxLayout(hero)
+
+        hero_layout.addWidget(QLabel("1. Pick a model"))
+        model_row = QHBoxLayout()
+        self.model_combo = QComboBox()
+        self.model_combo.setPlaceholderText("Pick a model")
+        self.model_combo.currentIndexChanged.connect(
+            self._on_model_combo_changed
+        )
+        model_row.addWidget(self.model_combo, 1)
+        self.new_model_btn = QPushButton("New model...")
+        self.new_model_btn.clicked.connect(self.new_profile)
+        model_row.addWidget(self.new_model_btn)
+        hero_layout.addLayout(model_row)
+
+        # The picked model's weights: state, progress, download.
         self.download_status_label = QLabel("")
         self.download_status_label.setWordWrap(True)
-        self.session_layout.addWidget(self.download_status_label)
+        hero_layout.addWidget(self.download_status_label)
         self.download_progress = QProgressBar()
         self.download_progress.setMaximum(100)
         self.download_progress.setValue(0)
-        self.session_layout.addWidget(self.download_progress)
+        hero_layout.addWidget(self.download_progress)
         dl_btns = QHBoxLayout()
         self.download_btn = QPushButton("Download model")
         self.download_btn.clicked.connect(
@@ -2113,8 +2298,8 @@ class MainWindow(QMainWindow):
         dl_btns.addWidget(self.download_btn)
         dl_btns.addWidget(self.download_cancel_btn)
         dl_btns.addStretch(1)
-        self.session_layout.addLayout(dl_btns)
-        self.session_layout.addWidget(
+        hero_layout.addLayout(dl_btns)
+        hero_layout.addWidget(
             _help_label(
                 "Downloads the base weights from Hugging Face. If it "
                 "stops, press Download again: it picks up where it left "
@@ -2122,22 +2307,98 @@ class MainWindow(QMainWindow):
             )
         )
 
-        # Train panel: dataset, Start / Pause / Resume, progress,
-        # checkpoints, GGUF export, refusal probe, log.
-        self.session_layout.addWidget(QLabel("Train"))
-        dataset_btns = QHBoxLayout()
-        self.train_pick_dataset_btn = QPushButton("Pick dataset file")
-        self.train_pick_dataset_btn.clicked.connect(self.pick_dataset)
-        self.train_sample_btn = QPushButton("Use sample dataset")
-        self.train_sample_btn.clicked.connect(self.use_sample_dataset)
-        dataset_btns.addWidget(self.train_pick_dataset_btn)
-        dataset_btns.addWidget(self.train_sample_btn)
-        self.session_layout.addLayout(dataset_btns)
-        train_btns = QHBoxLayout()
-        self.train_start_btn = QPushButton("Start training")
-        self.train_start_btn.clicked.connect(
-            lambda: self.start_training(resume=False)
+        hero_layout.addWidget(QLabel("2. Pick a job"))
+        job_row = QHBoxLayout()
+        self._job_group = QButtonGroup(self)
+        self._job_group.setExclusive(True)
+        self.job_buttons: dict[str, QPushButton] = {}
+        for key, text in (
+            ("train", "Train"),
+            ("sleep", "Sleep"),
+            ("requant", "Make smaller"),
+            ("distill", "Teach a small model"),
+        ):
+            btn = QPushButton(text)
+            btn.setCheckable(True)
+            btn.setProperty("job", key)
+            self._job_group.addButton(btn)
+            job_row.addWidget(btn)
+            self.job_buttons[key] = btn
+        self._job_group.buttonClicked.connect(lambda _b: self._refresh_go())
+        hero_layout.addLayout(job_row)
+        self.project_label = QLabel("No project yet.")
+        self.project_label.setWordWrap(True)
+        hero_layout.addWidget(self.project_label)
+
+        hero_layout.addWidget(QLabel("3. Press go"))
+        self.go_btn = QPushButton("Go")
+        self.go_btn.setMinimumHeight(40)
+        self.go_btn.setStyleSheet("font-size: 15px; font-weight: bold;")
+        self.go_btn.clicked.connect(self._on_go)
+        self.go_btn.setEnabled(False)
+        hero_layout.addWidget(self.go_btn)
+
+        # Inline project naming (T15 supersedes T113: the job picker
+        # is project creation now, and the name becomes part of the
+        # pick). Shown only when Go is pressed with no project —
+        # no second window.
+        self.project_name_row = QWidget()
+        name_row = QHBoxLayout(self.project_name_row)
+        name_row.setContentsMargins(0, 0, 0, 0)
+        name_row.addWidget(QLabel("Name this job:"))
+        self.project_name_edit = QLineEdit()
+        self.project_name_edit.setPlaceholderText("my-first-training")
+        self.project_name_edit.returnPressed.connect(self._on_go)
+        name_row.addWidget(self.project_name_edit, 1)
+        self.project_name_row.setVisible(False)
+        hero_layout.addWidget(self.project_name_row)
+
+        # Inline dataset prompt: Train and Sleep need examples. When
+        # Go is pressed with no dataset, this row offers the sample
+        # or a file pick, in place — no modal, no failure.
+        self.dataset_prompt_row = QWidget()
+        ds_row = QHBoxLayout(self.dataset_prompt_row)
+        ds_row.setContentsMargins(0, 0, 0, 0)
+        ds_row.addWidget(QLabel("No examples yet."))
+        self.dataset_sample_btn = QPushButton("Use the sample")
+        self.dataset_sample_btn.clicked.connect(
+            self._dataset_prompt_use_sample
         )
+        ds_row.addWidget(self.dataset_sample_btn)
+        self.dataset_pick_btn = QPushButton("Pick a file")
+        self.dataset_pick_btn.clicked.connect(self._dataset_prompt_pick)
+        ds_row.addWidget(self.dataset_pick_btn)
+        ds_row.addStretch(1)
+        self.dataset_prompt_row.setVisible(False)
+        hero_layout.addWidget(self.dataset_prompt_row)
+
+        layout.addWidget(hero)
+
+        # -- glanceable card: the loss curve and the live numbers --
+        card = QFrame()
+        card.setFrameShape(QFrame.StyledPanel)
+        card_layout = QVBoxLayout(card)
+        card_layout.addWidget(QLabel("How it is going"))
+        self.loss_curve = LossCurveWidget()
+        card_layout.addWidget(self.loss_curve)
+        stats_row = QHBoxLayout()
+        self.stat_speed = QLabel("Speed: not started")
+        self.stat_ram = QLabel("RAM: not started")
+        self.stat_time_left = QLabel("Time left: not started")
+        self.stat_epoch = QLabel("Epoch: not started")
+        for label in (
+            self.stat_speed, self.stat_ram,
+            self.stat_time_left, self.stat_epoch,
+        ):
+            label.setWordWrap(True)
+            stats_row.addWidget(label)
+        card_layout.addLayout(stats_row)
+        self.train_progress = QProgressBar()
+        self.train_progress.setValue(0)
+        card_layout.addWidget(self.train_progress)
+        self.train_loss = QLabel("Not started.")
+        card_layout.addWidget(self.train_loss)
+        run_btns = QHBoxLayout()
         self.train_pause_btn = QPushButton("Pause")
         self.train_pause_btn.clicked.connect(self.pause_training)
         self.train_pause_btn.setEnabled(False)
@@ -2145,19 +2406,27 @@ class MainWindow(QMainWindow):
         self.train_resume_btn.clicked.connect(
             lambda: self.start_training(resume=True)
         )
-        train_btns.addWidget(self.train_start_btn)
-        train_btns.addWidget(self.train_pause_btn)
-        train_btns.addWidget(self.train_resume_btn)
-        self.session_layout.addLayout(train_btns)
-        self.train_progress = QProgressBar()
-        self.train_progress.setValue(0)
-        self.session_layout.addWidget(self.train_progress)
-        self.train_loss = QLabel("Not started.")
-        self.session_layout.addWidget(self.train_loss)
-        self.session_layout.addWidget(QLabel("Checkpoints"))
+        run_btns.addWidget(self.train_pause_btn)
+        run_btns.addWidget(self.train_resume_btn)
+        run_btns.addStretch(1)
+        card_layout.addLayout(run_btns)
+        layout.addWidget(card)
+
+        # -- train details, below, in the scroll --------------------
+        layout.addWidget(QLabel("Dataset"))
+        dataset_btns = QHBoxLayout()
+        self.train_pick_dataset_btn = QPushButton("Pick dataset file")
+        self.train_pick_dataset_btn.clicked.connect(self.pick_dataset)
+        self.train_sample_btn = QPushButton("Use sample dataset")
+        self.train_sample_btn.clicked.connect(self.use_sample_dataset)
+        dataset_btns.addWidget(self.train_pick_dataset_btn)
+        dataset_btns.addWidget(self.train_sample_btn)
+        dataset_btns.addStretch(1)
+        layout.addLayout(dataset_btns)
+        layout.addWidget(QLabel("Checkpoints"))
         self.train_checkpoints = QListWidget()
         self.train_checkpoints.setMaximumHeight(90)
-        self.session_layout.addWidget(self.train_checkpoints)
+        layout.addWidget(self.train_checkpoints)
         export_btns = QHBoxLayout()
         self.train_export_gguf_btn = QPushButton("Export GGUF")
         self.train_export_gguf_btn.clicked.connect(self.export_gguf_gui)
@@ -2165,37 +2434,37 @@ class MainWindow(QMainWindow):
         self.train_probe_btn.clicked.connect(self.run_probe_gui)
         export_btns.addWidget(self.train_export_gguf_btn)
         export_btns.addWidget(self.train_probe_btn)
-        self.session_layout.addLayout(export_btns)
-        self.session_layout.addWidget(QLabel("Training log"))
+        export_btns.addStretch(1)
+        layout.addLayout(export_btns)
+        layout.addWidget(QLabel("Training log"))
         self.train_log = QPlainTextEdit()
         self.train_log.setReadOnly(True)
         self.train_log.setMinimumHeight(120)
-        self.session_layout.addWidget(self.train_log)
+        layout.addWidget(self.train_log)
 
-        # Sleep panel: run a sleep cycle, dream synthetic rows
-        # first, and see every cycle's replay verdict.
-        self.session_layout.addWidget(QLabel("Sleep"))
-        sleep_btns = QHBoxLayout()
-        self.sleep_btn = QPushButton("Sleep")
-        self.sleep_btn.clicked.connect(self.start_sleep)
+        # Sleep keeps its dream switch and its cycles list here; the
+        # Sleep button itself is gone — Go starts it, like every job.
+        dream_row = QHBoxLayout()
         self.sleep_dream_check = QCheckBox("Dream first")
         self.sleep_dream_check.setToolTip(
             "Dream synthetic practice rows from the local Ollama model "
             "before consolidating (best effort: sleep still runs on "
             "real rows if Ollama is down)."
         )
-        sleep_btns.addWidget(self.sleep_btn)
-        sleep_btns.addWidget(self.sleep_dream_check)
-        sleep_btns.addStretch(1)
-        self.session_layout.addLayout(sleep_btns)
-        self.session_layout.addWidget(
+        dream_row.addWidget(self.sleep_dream_check)
+        dream_row.addStretch(1)
+        layout.addLayout(dream_row)
+        layout.addWidget(
             QLabel("Sleep cycles (click one to see its report)")
         )
         self.sleep_cycles = QListWidget()
         self.sleep_cycles.setMaximumHeight(90)
         self.sleep_cycles.itemClicked.connect(self._on_sleep_cycle_clicked)
-        self.session_layout.addWidget(self.sleep_cycles)
-        self.session_layout.addStretch(1)
+        layout.addWidget(self.sleep_cycles)
+        layout.addStretch(1)
+
+        self.bento_widget = page
+        self.session_layout.addWidget(page)
 
     # -- helpers ----------------------------------------------------
     def _say(self, text: str):
@@ -2423,18 +2692,19 @@ class MainWindow(QMainWindow):
                 f"{prof.get('display_name') or self._current_profile} / "
                 f"{proj.get('display_name') or self._current_project}"
             )
-            settings = proj.get("settings", {})
             model = (
                 prof.get("ollama_tag") or prof.get("base_ref") or "not set"
             )
             dataset = proj.get("dataset_ref") or "not set yet"
+            # No training settings here (T16): the backend picks
+            # them, and the user never sees them.
             self.session_summary.setText(
                 f"Model: {model}\n"
                 f"Dataset: {dataset}\n"
-                f"LoRA rank {settings.get('rank', 8)}, learning rate "
-                f"{settings.get('learning_rate', 0.0002)}, "
-                f"{settings.get('epochs', 3)} epochs. "
                 f"Status: {proj.get('status', 'draft')}."
+            )
+            self.project_label.setText(
+                f"Project: {proj.get('display_name') or self._current_project}"
             )
             self._say(
                 f"Profile: {self._current_profile}, "
@@ -2448,28 +2718,50 @@ class MainWindow(QMainWindow):
                 name = self._current_profile
             self.session_title.setText(name)
             self.session_summary.setText(
-                "Pick a project on the left to set the training session, "
-                "or make one from the menu: New project."
+                "Pick a project on the left, or pick a job and press "
+                "Go: Stella asks for the project name as part of the job."
+            )
+            self.project_label.setText(
+                "No project yet. Pick one on the left, or press Go "
+                "and name one."
             )
             self._say(f"Profile: {self._current_profile}, no project yet.")
         else:
             self.session_title.setText("No training session yet.")
-            self.session_summary.setText(
-                "Pick a project in the list on the left. That sets the "
-                "training session: the model and the fine-tune you are "
-                "working on."
-            )
+            self.session_summary.setText("Pick a model to begin.")
+            self.project_label.setText("No project yet.")
             self._say("Pick a profile to begin.")
+        # The model combo mirrors the session (and stays blank with
+        # no session: nothing is selected by default, ever).
+        self.model_combo.blockSignals(True)
+        try:
+            self.model_combo.clear()
+            for p in self.store.list_profiles():
+                if p.get("_damaged"):
+                    continue
+                self.model_combo.addItem(
+                    p.get("display_name") or p["name"], p["name"]
+                )
+            index = (
+                self.model_combo.findData(self._current_profile)
+                if self._current_profile
+                else -1
+            )
+            self.model_combo.setCurrentIndex(index)
+        finally:
+            self.model_combo.blockSignals(False)
         for w in (
             self.train_pick_dataset_btn,
             self.train_sample_btn,
-            self.train_start_btn,
-            self.train_resume_btn,
-            self.sleep_btn,
             self.train_export_gguf_btn,
             self.train_probe_btn,
         ):
             w.setEnabled(has_session)
+        self.train_resume_btn.setEnabled(
+            has_session
+            and not self._training_running()
+            and not self._sleep_running()
+        )
         self.download_btn.setEnabled(
             has_profile and not self.download_manager.is_running()
         )
@@ -2477,13 +2769,15 @@ class MainWindow(QMainWindow):
             self.download_manager.is_running()
         )
         self._refresh_download_row()
+        self._refresh_go()
+        self._refresh_menu_state()
         self.refresh_train_panel()
+        self._refresh_checklist()
 
     def _refresh_download_row(self):
         if not self._current_profile:
             self.download_status_label.setText("Pick a profile first.")
-            self.download_progress.setMaximum(100)
-            self.download_progress.setValue(0)
+            self.download_progress.setVisible(False)
             return
         try:
             status = provision.weights_status(
@@ -2495,10 +2789,432 @@ class MainWindow(QMainWindow):
         if self.download_manager.is_running():
             return  # progress updates own the label while downloading
         self.download_status_label.setText(_weights_label(status))
+        # The bar only earns its space while downloading or when the
+        # weights are ready (100%): an idle 0% bar is a dead grey
+        # box, and the hero is tall enough already.
+        ready = status["state"] == "ready"
+        self.download_progress.setVisible(ready)
         self.download_progress.setMaximum(100)
-        self.download_progress.setValue(
-            100 if status["state"] == "ready" else 0
+        self.download_progress.setValue(100 if ready else 0)
+
+    # -- hero: pick a model, pick a job, press go -------------------
+    def _on_model_combo_changed(self, index):
+        """Picking a model in the hero sets the session profile, the
+        same as clicking it in the tree."""
+        if index < 0:
+            return
+        slug = self.model_combo.itemData(index)
+        if slug and slug != self._current_profile:
+            self.set_session(slug, None)
+
+    def _picked_job(self) -> str | None:
+        """The picked job key (train, sleep, requant, distill), or
+        None when no job is picked."""
+        checked = self._job_group.checkedButton()
+        if checked is None:
+            return None
+        return checked.property("job")
+
+    def _job_running(self) -> bool:
+        return (
+            self._training_running()
+            or self._sleep_running()
+            or (self._job_worker is not None and self._job_worker.isRunning())
         )
+
+    def _refresh_go(self):
+        """Go is live when a model and a job are picked and nothing
+        is running. A project is NOT required: Go makes one (the
+        name becomes part of the pick)."""
+        self.go_btn.setEnabled(
+            bool(self._current_profile)
+            and self._picked_job() is not None
+            and not self._job_running()
+        )
+
+    def _on_go(self):
+        """Press go: run the picked job on the picked model."""
+        job = self._picked_job()
+        profile = self._current_profile
+        if not job or not profile:
+            return
+        if self._job_running():
+            self._say("A job is already running.")
+            return
+        if job == "requant":
+            self._start_requant()
+            return
+        if not self._current_project:
+            # No project yet: the name becomes part of the pick
+            # (T15 supersedes T113). Ask inline, in the hero — no
+            # second window. A second press of Go, with a name
+            # typed, makes the project and runs the job.
+            name = self.project_name_edit.text().strip()
+            if not name:
+                self.project_name_row.setVisible(True)
+                self.project_name_edit.setFocus()
+                self._say("Name this job, then press Go again.")
+                return
+            try:
+                data = self.store.create_project(profile, name)
+            except StellaError as exc:
+                self._warn(str(exc))
+                return
+            self.project_name_row.setVisible(False)
+            self.project_name_edit.setText("")
+            self.debug_log.action(
+                f"project created: {profile}/{data['name']}"
+            )
+            self.set_session(profile, data["name"])
+            self._say(f"Created project {data['name']}.")
+        if job == "train":
+            self._go_train()
+        elif job == "sleep":
+            self._go_sleep()
+        elif job == "distill":
+            self._start_distill()
+
+    def _go_train(self):
+        """Train, after the dataset check: a job with no examples
+        offers the sample or a file pick, in place."""
+        try:
+            proj = self.store.get_project(
+                self._current_profile, self._current_project
+            )
+        except StellaError as exc:
+            self._warn(str(exc))
+            return
+        if not (proj.get("dataset_ref") or "").strip():
+            self.dataset_prompt_row.setVisible(True)
+            self._say("This job needs examples to learn from.")
+            return
+        self.start_training()
+
+    def _go_sleep(self):
+        """Sleep, after the same dataset check as Train."""
+        try:
+            proj = self.store.get_project(
+                self._current_profile, self._current_project
+            )
+        except StellaError as exc:
+            self._warn(str(exc))
+            return
+        if not (proj.get("dataset_ref") or "").strip():
+            self.dataset_prompt_row.setVisible(True)
+            self._say("This job needs examples to learn from.")
+            return
+        self.start_sleep()
+
+    def _dataset_prompt_use_sample(self):
+        """The inline dataset prompt: use the sample, then Go again
+        (the dataset is set now, so the job starts)."""
+        self.dataset_prompt_row.setVisible(False)
+        self.use_sample_dataset()
+        self._on_go()
+
+    def _dataset_prompt_pick(self):
+        """The inline dataset prompt: pick a file, then Go again if
+        one was picked."""
+        self.dataset_prompt_row.setVisible(False)
+        self.pick_dataset()
+        try:
+            proj = self.store.get_project(
+                self._current_profile, self._current_project
+            )
+        except StellaError:
+            return
+        if (proj.get("dataset_ref") or "").strip():
+            self._on_go()
+
+    def _start_requant(self):
+        """Make smaller: re-quantize the picked model's Ollama copy
+        to Q4_K_M under a new name. No typing needed — the quant
+        and the new name are the usual ones (R8 gives this job the
+        full card flow later; it runs as a job with log lines
+        today, like GGUF export)."""
+        profile = self._current_profile
+        try:
+            prof = self.store.get_profile(profile)
+        except StellaError as exc:
+            self._warn(str(exc))
+            return
+        tag = (prof.get("ollama_tag") or "").strip()
+        if not tag:
+            self._warn(
+                "This profile has no Ollama model to make smaller. "
+                "Pick a profile that came from an installed model."
+            )
+            return
+        from .requant import requant_model
+
+        def job(log):
+            report = requant_model(tag)
+            return (
+                f"Made a smaller copy: {report['new_tag']} "
+                f"({provision.format_size(report['output_bytes'])}, "
+                f"was {provision.format_size(report['source_bytes'])}). "
+                f"Run it with: {report['ollama_run']}"
+            )
+
+        self._job_worker = JobWorker(job)
+        self._job_worker.log.connect(self._train_log_line)
+        self._job_worker.finished.connect(self._on_job_finished)
+        self._set_activity("job", "Working: making a smaller copy...")
+        self._train_log_line(f"Making a smaller copy of {tag}...")
+        self._job_worker.start()
+        self._refresh_go()
+        self._refresh_checklist()
+
+    def _start_distill(self):
+        """Teach a small model: ask a teacher model the prompts in a
+        file, save the answers as this project's dataset. The
+        teacher and the prompts file come from one small dialog —
+        a combo pick and a file pick, no typing."""
+        profile = self._current_profile
+        project = self._current_project
+        dialog = DistillDialog(self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        teacher = dialog.teacher()
+        prompts = dialog.prompts_path()
+        if not teacher or not prompts:
+            return
+        from .distill import distill_dataset
+
+        def job(log):
+            report = distill_dataset(
+                self.store, profile, project, teacher, prompts
+            )
+            return (
+                f"Distilled {report['rows']} examples from {teacher} "
+                f"into this project's dataset. Look at the dataset, "
+                "then train when ready."
+            )
+
+        self._job_worker = JobWorker(job)
+        self._job_worker.log.connect(self._train_log_line)
+        self._job_worker.finished.connect(self._on_job_finished)
+        self._set_activity("job", "Working: asking the teacher...")
+        self._train_log_line(f"Asking {teacher} the prompts...")
+        self._job_worker.start()
+        self._refresh_go()
+        self._refresh_checklist()
+
+    # -- first-run checklist ----------------------------------------
+    def _checklist_state(self) -> tuple[bool, bool, bool]:
+        """(picked a model, got its weights, ran a tiny training).
+        Step 2 reads the current profile's weights, or the first
+        profile's when nothing is picked yet. Step 3 ticks when any
+        project in the store finished training."""
+        profiles = [
+            p for p in self.store.list_profiles() if not p.get("_damaged")
+        ]
+        step1 = bool(profiles)
+        step2 = False
+        if profiles:
+            slug = self._current_profile or profiles[0]["name"]
+            try:
+                status = provision.weights_status(self.store, slug)
+                step2 = status["state"] == "ready"
+            except StellaError:
+                step2 = False
+        step3 = False
+        for p in profiles:
+            for proj in self.store.list_projects(p["name"]):
+                if proj.get("status") == "trained":
+                    step3 = True
+                    break
+            if step3:
+                break
+        return step1, step2, step3
+
+    def _refresh_checklist(self):
+        """Pick the visible page: the checklist while the first setup
+        is incomplete, the bento otherwise. Dismissed or finished
+        never comes back; a running job always shows the bento, so
+        the user can watch the run."""
+        if self.settings.value("checklist/dismissed", False) in (True, "true"):
+            self.checklist_widget.setVisible(False)
+            self.bento_widget.setVisible(True)
+            return
+        if self.settings.value("checklist/done", False) in (True, "true"):
+            self.checklist_widget.setVisible(False)
+            self.bento_widget.setVisible(True)
+            return
+        step1, step2, step3 = self._checklist_state()
+        if step1 and step2 and step3:
+            self.settings.setValue("checklist/done", True)
+            self.checklist_widget.setVisible(False)
+            self.bento_widget.setVisible(True)
+            return
+        if self._job_running():
+            self.checklist_widget.setVisible(False)
+            self.bento_widget.setVisible(True)
+            return
+        for (tick, _btn), done in zip(self.check_steps, (step1, step2, step3)):
+            tick.setText("\u2713" if done else "")
+        # Steps unlock in order: one thing at a time.
+        self.check_steps[0][1].setEnabled(True)
+        self.check_steps[1][1].setEnabled(step1)
+        self.check_steps[2][1].setEnabled(step2)
+        self.checklist_widget.setVisible(True)
+        self.bento_widget.setVisible(False)
+
+    def _checklist_download(self):
+        """Checklist step 2: get the weights of the picked model
+        (or the first profile, when nothing is picked yet)."""
+        slug = self._current_profile
+        if not slug:
+            profiles = [
+                p for p in self.store.list_profiles()
+                if not p.get("_damaged")
+            ]
+            slug = profiles[0]["name"] if profiles else None
+        if slug:
+            self.start_download(slug)
+
+    def _checklist_run_tiny(self):
+        """Checklist step 3: a real tiny first training on the
+        20-example sample dataset. Makes a project called
+        "first-steps" when the profile has none, sets the sample
+        dataset, and starts training."""
+        slug = self._current_profile
+        if not slug:
+            profiles = [
+                p for p in self.store.list_profiles()
+                if not p.get("_damaged")
+            ]
+            slug = profiles[0]["name"] if profiles else None
+        if not slug:
+            return
+        project = self._current_project
+        if not project:
+            projects = self.store.list_projects(slug)
+            healthy = [p for p in projects if not p.get("_damaged")]
+            if healthy:
+                project = healthy[0]["name"]
+            else:
+                try:
+                    data = self.store.create_project(
+                        slug, "first-steps",
+                        dataset_ref="sample-tool-calls.jsonl",
+                    )
+                except StellaError as exc:
+                    self._warn(str(exc))
+                    return
+                project = data["name"]
+        self.set_session(slug, project)
+        try:
+            proj = self.store.get_project(slug, project)
+        except StellaError as exc:
+            self._warn(str(exc))
+            return
+        if not (proj.get("dataset_ref") or "").strip():
+            self.use_sample_dataset()
+        self.start_training()
+
+    def _checklist_dismiss(self):
+        """Dismiss the checklist. It never comes back."""
+        self.settings.setValue("checklist/dismissed", True)
+        self._refresh_checklist()
+
+    # -- glanceable card --------------------------------------------
+    def _last_run_curve(self, profile: str, project: str):
+        """The last run's loss curve for one project, rebuilt from
+        its train_log.jsonl (the per-project run history, T20).
+        Returns ([(step, loss), ...], total_steps). A step that goes
+        down starts a new run, so only the last run's points come
+        back; validation records carry no loss and are skipped."""
+        log_path = self.store.project_dir(profile, project) / "train_log.jsonl"
+        points: list[tuple[int, float]] = []
+        total = 0
+        if not log_path.is_file():
+            return points, total
+        try:
+            lines = log_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return points, total
+        for line in lines:
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(record, dict):
+                continue
+            if "loss" not in record or "step" not in record:
+                continue
+            try:
+                step = int(record["step"])
+                loss = float(record["loss"])
+            except (TypeError, ValueError):
+                continue
+            if points and step <= points[-1][0]:
+                points = []
+            points.append((step, loss))
+            try:
+                total = int(record.get("total_steps") or total)
+            except (TypeError, ValueError):
+                pass
+        return points, total
+
+    def _reset_run_stats(self):
+        """The card's live numbers, back to their resting state."""
+        self._run_started_at = None
+        self._run_start_step = 0
+        self.stat_speed.setText("Speed: not started")
+        self.stat_ram.setText("RAM: not started")
+        self.stat_time_left.setText("Time left: not started")
+        self.stat_epoch.setText("Epoch: not started")
+
+    @staticmethod
+    def _format_duration(seconds: float) -> str:
+        """Seconds as plain words: 40 seconds, 3 minutes,
+        1 hour 5 minutes."""
+        total = int(max(0, seconds))
+        hours, rem = divmod(total, 3600)
+        minutes, secs = divmod(rem, 60)
+        if hours:
+            return f"{hours} hour{'s' if hours != 1 else ''} {minutes} minutes"
+        if minutes:
+            return f"{minutes} minute{'s' if minutes != 1 else ''}"
+        return f"{secs} second{'s' if secs != 1 else ''}"
+
+    def _update_run_stats(self, step: int, total: int, epoch: int):
+        """Speed, RAM, time left, epoch — from the live progress
+        signal and the PC's own RAM reading (T20)."""
+        if self._run_started_at is None:
+            self._run_started_at = time.monotonic()
+            self._run_start_step = step
+        elapsed = time.monotonic() - self._run_started_at
+        done = step - self._run_start_step
+        if elapsed > 0 and done > 0:
+            per_minute = done / (elapsed / 60.0)
+            self.stat_speed.setText(
+                f"Speed: {per_minute:.1f} steps a minute"
+            )
+            remaining = total - step
+            if remaining > 0:
+                secs_left = remaining / (done / elapsed)
+                self.stat_time_left.setText(
+                    "Time left: about "
+                    f"{self._format_duration(secs_left)}"
+                )
+            else:
+                self.stat_time_left.setText("Time left: done")
+        else:
+            self.stat_speed.setText("Speed: warming up")
+            self.stat_time_left.setText("Time left: not known yet")
+        used, total_ram = ram_usage_gb()
+        if used is not None and total_ram is not None:
+            self.stat_ram.setText(
+                f"RAM: {used:.1f} of {total_ram:.1f} GB used"
+            )
+        else:
+            self.stat_ram.setText("RAM: unknown")
+        if epoch:
+            self.stat_epoch.setText(f"Epoch {epoch}")
+        else:
+            self.stat_epoch.setText("Epoch: not started")
 
     # -- downloads --------------------------------------------------
     def start_download(self, profile=None):
@@ -2537,6 +3253,7 @@ class MainWindow(QMainWindow):
         self._set_activity("downloading", "Downloading model: 0%")
         self.download_btn.setEnabled(False)
         self.download_cancel_btn.setEnabled(True)
+        self.download_progress.setVisible(True)
         self.download_progress.setMaximum(100)
         self.download_progress.setValue(0)
         self.download_status_label.setText("Downloading: 0%")
@@ -2721,7 +3438,7 @@ class MainWindow(QMainWindow):
         dialog = NewProfileDialog(self)
         dialog.create_btn.clicked.connect(lambda: self._create_profile_from(dialog))
         dialog.cancel_btn.clicked.connect(dialog.reject)
-        dialog.resize(460, 200)
+        dialog.resize(560, 520)
         center = self.geometry().center()
         dialog.move(center.x() - dialog.width() // 2,
                     center.y() - dialog.height() // 2)
@@ -2729,7 +3446,7 @@ class MainWindow(QMainWindow):
         self._profile_dialog = dialog
 
     def _create_profile_from(self, dialog: NewProfileDialog):
-        model = dialog.model_combo.currentText().strip()
+        model = dialog.picked_model()
         if not model:
             self._warn("Pick a model first.")
             return
@@ -2987,12 +3704,15 @@ class MainWindow(QMainWindow):
         )
 
     def refresh_train_panel(self):
-        """Checkpoints list + log tail for the selected project."""
+        """Checkpoints list + log tail + last run's curve for the
+        selected project."""
         self.train_checkpoints.clear()
         self.sleep_cycles.clear()
         if not self._current_profile or not self._current_project:
             self.train_loss.setText("Pick a project to train.")
             self._train_panel_project = None
+            self.loss_curve.clear()
+            self._reset_run_stats()
             return
         # A new project gets a fresh loss line; the same project
         # keeps its last progress (a finished run's final step/loss
@@ -3003,6 +3723,11 @@ class MainWindow(QMainWindow):
             self._train_panel_project = key
             if not self._training_running() and not self._sleep_running():
                 self.train_loss.setText("Not started.")
+            # The last run's curve comes back with the project
+            # (T20): rebuilt from its own run log.
+            points, total = self._last_run_curve(*key)
+            self.loss_curve.set_points(points, total)
+            self._reset_run_stats()
         from .train import list_checkpoints
 
         for ck in list_checkpoints(
@@ -3105,10 +3830,10 @@ class MainWindow(QMainWindow):
             self._say("Sleep is already running.")
             return
         # An open Project window may hold unsaved edits (T8): the
-        # run trains on the STORED settings, so a bad learning rate
-        # sitting unsaved in the form must stop the start, not train
-        # on stale settings behind a warning. Save / Discard /
-        # Cancel, the same prompt as closing the window (T2).
+        # run trains on the STORED dataset, so edits sitting unsaved
+        # in the form must stop the start, not train on stale data
+        # behind a warning. Save / Discard / Cancel, the same prompt
+        # as closing the window (T2).
         proj_win = self._project_windows.get((profile, project))
         if proj_win is not None and proj_win.is_modified():
             if not proj_win.maybe_save():
@@ -3159,7 +3884,8 @@ class MainWindow(QMainWindow):
         self._train_worker.progress.connect(self._on_train_progress)
         self._train_worker.log.connect(self._train_log_line)
         self._train_worker.finished.connect(self._on_train_finished)
-        self.train_start_btn.setEnabled(False)
+        self._run_started_at = None
+        self.go_btn.setEnabled(False)
         self.train_resume_btn.setEnabled(False)
         self.train_pause_btn.setEnabled(True)
         self._set_activity(
@@ -3172,6 +3898,7 @@ class MainWindow(QMainWindow):
             f"training started: {profile}/{project} (resume={resume})"
         )
         self._train_worker.start()
+        self._refresh_checklist()
 
     def pause_training(self):
         if self._train_worker is not None:
@@ -3180,23 +3907,32 @@ class MainWindow(QMainWindow):
                 "Pausing after this step (checkpoint will save)..."
             )
 
-    def _on_train_progress(self, step: int, total: int, loss: float):
+    def _on_train_progress(self, step: int, total: int, loss: float,
+                           epoch: int = 0):
         self.train_progress.setMaximum(max(1, total))
         self.train_progress.setValue(step)
         self.train_loss.setText(f"Step {step} / {total}, loss {loss:.4f}")
+        if step > 0:
+            # Step 0 is the "started" marker, not a real point.
+            self.loss_curve.append_point(step, loss, total)
+            self._update_run_stats(step, total, epoch)
         if self._sleep_running():
             self._set_activity("sleep", f"Sleep: step {step} / {total}")
         else:
             self._set_activity("training", f"Training: step {step} / {total}")
 
     def _on_train_finished(self, ok: bool, message: str):
-        self.train_start_btn.setEnabled(True)
-        self.train_resume_btn.setEnabled(True)
         self.train_pause_btn.setEnabled(False)
         self._set_activity("idle", "Idle")
         self._train_log_line(message)
         self.debug_log.action(f"training finished: ok={ok}: {message}")
         self._say(message.splitlines()[0] if message else "Training done.")
+        # The finished run's curve and summary stay visible (T20):
+        # the curve keeps its points, the loss line keeps its final
+        # step, and the card says done. refresh_session re-enables
+        # Go and Resume; it must not wipe the card (same project,
+        # so refresh_train_panel leaves both alone).
+        self.stat_time_left.setText("Time left: done")
         self.refresh_tree()
         self.refresh_session()
 
@@ -3204,7 +3940,9 @@ class MainWindow(QMainWindow):
         self._set_activity("idle", "Idle")
         self._train_log_line(message)
         self._say(message.splitlines()[0] if message else "Done.")
+        self._refresh_go()
         self.refresh_train_panel()
+        self._refresh_checklist()
 
     # -- sleep ------------------------------------------------------
     def start_sleep(self):
@@ -3239,18 +3977,22 @@ class MainWindow(QMainWindow):
         self._sleep_worker.progress.connect(self._on_train_progress)
         self._sleep_worker.log.connect(self._train_log_line)
         self._sleep_worker.finished.connect(self._on_sleep_finished)
-        self.sleep_btn.setEnabled(False)
+        self._run_started_at = None
+        self.go_btn.setEnabled(False)
         self._set_activity("sleep", "Sleep: starting...")
         self._train_log_line("Starting sleep cycle...")
         self.debug_log.action(f"sleep started: {profile}/{project}")
         self._sleep_worker.start()
+        self._refresh_checklist()
 
     def _on_sleep_finished(self, ok: bool, message: str):
-        self.sleep_btn.setEnabled(True)
         self._set_activity("idle", "Idle")
         self._train_log_line(message)
         self.debug_log.action(f"sleep finished: ok={ok}: {message}")
         self._say(message.splitlines()[0] if message else "Sleep done.")
+        # The finished cycle's curve and summary stay visible (T20),
+        # like a finished training run.
+        self.stat_time_left.setText("Time left: done")
         self.refresh_tree()
         self.refresh_session()
 
@@ -3274,7 +4016,7 @@ class MainWindow(QMainWindow):
             f"Sleep cycle {report['cycle']}: {report['status']}",
             f"Finished: {report.get('timestamp', '')}",
             f"Rows: {report['real_rows']} new, {report['dreamed_rows']} dreamed",
-            f"Steps: {report['steps']}, LoRA rank {report.get('rank', '')}",
+            f"Steps: {report['steps']}",
             f"Old loss: {fmt(report.get('old_loss_before'))} -> "
             f"{fmt(report.get('old_loss_after'))} ({delta_text})",
             f"New loss: {fmt(report.get('new_loss'))}",
@@ -3315,6 +4057,8 @@ class MainWindow(QMainWindow):
         self._set_activity("job", "Working: exporting GGUF...")
         self._train_log_line("Exporting GGUF (merge, convert, quantize)...")
         self._job_worker.start()
+        self._refresh_go()
+        self._refresh_checklist()
 
     def run_probe_gui(self):
         profile = self._selected_profile()
@@ -3341,6 +4085,8 @@ class MainWindow(QMainWindow):
         self._set_activity("job", "Working: running refusal probe...")
         self._train_log_line("Running refusal probe (before vs after)...")
         self._job_worker.start()
+        self._refresh_go()
+        self._refresh_checklist()
 
     def closeEvent(self, event):
         self.settings.setValue("geometry", self.saveGeometry())

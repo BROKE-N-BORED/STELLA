@@ -6,6 +6,7 @@ from stella.autoconfig import (
     compute_settings,
     format_report,
     measure_pc,
+    ram_usage_gb,
 )
 
 
@@ -19,6 +20,15 @@ def test_measure_pc_sane(tmp_path):
         assert m["ram_available_gb"] <= m["ram_total_gb"]
     assert m["disk_free_gb"] is None or m["disk_free_gb"] > 0
     assert m["load1"] is None or m["load1"] >= 0
+
+
+def test_ram_usage_gb_sane():
+    """T20: the live RAM reading (used, total) from /proc/meminfo."""
+    used, total = ram_usage_gb()
+    if (used, total) == (None, None):
+        return  # no /proc/meminfo on this platform
+    assert 0 <= used < total
+    assert total > 0
 
 
 def test_measure_pc_defaults_to_stella_home(monkeypatch, tmp_path):

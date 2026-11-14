@@ -3,7 +3,7 @@ import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from stella.ollama import list_models
+from stella.ollama import list_model_sizes, list_models
 
 
 class FakeOllama(BaseHTTPRequestHandler):
@@ -11,8 +11,8 @@ class FakeOllama(BaseHTTPRequestHandler):
         if self.path == "/api/tags":
             body = json.dumps({
                 "models": [
-                    {"name": "lfm3:1.7b"},
-                    {"name": "qwen3-vl:2b-instruct"},
+                    {"name": "lfm3:1.7b", "size": 2000000000},
+                    {"name": "qwen3-vl:2b-instruct", "size": 1500000000},
                 ]
             }).encode()
             self.send_response(200)
@@ -65,3 +65,23 @@ def test_list_models_bad_payload_returns_empty():
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_list_model_sizes_from_fake_server():
+    """T18: the picker reads download sizes from /api/tags."""
+    server = ThreadingHTTPServer(("127.0.0.1", 0), FakeOllama)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}"
+        assert list_model_sizes(url) == {
+            "lfm3:1.7b": 2000000000,
+            "qwen3-vl:2b-instruct": 1500000000,
+        }
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_list_model_sizes_offline_returns_empty():
+    assert list_model_sizes("http://127.0.0.1:9") == {}

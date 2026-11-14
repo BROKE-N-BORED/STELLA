@@ -15,20 +15,20 @@ TOPICS: list[tuple[str, str]] = [
 fine-tune teaches a model a new skill by showing it examples.
 
 The short path, first time:
-1. Pick a model. Menu button, top left, then New Profile. Pick
+1. Pick a model. File menu, then New Profile. Pick
    one from the list, or type a Hugging Face name like
    LiquidAI/LFM3-1.7B. That is the whole step.
-2. Get the model's weights. Open the profile (double-click it in
-   the left panel) and press Download model. It is a few gigabytes,
-   so it takes a while. If it stops, press it again. It picks up
-   where it left off.
-3. Make a project. Menu, then New Project. A project is one
-   fine-tune job: its own examples, settings, and results.
+2. Get the model's weights. Press Download model on the main
+   screen. It is a few gigabytes, so it takes a while. If it
+   stops, press it again. It picks up where it left off.
+3. Make a project. Pick Train, then press Go: Stella asks for
+   the project name as part of the job. A project is one
+   fine-tune job: its own examples and results.
 4. Set the dataset. In the project window, Dataset is the file of
    examples to learn from. To try it out, press Use sample dataset
-   in the Train panel. The sample has 20 small examples.
-5. Press Start training. Training on this PC takes hours, not
-   minutes. The progress bar and the loss number show it working.
+   under Dataset on the main screen. The sample has 20 small examples.
+5. Press Go. Training on this PC takes hours, not
+   minutes. The loss curve and the numbers show it working.
    You can pause and pick it up later.
 
 You need the training packages installed once before training
@@ -38,25 +38,25 @@ the Stella folder: bash install-training.sh""",
     (
         "Chat",
         """Chat is the easy way to use Stella: talk to it, and it
-does the work. Menu, then Chat. Say what you want in plain words,
+does the work. Help menu, then Chat. Say what you want in plain words,
 for example: train LFM3 to write short replies. The chat asks
-only for what it needs, sets everything else to the usual
-settings, and runs the job.
+only for what it needs, sets everything else itself,
+and runs the job.
 
 The chat walks the same steps every training run needs, whatever
 the model:
 1. Goal. What should the model learn to do?
 2. Base model. Which model to start from.
 3. Data. The examples it learns from, or the sample dataset.
-4. Settings. Rank, learning rate, epochs, batch size, sequence
-   length. The defaults are fine for this PC.
+4. Recipe. Stella measures this PC and picks the training
+   recipe. Nothing to set.
 5. Train. Run it. This takes hours on CPU.
 6. Check. Validation loss and the refusal probe.
 7. Export. A GGUF file and an Ollama model.
 8. Test and back up. Try the tuned model, keep the export safe.
 
-Say just do it and the chat runs the whole list with the defaults
-and the sample dataset, telling you which step it is on.
+Say just do it and the chat runs the whole list with the
+sample dataset, telling you which step it is on.
 
 The chat talks to a model you pick in Settings. It can be a model
 on this PC through Ollama, or a cloud model: Groq or Gemini with
@@ -100,9 +100,8 @@ not fit, and Stella will refuse rather than freeze your PC.""",
     ),
     (
         "Profiles",
-        """A profile is one base model with its own home: its weights,
-its settings, and its projects. The base model itself is never
-touched.
+        """A profile is one base model with its own home: its weights
+and its projects. The base model itself is never touched.
 
 The left panel lists your profiles. Click the arrow next to one
 to see its projects. Double-click a profile to open its window.
@@ -123,36 +122,28 @@ while it runs.""",
     (
         "Projects",
         """A project lives inside a profile. It is one fine-tune job:
-its own dataset, its own training settings, its own checkpoints,
-and its own notes.
+its own dataset, its own checkpoints, and its own notes.
 
 Click a project in the left panel and it becomes the training
-session: the main window shows it, and Start training trains it.
-Stella remembers the session and restores it next time you open
-the program.
+session: the main window shows it. Pick Train and press Go to
+train it. Stella remembers the session and restores it next time
+you open the program.
 
-Double-click a project to open its window. The settings there are
-explained under each box. The defaults are good for this PC, and
-you can leave them alone:
-LoRA rank 8. How big the adapter is.
-Learning rate 0.0002. How big each training step is.
-Epochs 3. How many full passes over the data.
-Batch size 1. Examples per training step.
-Max seq len 1024. Longest example, in tokens.
-
-Method is always lora. Full fine-tuning would retrain the whole
-model, which does not run on this PC, so that option is switched
-off.""",
+Double-click a project to open its window. It holds the name,
+the dataset, and your notes, each explained under its box.
+Stella picks the training recipe for this PC itself: there is
+nothing to set.""",
     ),
     (
         "Training",
         """Training teaches the model from your examples. On this PC
 it is slow: a small job takes hours. That is normal. The loss
-number should fall as it goes. If it climbs or jumps around, the
-learning rate may be too high.
+number should fall as it goes. If it climbs or jumps around,
+check the examples: they may be mixed up, or too different from
+each other.
 
-Start, Pause, Resume are in the Train panel. Pause stops after
-the current step and saves a checkpoint, so nothing is lost.
+Pick Train and press Go to start. Pause stops after the current
+step and saves a checkpoint, so nothing is lost.
 Resume picks up from the last checkpoint.
 
 Your examples live in a dataset file. It must be JSONL: one
@@ -189,24 +180,24 @@ never outnumber real rows. If Ollama is down, dreaming is skipped
 with a message and sleep still runs on real rows.
 
 Honest limits: sleep trains with the same plain training as the
-Train panel. There is no fancy reinforcement step on this PC, and
+Train job. There is no fancy reinforcement step on this PC, and
 Ollama cannot run several adapters at once, so sleep adapters are
 merged through the same GGUF export as everything else.""",
     ),
     (
         "Export and import",
         """Export packs a project into a folder you can keep, share,
-or move to another PC. Menu, then Export project, and pick a
+or move to another PC. File menu, then Export project, and pick a
 folder.
 
-The package holds: the project record and settings, your notes,
+The package holds: the project record, your notes,
 the checkpoints, the sleep cycles, and the trained adapter if
 there is one. The base model weights are not included. They are
 gigabytes, and the other PC downloads them the same way you did.
 
-Import brings a package back in. Menu, then Import package, and
+Import brings a package back in. File menu, then Import package, and
 pick the export folder. It creates the profile if it is not there
-yet, and brings back the settings, notes, checkpoints, and sleep
+yet, and brings back the notes, checkpoints, and sleep
 cycles.
 
 One honest gap: import does not put the trained adapter or the
@@ -223,7 +214,8 @@ to refuse things it used to answer. It runs 12 plainly harmless
 prompts (coding help, plain questions) through the model before
 and after tuning, and counts refusals each time.
 
-Run refusal probe is in the Train panel. It loads the base model,
+Run refusal probe is on the main screen, under the training
+details. It loads the base model,
 so it takes a few minutes on this PC.
 
 The result is a rough check, not a guarantee. The refusal
@@ -240,7 +232,8 @@ tuning is a stop sign.""",
     (
         "GGUF export to Ollama",
         """To use a tuned model in Ollama or Code Forge, export it as
-a GGUF file. Export GGUF is in the Train panel.
+a GGUF file. Export GGUF is on the main screen, under the training
+details.
 
 It does three steps: it merges the adapter into the base model,
 converts the result to GGUF format, and quantizes it to Q4_K_M
@@ -263,7 +256,8 @@ packed tighter. A Q8_0 model at 2.7 GB becomes a Q4_K_M model
 around 1.8 GB, and it runs faster because there is less to read
 from memory.
 
-Ask the Chat to do it for you, or run it in a terminal inside the
+Pick a model, pick Make smaller, and press Go. Stella makes the
+smaller copy for you. Or run it in a terminal inside the
 Stella folder:
 
   bash stella-cli requant qwen3.5:4b
@@ -294,7 +288,9 @@ small student model. The student learns only what it was taught.
 
 Ask the Chat to do it for you, or run it in a terminal inside the
 Stella folder. First, make a plain text file with one prompt per
-line, the jobs you want the small model to learn. Then:
+line, the jobs you want the small model to learn. Or pick a model,
+pick Teach a small model, and press Go: Stella asks for the
+teacher and the prompts file, then runs it. In a terminal:
 
   bash stella-cli distill lfm3-tool tool-calls --teacher qwen3.5:4b --prompts prompts.txt
 
@@ -304,7 +300,7 @@ part way and run it again, it skips the prompts already
 answered, so no teacher time is wasted.
 
 Then train the student the usual way: stella train lfm3-tool
-tool-calls, or press Start training in the window.
+tool-calls, or pick Train and press Go in the window.
 
 Honest limits: the student is only as good as the teacher's
 answers. A teacher that answers badly teaches badly, so look
@@ -333,11 +329,8 @@ Download stopped or froze. Press Download model again. The
 Hugging Face hub resumes interrupted downloads, so nothing is
 downloaded twice.
 
-Learning rate must be a number. The learning rate box takes a
-number like 0.0002, not words.
-
-Something crashed or behaved oddly. Open Settings from the menu
-and press Debug report. It writes a report file with the recent
+Something crashed or behaved oddly. Open Settings from the File
+menu and press Debug report. It writes a report file with the recent
 log and the app's state, with any secrets scrubbed out. That file
 is safe to share.""",
     ),

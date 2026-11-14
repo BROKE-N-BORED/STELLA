@@ -776,6 +776,7 @@ accounts for their findings.)
 - **Library:** 005 Bento grids, 009 Shape morphing (see R20)
 - **Supersedes:** T113 (real New Project form: the job picker is project creation now; the name becomes part of the pick).
 - **Note on T44:** the train-panel half is already fixed by the v0.4 restructure (verified live: Start training at y=275, above the fold); R1 finishes the job for Sleep.
+- **Status:** DONE in v0.11.0 (2026-11-14) — bento main screen: the hero tile holds pick a model, pick a job, press Go; small tiles carry the glanceable numbers (RAM, speed, progress) once a job runs; the tree stays as the library. Verified by coordinator from a fresh unzip: Go button at y=72, above the fold at 1100x680 and 1366x768, disabled with no job picked.
 - **Problem:** The main window is one long scrolling column of sections with no job picker, and at rest it is a wall of empty grey boxes. The brief's core flow does not exist as a screen.
 - **Fix:** Replace the session column with a bento main screen. One hero tile holds the flow: pick a model, pick a job (Train, Sleep, Make smaller, Teach a small model), press go. Small tiles carry the glanceable numbers (RAM, speed, progress) once a job runs. The tree stays as the library of what exists. The core flow needs no scrolling at 1100x680.
 - **Done:** At 1100x680 the first screen shows the model pick, the job pick, and Go with nothing below the fold; a new user can reach "press go" without scrolling or opening a second window.
@@ -789,6 +790,7 @@ accounts for their findings.)
 - **Supersedes:** T154 (Advanced settings section: do not build; the brief puts settings under the hood).
 - **Mooted by this task:** T7 (learning rate as a numeric input: no learning rate field), T46 (lock settings during a run: no settings to lock), T6's user-facing half (validation moves to the backend auto-config), T2's settings half (dirty tracking keeps only name, dataset, notes).
 - **Depends on:** v0.9's auto-config backend. The settings cannot leave the screen until the backend decides them.
+- **Status:** DONE in v0.11.0 (2026-11-14) — settings form deleted from the Project window, settings line deleted from the session summary, Training defaults block deleted from Settings, chat template step 4 and the chat greeting rewritten; the chat set_project_settings tool removed outright (the chat window IS UI — a user asking the chat to change a setting by name was touching settings, which the brief forbids). Stored settings fields stay for compatibility; nothing in the UI reads or writes them. CLI pc-info keeps printing the recipe (a deliberate diagnostic, not a screen).
 - **Problem:** Rank, learning rate, epochs, batch size, and sequence length are on screen in four places (session summary, Project window form, Settings defaults, chat template step 4). The brief says the backend sets them all and the user never sees them.
 - **Fix:** Delete the settings form from the Project window (name, dataset, and notes stay), delete the settings line from the session summary, delete the Training defaults block from Settings, and rewrite chat template step 4 and the chat greeting so they stop naming settings. The stored settings fields stay in the model for compatibility; nothing in the UI reads or writes them.
 - **Done:** No rank, learning rate, epochs, batch size, or sequence length string is visible anywhere in the UI; a grep of the visible strings in gui.py, howto.py, and chat_agent.py finds none.
@@ -799,6 +801,7 @@ accounts for their findings.)
 - **Covers:** A9-W4, A9-G3
 - **Effort:** M
 - **Library:** 020 Setup checklist, 014 Teach by playing
+- **Status:** DONE in v0.11.0 (2026-11-14) — an empty store shows the three-step first-run checklist (pick a model, get its weights, run a tiny first training on the 20-example sample dataset, a real run) instead of the disabled wall; each step is a button that does the step, a finished step ticks, and dismissing it never brings it back.
 - **Problem:** First launch shows an empty tree, guidance that tells the user to pick a project that does not exist, and a wall of disabled controls. Nothing on screen says what to do first.
 - **Fix:** On first launch (empty store), the main screen shows a three-step checklist instead of the disabled wall: 1. Pick a model. 2. Get its weights. 3. Run a tiny first training (the 20-example sample dataset, a real run, not a wizard). Each step is a button that does the step; a finished step ticks. The checklist is dismissible and never reappears as a modal.
 - **Done:** An empty store shows the checklist; completing a step ticks it; dismissing it never brings it back; the misleading "pick a project in the list" text is gone.
@@ -810,6 +813,7 @@ accounts for their findings.)
 - **Effort:** M
 - **Library:** 012 Progressive disclosure
 - **Extends:** T84 (RAM/time estimate in the detail panel: the estimate moves to the picker, where the choice is made).
+- **Status:** DONE in v0.11.0 (2026-11-14) — the model picker opens with nothing selected (Enter with no pick does nothing), the profile-name note appears only after a pick; each model row shows one plain line for what it does and a fit verdict (size plus RAM, from the backend's PC measurement).
 - **Problem:** The New Profile dialog pre-selects the first model (Enter creates a profile for a model the user never picked), and it shows bare tags with no "what it does" and no fits-this-PC verdict. The user picks blind.
 - **Fix:** The dialog opens with nothing selected (`setCurrentIndex(-1)`, as the chat combo already does); the profile-name note appears only after a pick, and Enter with no pick does nothing. Each model row shows one plain line for what it does and a fit verdict (size plus RAM, from the backend's PC measurement). Details beyond that appear on tap, not up front.
 - **Done:** The dialog opens with no selection and no name note; every listed model shows what it does and whether it fits this PC.
@@ -821,6 +825,7 @@ accounts for their findings.)
 - **Effort:** M
 - **Library:** none (U38: real Windows-style menus)
 - **Supersedes:** T169 (menu bar).
+- **Status:** DONE in v0.11.0 (2026-11-14) — a real QMenuBar (File, View, Help); actions that need a selection are disabled until one exists; the Menu button is gone.
 - **Problem:** The menu is a button with nine actions in one flat list, and four of them are enabled with nothing selected, answering with modal warnings.
 - **Fix:** A real `QMenuBar`: File (New profile, New project, Export project, Import package, Settings), View (Profiles, Projects), Help (How to Use Stella, Chat). Actions that need a selection are disabled until one exists. The Menu button goes away.
 - **Done:** With an empty store, the actions that need a selection are greyed out; no menu action answers with a "pick one first" modal.
@@ -832,6 +837,7 @@ accounts for their findings.)
 - **Effort:** L
 - **Library:** 021 Glanceable surfaces, 003 Calm technology
 - **Extends:** T151 (loss chart plus run history: elevated from P3 to P0; the brief makes it core).
+- **Status:** DONE in v0.11.0 (2026-11-14) — a loss curve (QPainter, redrawn on new points only) plus speed (steps per minute), RAM used, time left, and epoch in the glanceable card; the finished run's curve and summary remain visible. (The run-history half is T151, done in v0.20.0.)
 - **Problem:** The only loss readout is one text line. No graph, no speed, no RAM, no time left, no run history. The brief asks for live graphs and stats with a middle-school science software feel, and today there is nothing to watch.
 - **Fix:** A loss curve (QPainter, redrawn on new points only, no per-frame cost), plus speed (steps per minute), RAM used, time left, and epoch, in the glanceable card. The UI keeps the loss series from the worker's progress signal (step, total, loss already emitted). Run history is kept per project so the last run's curve is still there after it finishes.
 - **Done:** During a run the graph draws, RAM, speed, and time left update, and the finished run's curve and summary remain visible.
@@ -3521,6 +3527,7 @@ accounts for their findings.)
 - **Origin:** repo-audit verdict (R6)
 - **Covers:** R6
 - **Effort:** S
+- **Status:** RESOLVED, no change (2026-11-14) — premise false: the live Ollama namespace is "maternion" (m-a-t-e-r-n-i-o-n, 9 letters, no 'u', no trailing 's'), verified by machine check against the live ollama.com page (crawled 2026-11-14 09:45 UTC); STELLA and Forge already use exactly those 9 letters. T129's quoted "maternions" (10 letters, with 's') and "quaternions" (11 letters) exist neither on Ollama nor in the code. Applying the Fix would have broken the driver tag.
 - **Problem:** The word is spelled "maternions" in 6 places and
   "quaternions" in 0 — counted byte-exact by the verdict —
   including live code in drive_gui.py:22, visible in the window.

@@ -147,9 +147,6 @@ def test_full_template_walk(agent, store, monkeypatch):
             + tool_block("create_profile", {"model": "LiquidAI/LFM3-1.7B"}),
             tool_block("create_project", {"name": "tool-calls"}),
             tool_block("use_sample_dataset", {}),
-            tool_block(
-                "set_project_settings", {"settings": {"rank": 8, "epochs": 2}}
-            ),
             tool_block("start_training", {}),
             "All done. Training finished with final loss 2.5000.",
         ]
@@ -159,8 +156,9 @@ def test_full_template_walk(agent, store, monkeypatch):
     assert "All done" in reply
     proj = store.get_project("lfm3-1-7b", "tool-calls")
     assert proj["dataset_ref"] == "sample-tool-calls.jsonl"
-    assert proj["settings"]["rank"] == 8
-    assert proj["settings"]["epochs"] == 2
+    # No settings step in the script (T16): the project keeps the
+    # auto recipe Stella picked for this PC.
+    assert proj["settings_source"] == "auto"
     assert agent.current_profile == "lfm3-1-7b"
     assert agent.current_project == "tool-calls"
 
@@ -236,12 +234,22 @@ def test_template_has_eight_steps_in_order():
         "Goal",
         "Base model",
         "Data",
-        "Settings",
+        "Recipe",  # T16: step 4 no longer names settings.
         "Train",
         "Check",
         "Export",
         "Test and back up",
     ]
+
+
+def test_template_step_four_names_no_settings():
+    """T16: the recipe step tells the user there is nothing to set,
+    and names no setting."""
+    _key, title, meaning = TEMPLATE_STEPS[3]
+    assert title == "Recipe"
+    assert "Nothing to set" in meaning
+    for word in ("rank", "learning rate", "epochs", "batch size", "seq len"):
+        assert word not in meaning.lower(), word
 
 
 def test_system_prompt_names_template_tools_and_session():
@@ -317,37 +325,23 @@ def test_list_projects_tool(agent, store, seeded):
     assert "draft" in result
 
 
-def test_settings_validation(agent, store, seeded):
-    base = {"profile": "lfm3-tool", "project": "tool-calls"}
-    rank_before = store.get_project("lfm3-tool", "tool-calls")["settings"]["rank"]
-    bad_rank = dict(base, settings={"rank": -5})
-    assert "between 1 and 64" in agent.call_tool(
-        "set_project_settings", bad_rank
+def test_no_settings_tool(agent):
+    # T16: the chat has no way to read or write training settings —
+    # Stella picks the recipe for this PC, and the user never touches
+    # it. A model asking for the old tool gets the unknown-tool reply,
+    # and the system prompt never names it.
+    result = agent.call_tool(
+        "set_project_settings",
+        {
+            "profile": "lfm3-tool",
+            "project": "tool-calls",
+            "settings": {"rank": 4},
+        },
     )
-    bad_lr = dict(base, settings={"learning_rate": -0.5})
-    assert "between 0.0 and 1.0" in agent.call_tool(
-        "set_project_settings", bad_lr
+    assert "no tool called 'set_project_settings'" in result
+    assert "set_project_settings" not in build_system_prompt(
+        profile="lfm3-tool", project="tool-calls", installed_models=[]
     )
-    bad_method = dict(base, settings={"method": "full"})
-    assert "does not run on this PC" in agent.call_tool(
-        "set_project_settings", bad_method
-    )
-    unknown = dict(base, settings={"banana": 3})
-    assert "no setting called 'banana'" in agent.call_tool(
-        "set_project_settings", unknown
-    )
-    non_int = dict(base, settings={"rank": 2.5})
-    assert "whole number" in agent.call_tool(
-        "set_project_settings", non_int
-    )
-    # The bad sets stored nothing.
-    assert store.get_project("lfm3-tool", "tool-calls")["settings"]["rank"] == rank_before
-    good = dict(base, settings={"rank": 4, "epochs": 2})
-    result = agent.call_tool("set_project_settings", good)
-    assert "rank 4" in result
-    settings = store.get_project("lfm3-tool", "tool-calls")["settings"]
-    assert settings["rank"] == 4
-    assert settings["epochs"] == 2
 
 
 def test_set_dataset_tool_with_real_file(agent, store, seeded, tmp_path):

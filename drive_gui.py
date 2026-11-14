@@ -1,6 +1,6 @@
 """Drive the Stella window offscreen and save screenshots for eyeballing.
 
-Grabs: the main window (session set), the menu open, the Profile
+Grabs: the main window (session set), the File menu open, the Profile
 window, the How to Use window. Run with the Qt test env:
 
   LD_LIBRARY_PATH=~/workspace/qt-libs/root/usr/lib/x86_64-linux-gnu \
@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QSettings
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMenu
 
 from stella.gui import MainWindow
 from stella.model import Store
@@ -46,6 +46,10 @@ settings = QSettings("/tmp/stella-shoot-settings.ini",
 win = MainWindow(store=store, settings=settings)
 win.show()
 app.processEvents()
+# The seeded store has no weights and no trained project, so the
+# first-run checklist would cover the bento: dismiss it for the shoot.
+win._checklist_dismiss()
+app.processEvents()
 # Set the session: lfm3-tool / tool-calls, and expand the profile.
 win.set_session("lfm3-tool", "tool-calls")
 app.processEvents()
@@ -66,36 +70,38 @@ def _save(widget, name):
 
 
 # 1. Main window with a session set.
-_save(win, "stella-v04-window.png")
+_save(win, "stella-v11-window.png")
 
-# 2. The menu open. showMenu() pops it; grab the window (the popup
-# is a separate top-level window offscreen, so grab the menu itself).
-win.menu_button.showMenu()
-app.processEvents()
-menu = win.menu
-_save(menu, "stella-v04-menu.png")
-menu.close()
-app.processEvents()
+# 2. The File menu open. The popup is a separate top-level window
+# offscreen, so grab the menu itself.
+menus = win.menuBar().findChildren(QMenu)
+file_menu = menus[0] if menus else None
+if file_menu is not None:
+    file_menu.popup(win.menuBar().mapToGlobal(win.menuBar().rect().topLeft()))
+    app.processEvents()
+    _save(file_menu, "stella-v11-menu.png")
+    file_menu.close()
+    app.processEvents()
 
 # 3. The Profile window.
 prof_win = win.open_profile_window("lfm3-tool")
 app.processEvents()
-_save(prof_win, "stella-v04-profile.png")
+_save(prof_win, "stella-v11-profile.png")
 print("profile window title:", prof_win.windowTitle())
 
 # 4. The How to Use window, first topic selected.
 howto = win.open_howto_window()
 howto.topic_list.setCurrentRow(0)
 app.processEvents()
-_save(howto, "stella-v04-howto.png")
+_save(howto, "stella-v11-howto.png")
 
-# 5. The session scrolled to the Train panel.
+# 5. The session scrolled to the bottom (train details).
 win.session_scroll.verticalScrollBar().setValue(
     win.session_scroll.verticalScrollBar().maximum()
 )
 app.processEvents()
-_save(win, "stella-v04-train-panel.png")
-print("train widgets:", win.train_start_btn.text(), "|",
-      win.train_pause_btn.text(), "|", win.train_resume_btn.text(), "|",
+_save(win, "stella-v11-details.png")
+print("job buttons:", [b.text() for b in win.job_buttons.values()], "|",
+      "go:", win.go_btn.text(), "|",
       win.train_export_gguf_btn.text(), "|", win.train_probe_btn.text())
 print("activity:", win.activity_text.text())

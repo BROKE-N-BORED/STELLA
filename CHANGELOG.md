@@ -1,5 +1,51 @@
 # Changelog
 
+## v0.11.0 — 2026-11-14
+
+The UI rebuild, P0 slice (audit #9, tasks T15-T20): the window
+becomes toy-simple. Pick a model, pick a job, press go — nothing
+else on the way.
+
+- T15 — the main screen is a bento tile now: 1. Pick a model,
+  2. Pick a job (Train, Sleep, Make smaller, Teach a small model),
+  3. Press go. The Train and Sleep buttons are gone; Go runs the
+  picked job. With no project yet, Go asks for the job name
+  inline and creates the project as part of the pick (this
+  supersedes T113). With no dataset yet, Go offers the sample or
+  a file pick, inline. The tree stays as the library. The model
+  pick, the job pick, and Go all sit above the fold at 1100x680.
+- T16 — settings leave every screen. The settings form is gone
+  from the Project window (name, dataset, notes stay), the
+  settings line is gone from the session summary, the Training
+  defaults block is gone from Settings, and the chat template,
+  the chat greeting, and the How to Use topics stop naming
+  settings. Stored settings still exist in the model for
+  compatibility; nothing in the UI reads or writes them. The
+  chat agent's set_project_settings tool is removed outright —
+  a model-facing settings path would still be the user touching
+  settings through the chat, which the Brief forbids.
+- T17 — first-run setup checklist: on first launch the main
+  screen shows three steps (1. Pick a model. 2. Get its weights.
+  3. Run a tiny first training, a real 20-example run) instead
+  of a disabled wall. Each step is a button that does the step;
+  a finished step ticks. Dismissible, never reappears as a modal,
+  and a running job always shows the main screen instead.
+- T18 — the model picker is a list now: each row shows one plain
+  line for what the model does plus a fit verdict (Fits this PC,
+  Too big for this PC, or honestly unknown) from the backend's
+  PC measurement. Details (size plus RAM numbers) appear on tap,
+  not up front. Nothing is selected by default; Enter with no
+  pick does nothing.
+- T19 — a real menu bar (File, View, Help) replaces the Menu
+  button. Actions that need a selection (New project, Export
+  project, Profiles, Projects) are disabled until one exists,
+  instead of opening a "pick one first" modal.
+- T20 — live training graphs and stats: a loss curve drawn on
+  new points only, plus speed (steps a minute), RAM used, time
+  left, and epoch, in the glanceable card under the hero. The
+  last run's curve is rebuilt from the project's run log, so it
+  is still there after the run finishes.
+
 ## v0.10.0 — 2026-11-13
 
 The finish list, second slice: the RAM guards estimate before

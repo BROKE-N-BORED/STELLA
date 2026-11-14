@@ -130,6 +130,17 @@ def _disk_free_gb(path: Path) -> float | None:
         return None
 
 
+def ram_usage_gb() -> tuple[float | None, float | None]:
+    """(used GB, total GB) of RAM on this PC right now, or
+    (None, None) when it cannot be read. The glanceable card
+    (T20) reads this on every progress update: it is only the
+    meminfo parse, not the full PC measurement."""
+    total, available = _ram_gb()
+    if total is None or available is None:
+        return None, None
+    return round(total - available, 2), total
+
+
 def measure_pc(home: str | Path | None = None) -> dict:
     """Measure this PC. Returns cpu_count, cpu_model, ram_total_gb,
     ram_available_gb, disk_free_gb (of the Stella home filesystem),

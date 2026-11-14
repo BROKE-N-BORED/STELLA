@@ -70,6 +70,18 @@ job, export it as a usable package.
   project announces the extension first. Damaged manifests show
   as rows instead of vanishing, and the Profile/Project windows
   warn about unsaved edits.
+- v0.11.0 UI rebuild, P0 slice (2026-11-14): the main screen is
+  pick a model, pick a job, press go — one hero tile, no
+  scrolling at 1100x680, with a first-run setup checklist
+  (pick a model, get its weights, run a tiny first training)
+  for an empty store. Training settings left every screen: the
+  backend picks the recipe and nothing in the UI names a
+  setting. The model picker shows what each model does plus a
+  fit verdict for this PC, with nothing selected by default. A
+  real menu bar (File, View, Help) replaces the Menu button,
+  with actions disabled until they can work. Training shows a
+  live loss curve plus speed, RAM, time left, and epoch, and
+  the last run's curve is still there after it finishes.
 
 ## Install
 
