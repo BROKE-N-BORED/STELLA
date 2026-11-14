@@ -25,8 +25,13 @@ import subprocess
 from pathlib import Path
 
 from .model import StellaError, Store
+from .train import RAM_LIMIT_BYTES
 
 DEFAULT_QUANT = "Q4_K_M"
+
+# Headroom for the OS + Stella itself while a merge or a converter
+# runs (T31). The training estimator uses the same shape.
+RAM_HEADROOM_BYTES = 1 * 1024**3
 
 LLAMA_CPP_HINT = (
     "llama.cpp was not found. Stella needs its converter + quantizer "
@@ -62,12 +67,20 @@ def find_llama_cpp() -> tuple[Path, Path]:
 
     convert = None
     quantize = None
+    not_executable = None
     for d in candidates:
         if convert is None and (d / "convert_hf_to_gguf.py").is_file():
             convert = d / "convert_hf_to_gguf.py"
         for q in (d / "build" / "bin" / "llama-quantize", d / "llama-quantize"):
             if quantize is None and q.is_file():
-                quantize = q
+                # The quantizer must be executable, not just present
+                # (T102): a chmod-644 binary is "found" and then dies
+                # as a raw PermissionError from subprocess. Record
+                # the first non-executable one so the error can name it.
+                if os.access(q, os.X_OK):
+                    quantize = q
+                elif not_executable is None:
+                    not_executable = q
         if convert is not None and quantize is not None:
             break
     if quantize is None:
@@ -78,6 +91,13 @@ def find_llama_cpp() -> tuple[Path, Path]:
     if convert is None:
         missing.append("convert_hf_to_gguf.py")
     if quantize is None:
+        if not_executable is not None:
+            raise StellaError(
+                f"llama-quantize at {not_executable} is not executable. "
+                "Fix it with:\n"
+                f"  chmod +x {not_executable}\n"
+                "or rebuild llama.cpp (cmake --build build -j)."
+            )
         missing.append("llama-quantize")
     if missing:
         raise StellaError(
@@ -87,6 +107,65 @@ def find_llama_cpp() -> tuple[Path, Path]:
     return convert, quantize
 
 
+def _gb(n: int) -> str:
+    """Bytes as 'x.xx GB', matching the training guard's format."""
+    return f"{n / 1024**3:.2f} GB"
+
+
+def estimate_merge_bytes(base_bytes: int) -> int:
+    """RAM for the merge (T31): the base weights + the merged copy
+    + headroom for the OS and Stella itself. Conservative on
+    purpose — the merge runs after hours of training, so the
+    estimate errs towards refusing rather than OOMing."""
+    return base_bytes * 2 + RAM_HEADROOM_BYTES
+
+
+def check_merge_fit(
+    base_bytes: int, limit_bytes: int = RAM_LIMIT_BYTES
+) -> None:
+    """Refuse the merge when base + merged copy + headroom does
+    not fit the ceiling. The estimate is named in the message."""
+    estimate = estimate_merge_bytes(base_bytes)
+    if estimate > limit_bytes:
+        raise StellaError(
+            f"Merging needs about {_gb(estimate)} of RAM (the base "
+            f"model at {_gb(base_bytes)}, plus the merged copy, plus "
+            f"headroom), over the {_gb(limit_bytes)} ceiling on this "
+            "PC.\n"
+            "Export on a machine with more RAM, or use a smaller "
+            "base model."
+        )
+
+
+def merge_warnings(
+    base_bytes: int, limit_bytes: int = RAM_LIMIT_BYTES
+) -> list[str]:
+    """Warnings for an export that fits the merge guard but is
+    tight (T31). The converter loads the merged model again as a
+    separate process, while Stella's merge memory may still be
+    resident — when merge + converter together pass the ceiling,
+    the export proceeds but the user is told to close other apps
+    first. Empty when the merge itself does not fit: the guard
+    refuses then, and no warning is needed on top."""
+    if estimate_merge_bytes(base_bytes) > limit_bytes:
+        return []
+    total = (
+        estimate_merge_bytes(base_bytes)
+        + base_bytes
+        + RAM_HEADROOM_BYTES
+    )
+    if total <= limit_bytes:
+        return []
+    return [
+        f"Close other apps before exporting: the merge needs about "
+        f"{_gb(estimate_merge_bytes(base_bytes))} of RAM, and the "
+        f"converter then loads the model again as a separate "
+        f"process (about {_gb(base_bytes + RAM_HEADROOM_BYTES)}). "
+        f"Together that is over the {_gb(limit_bytes)} on this PC, "
+        "so the export is tight on RAM."
+    ]
+
+
 def merge_adapter(
     base_ref: str,
     adapter_dir: str | Path,
@@ -94,19 +173,33 @@ def merge_adapter(
     *,
     _model_loader=None,
     _dtype: str = "bfloat16",
+    _base_bytes: int | None = None,
 ) -> Path:
     """Merge a LoRA adapter into its base and save HF weights.
 
     `_model_loader` is a test hook: (base_ref, adapter_dir) -> model,
-    so tests can merge a tiny model with no downloads.
+    so tests can merge a tiny model with no downloads. `_base_bytes`
+    is a test hook for the merge guard: the base size in bytes,
+    used instead of reading the model's metadata.
     """
     from .train import load_base_model, require_training_deps
 
-    require_training_deps()
     adapter_dir = Path(adapter_dir)
     out_dir = Path(out_dir)
     if not (adapter_dir / "adapter_config.json").is_file():
         raise StellaError(f"no adapter in {adapter_dir}")
+    # The merge guard (T31): base + merged copy + headroom, from
+    # the model's metadata — before loading anything, and before
+    # the training deps are even required, so a model that cannot
+    # fit is refused on any machine. A test loader skips it (the
+    # test controls its own fake world).
+    if _model_loader is None:
+        if _base_bytes is None:
+            from .train import load_model_metadata
+
+            _base_bytes = load_model_metadata(base_ref)["base_bytes"]
+        check_merge_fit(_base_bytes)
+    require_training_deps()
     if _model_loader is not None:
         model, tokenizer = _model_loader(base_ref, adapter_dir)
     else:
@@ -150,6 +243,13 @@ def convert_to_gguf(
     """
     import sys
 
+    # Validate the quant up front (T27), reusing the requant
+    # validator — a bogus quant fails here in a millisecond, not at
+    # the end of the pipeline. (Imported here: requant imports this
+    # module, so a top-level import would be circular.)
+    from .requant import validate_quant
+
+    quant = validate_quant(quant)
     hf_dir = Path(hf_dir)
     out_path = Path(out_path)
     if not (hf_dir / "config.json").is_file():
@@ -162,25 +262,36 @@ def convert_to_gguf(
     convert, quantize = llama_cpp
     out_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_f16 = out_path.parent / (out_path.stem + "-f16.gguf")
-    _run(
-        [
-            sys.executable, str(convert), str(hf_dir),
-            "--outfile", str(tmp_f16), "--outtype", "f16",
-        ],
-        _runner=_runner,
-    )
-    if _runner is None and not tmp_f16.is_file():
-        raise StellaError(
-            f"converter finished but wrote no file: {tmp_f16}"
+    try:
+        _run(
+            [
+                sys.executable, str(convert), str(hf_dir),
+                "--outfile", str(tmp_f16), "--outtype", "f16",
+            ],
+            _runner=_runner,
         )
-    _run(
-        [str(quantize), str(tmp_f16), str(out_path), quant],
-        _runner=_runner,
-    )
-    if _runner is None and not out_path.is_file():
-        raise StellaError(
-            f"quantizer finished but wrote no file: {out_path}"
+        if _runner is None and not tmp_f16.is_file():
+            raise StellaError(
+                f"converter finished but wrote no file: {tmp_f16}"
+            )
+        _run(
+            [str(quantize), str(tmp_f16), str(out_path), quant],
+            _runner=_runner,
         )
+        if _runner is None and not out_path.is_file():
+            raise StellaError(
+                f"quantizer finished but wrote no file: {out_path}"
+            )
+    except StellaError as exc:
+        # A failed quantize used to leave the F16 intermediate
+        # behind — ~3.4 GB on a real model (T26). Remove it and say
+        # so in the error.
+        if tmp_f16.is_file():
+            tmp_f16.unlink()
+            raise StellaError(
+                f"{exc} The half-finished F16 file was removed."
+            ) from exc
+        raise
     if tmp_f16.is_file() and _runner is None:
         tmp_f16.unlink()  # the F16 intermediate is 2x the size; drop it
     return {
@@ -225,6 +336,8 @@ def export_gguf(
     quant: str = DEFAULT_QUANT,
     from_checkpoint: int | None = None,
     llama_cpp: tuple[Path, Path] | None = None,
+    on_warning=None,
+    force: bool = False,
     _runner=None,
     _model_loader=None,
     _dtype: str = "bfloat16",
@@ -233,10 +346,22 @@ def export_gguf(
 
     Merges the adapter (project adapter/, or checkpoints/step-N with
     --from-checkpoint), converts, quantizes, writes the Modelfile.
-    Returns paths + the ollama create command.
+    Returns paths + the ollama create command. `on_warning` (a
+    callable taking one string) is called up front, before the
+    merge, with any converter warning (T31).
+
+    Overwriting (T24 — the REFUSE pick): an existing GGUF at the
+    output path refuses the export with a plain message naming
+    --force, before the merge runs. The previous output cost a
+    merge + convert + quantize to produce; it is never deleted
+    silently. `force=True` overwrites deliberately.
     """
+    from .requant import validate_quant
     from .train import LFM3_HF_REPO
 
+    # The quant is validated first (T27): a bogus value fails in a
+    # millisecond, before the merge, the convert, or anything else.
+    quant = validate_quant(quant)
     prof = store.get_profile(profile)
     proj = store.get_project(profile, project)
     project_dir = store.project_dir(profile, project)
@@ -263,21 +388,66 @@ def export_gguf(
         )
     dest = Path(dest).expanduser()
     dest.mkdir(parents=True, exist_ok=True)
+    gguf_name = f"{project}-{quant.lower().replace('_', '-')}.gguf"
+    gguf_path = dest / gguf_name
+    # Refuse to overwrite (T24): the previous GGUF cost a merge +
+    # convert + quantize to produce. Checked here, before the
+    # merge — a refused export costs nothing and destroys nothing.
+    if gguf_path.exists() and not force:
+        raise StellaError(
+            f"{gguf_path} already exists. Exporting again would "
+            "overwrite it. Use --force to replace it deliberately, "
+            "or export to a different folder."
+        )
     merged_dir = dest / f"{project}-merged-hf"
     if merged_dir.exists():
         shutil.rmtree(merged_dir)
-    merge_adapter(
-        base_ref, adapter_dir, merged_dir,
-        _model_loader=_model_loader, _dtype=_dtype,
-    )
-    gguf_name = f"{project}-{quant.lower().replace('_', '-')}.gguf"
-    gguf_path = dest / gguf_name
-    if gguf_path.exists():
-        gguf_path.unlink()
-    result = convert_to_gguf(
-        merged_dir, gguf_path, quant=quant,
-        llama_cpp=llama_cpp, _runner=_runner,
-    )
+    # Check llama.cpp BEFORE the merge (T26): the check is cheap,
+    # the merge is minutes. A missing install used to fail only
+    # after the whole merge, leaving ~3.4 GB of merged weights
+    # behind. (A test runner stands in for llama.cpp, so the check
+    # is skipped when one is injected.)
+    if llama_cpp is None and _runner is None:
+        llama_cpp = find_llama_cpp()
+    # The converter warning (T31), up front — before the merge:
+    # the converter loads the model again as a separate process,
+    # and on a tight export the user should close other apps
+    # first. Skipped when the metadata cannot be read (a test fake
+    # world): the merge guard raises its own error there.
+    warnings: list[str] = []
+    if _model_loader is None:
+        try:
+            from .train import load_model_metadata
+
+            warnings = merge_warnings(
+                load_model_metadata(base_ref)["base_bytes"]
+            )
+        except StellaError:
+            warnings = []
+    for warning in warnings:
+        if on_warning is not None:
+            on_warning(warning)
+    try:
+        merge_adapter(
+            base_ref, adapter_dir, merged_dir,
+            _model_loader=_model_loader, _dtype=_dtype,
+        )
+        if gguf_path.exists():
+            # --force: the deliberate overwrite (T24).
+            gguf_path.unlink()
+        result = convert_to_gguf(
+            merged_dir, gguf_path, quant=quant,
+            llama_cpp=llama_cpp, _runner=_runner,
+        )
+    except StellaError as exc:
+        # A failure after the merge leaves no orphaned merged
+        # weights behind (T26): remove the merged dir and say so.
+        if merged_dir.exists():
+            shutil.rmtree(merged_dir)
+            raise StellaError(
+                f"{exc} The half-finished merged weights were removed."
+            ) from exc
+        raise
     model_name = f"{profile}-{project}"
     _modelfile, command = write_modelfile(
         gguf_path, dest / "Modelfile", name=model_name
@@ -293,6 +463,7 @@ def export_gguf(
                 "gguf": str(gguf_path),
                 "quant": quant,
                 "gguf_bytes": result["bytes"],
+                "warnings": warnings,
                 "ollama_name": model_name,
                 "ollama_create": command,
             },
@@ -308,6 +479,7 @@ def export_gguf(
         "gguf": str(gguf_path),
         "quant": quant,
         "gguf_bytes": result["bytes"],
+        "warnings": warnings,
         "modelfile": str(dest / "Modelfile"),
         "ollama_name": model_name,
         "ollama_create": command,

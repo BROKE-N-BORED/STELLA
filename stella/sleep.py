@@ -686,8 +686,9 @@ def sleep_project(
 
     def _forward(event: dict):
         # Step/checkpoint/val/progress flow through; "done" and
-        # "paused" are sleep's to report, not the loop's.
-        if event.get("type") in ("started", "step", "checkpoint", "val"):
+        # "paused" are sleep's to report, not the loop's. Warnings
+        # (T99: over-long rows cut short) flow through too.
+        if event.get("type") in ("started", "step", "checkpoint", "val", "warning"):
             emit(event)
 
     has_checkpoints = (cycle_dir / "checkpoints").is_dir() and any(

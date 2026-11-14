@@ -59,6 +59,14 @@ def cmd_profiles(args) -> int:
         print("or: stella create-profile <name> --tag <ollama-tag> --role <role>")
         return 0
     for p in profiles:
+        # A damaged manifest (T3) is a row with its error, not a
+        # silent skip — the folder is still on disk.
+        if p.get("_damaged"):
+            print(
+                f"{p.get('name') or '(unnamed profile)'}\t"
+                f"(damaged: {p.get('_error', 'bad file')})"
+            )
+            continue
         # Defensive read (T5): one nameless manifest degrades to a
         # warning line instead of killing the whole list.
         name = p.get("name") or p.get("display_name") or "(unnamed profile)"
@@ -82,6 +90,11 @@ def cmd_projects(args) -> int:
         return 0
     for p in projects:
         name = p.get("name") or "(unnamed project)"
+        # A damaged manifest (T3) is a row with its error, not a
+        # silent skip.
+        if p.get("_damaged"):
+            print(f"{name}\t(damaged: {p.get('_error', 'bad file')})")
+            continue
         print(f"{name}\tstatus: {p.get('status', 'draft')}")
         # A broken metamorph block degrades to a warning line (T39),
         # read through the shared reader — never a crash, never
@@ -158,6 +171,17 @@ def cmd_train(args) -> int:
             print(f"checkpoint saved: step {event['step']}", flush=True)
         elif kind == "val":
             print(f"epoch {event['epoch']} validation loss {event['loss']:.4f}")
+        elif kind == "warning":
+            print(f"Warning: {event.get('message', '')}")
+        elif kind == "extending":
+            # A resume on a project that already finished training
+            # extends it past the original run (T25): say so, with
+            # the new total, before the steps print.
+            print(
+                f"This project already finished training "
+                f"({event['trained_steps']} steps). Resuming extends "
+                f"it to {event['new_total']} total steps."
+            )
         elif kind == "paused":
             print(f"Paused at step {event['step']}. Resume with --resume.")
         elif kind == "done":
@@ -182,6 +206,7 @@ def cmd_train(args) -> int:
             resume=args.resume,
             dataset_path=args.dataset,
             base_ref=args.base,
+            force=args.force,
             on_event=on_event,
             controller=controller,
         )
@@ -193,7 +218,8 @@ def cmd_train(args) -> int:
         f"Trained {summary['steps']} steps, "
         f"final loss {loss_text}, "
         f"{summary['trainable_params']:,} trainable params, "
-        f"about {summary['ram_estimate_gb']} GB RAM used."
+        # T35: this is the pre-run estimate, not a measurement.
+        f"about {summary['ram_estimate_gb']} GB RAM (estimated)."
     )
     return 0
 
@@ -209,6 +235,8 @@ def cmd_export_gguf(args) -> int:
         args.dir,
         quant=args.quant,
         from_checkpoint=args.from_checkpoint,
+        force=args.force,
+        on_warning=print,  # T31: the converter warning, before the merge
     )
     print(f"Merged HF weights: {result['merged_hf']}")
     print(
@@ -300,6 +328,8 @@ def cmd_sleep(args) -> int:
             print(f"checkpoint saved: step {event['step']}", flush=True)
         elif kind == "val":
             print(f"epoch {event['epoch']} validation loss {event['loss']:.4f}")
+        elif kind == "warning":
+            print(f"Warning: {event.get('message', '')}")
         elif kind == "replay":
             print("Replay check: old rows vs new adapter...")
         elif kind == "replay_done":
@@ -563,6 +593,21 @@ def cmd_distill(args) -> int:
     return 0
 
 
+def _positive_int(value: str) -> int:
+    """Argparse type for --steps (T56): a whole number, at least 1.
+    0 or a negative number is refused by argparse with a plain
+    message, before the command runs."""
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"{value!r} is not a whole number."
+        ) from None
+    if number <= 0:
+        raise argparse.ArgumentTypeError("--steps must be at least 1.")
+    return number
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="stella", description="Stella: fine-tune models on your own PC."
@@ -607,10 +652,13 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("train", help="LoRA-tune a project on CPU")
     p.add_argument("profile")
     p.add_argument("project")
-    p.add_argument("--steps", type=int, default=None,
+    p.add_argument("--steps", type=_positive_int, default=None,
                    help="cap the run at N optimizer steps (proof run)")
     p.add_argument("--resume", action="store_true",
                    help="continue from the latest checkpoint")
+    p.add_argument("--force", action="store_true",
+                   help="re-train a project that already finished "
+                   "training (replaces the adapter)")
     p.add_argument("--dataset", default=None,
                    help="dataset file (overrides the project's dataset)")
     p.add_argument("--base", default=None,
@@ -627,6 +675,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--from-checkpoint", type=int, default=None,
                    help="export from checkpoints/step-N instead of the "
                    "final adapter")
+    p.add_argument("--force", action="store_true",
+                   help="overwrite an existing GGUF at the output path")
     p.set_defaults(func=cmd_export_gguf)
 
     p = sub.add_parser("probe", help="refusal probe, before vs after tuning")

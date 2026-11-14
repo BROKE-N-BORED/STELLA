@@ -311,6 +311,7 @@ accounts for their findings.)
   edits are preserved (auto-save) or a prompt appeared and the
   choice was honored. Same for a profile role edit across a profile
   switch. No prompt appears when nothing was edited. Edits made during a training run survive the run finishing. The notes area shows its modified state and offers its own save. Tests: GUI tests for the switch-with-edits path on both panels, the completion-refresh path, and the no-prompt-when-clean path.
+- **Status:** DONE in v0.10.0 (2026-11-13) — dirty tracking in both detail windows: snapshot-based is_modified, title asterisk, Save/Discard/Cancel prompt on close and on rename (the PROMPT pick, applied identically to both panels), notes-only save, edits survive the train-finish refresh. Pinned by 8 T2 tests.
 
 ### T3 — Show corrupt manifests as damaged rows, never silently vanish (profiles + projects)
 
@@ -343,6 +344,7 @@ accounts for their findings.)
   restores both normal rows. New tests: a corrupt manifest is
   reported (not skipped) by both list paths, and the GUI shows the
   damaged row in both panes.
+- **Status:** DONE in v0.10.0 (2026-11-13) — broken manifests surface as damaged rows, not silent skips: greyed + italic in the GUI tree (click = status message, double-click opens the manifest for repair), "(damaged: ...)" rows in the CLI lists, skipped by session restore and rename. One shared implementation (_damaged flag in the model).
 
 ### T4 — Ctrl+C must pause the run, not crash it
 
@@ -544,6 +546,7 @@ accounts for their findings.)
   no "Save is done" in the log. Sample dataset with no project
   selected → nothing logged as saved. Tests: bad-LR start
   refused, sample-dataset save claim gated, no-selection case.
+- **Status:** DONE in v0.10.0 (2026-11-13) — Start training checks the open Project window's unsaved edits first (Save/Discard/Cancel); a bad learning rate sitting unsaved stops the start instead of training on stale settings. Sample-dataset with no project warns and claims nothing.
 
 ### T9 — Delete confirms default to No
 
@@ -593,6 +596,7 @@ accounts for their findings.)
   and the gate verdict are unchanged; a test with a
   memory-accounting fake (or a small model with the load counted)
   proves the second load happens only after the first is freed.
+- **Status:** DONE in v0.10.0 (2026-11-13) — the refusal probe loads one base at a time: before pass, free (del + gc.collect), then the tuned model. Two 1.7B bases are never held at once.
 
 ### T11 — Make New Profile a real QDialog
 
@@ -668,6 +672,7 @@ accounts for their findings.)
   second profile with an already-used tag: the duplicate note
   appears. Tests cover: warning on uninstalled tag, no warning on
   installed tag, duplicate-tag note, proceed-anyway path.
+- **Status:** DONE in v0.10.0 (2026-11-13) — soft tag validation at create and at save: a tag not installed locally, or already used by another profile, warns and asks (Proceed/Cancel, default No) — a deliberate entry is never blocked. An empty tag or an unanswered Ollama never warns.
 
 ### T13 — Keep the live training log
 
@@ -695,6 +700,7 @@ accounts for their findings.)
   shows friendly lines, never raw JSON records; a run with no log
   file still shows its in-memory lines. Tests: log survives the
   finish refresh, JSONL renders as friendly lines.
+- **Status:** DONE in v0.10.0 (2026-11-13) — the live training log keeps its in-memory lines when the panel refreshes; train_log.jsonl re-renders as friendly "step N/total loss x.xxxx" lines on project switch, never raw JSON.
 
 ### T14 — Fix the menu icon: unquote `Icon=`, render the PNGs at install time, never point at a missing file
 
@@ -888,6 +894,7 @@ accounts for their findings.)
   a crafted optimizer.pt carrying a pickle payload is refused
   (test with a malicious pickle); existing valid checkpoints still
   resume.
+- **Status:** DONE in v0.10.0 (2026-11-13) — optimizer.pt loads with weights_only=True; a malicious pickle is refused, never executed. Audit found it is the only torch.load in the tree, so no migration was needed.
 
 ### T23 — Trash instead of delete (profiles + projects)
 
@@ -938,6 +945,7 @@ accounts for their findings.)
   deliberately; the previous output is recoverable after an
   overwrite-with-backup. Tests: second export without --force
   does not destroy the first; --force works.
+- **Status:** DONE in v0.10.0 (2026-11-13) — the REFUSE pick: GGUF export refuses to overwrite an existing output with a plain message naming --force, checked before the merge runs; --force on export-gguf overwrites deliberately. Never deletes a previous export silently.
 
 ### T25 — Refuse or confirm re-training a trained project, and say when resume extends one
 
@@ -974,6 +982,7 @@ accounts for their findings.)
   project announces the extension and the new total first. Tests:
   refuse without `--force`, `--force` re-trains, resume-on-trained
   announces.
+- **Status:** DONE in v0.10.0 (2026-11-13) — re-training a trained project refuses ("already trained. Use --force to re-train it") and leaves the adapter untouched; --force re-trains deliberately. --resume on a trained project announces the extension and the new total first (the extending event, printed by CLI and GUI). The GUI asks before re-training.
 
 ### T26 — Check llama.cpp before the merge; clean up the merged dir and the F16 intermediate on failure
 
@@ -1014,6 +1023,7 @@ accounts for their findings.)
   missing-llama.cpp fast-fail, no leftover merged dir. A failed
   quantize leaves no F16 intermediate behind (or names it and says
   it is safe to delete).
+- **Status:** DONE in v0.10.0 (2026-11-13) — export_gguf checks llama.cpp before the merge, not after; a failed export removes the half-finished merged dir and the F16 intermediate and says so in the error.
 
 ### T27 — Validate `--quant` up front
 
@@ -1039,6 +1049,7 @@ accounts for their findings.)
 - **Done:** `--quant BOGUS` exits 1 with a plain error naming the
   valid values; every valid quant still exports. Tests: bogus
   quant refused, each valid quant accepted.
+- **Status:** DONE in v0.10.0 (2026-11-13) — the GGUF path validates --quant up front with the existing requant.validate_quant (no second validator): a bogus quant fails in a millisecond, before the merge, with the valid values named.
 
 ### T28 — The RAM guard must estimate before loading anything
 
@@ -1061,6 +1072,7 @@ accounts for their findings.)
   load (proven with a test that asserts no load happened — e.g. a
   fake loader that records calls); a run that fits proceeds; the
   guard's claim in the docs matches its behavior.
+- **Status:** DONE in v0.10.0 (2026-11-13) — the RAM guard estimates from the model's config + weight sizes (load_model_metadata, estimate_training_from_metadata) before loading anything; a run that will not fit is refused before the base is anywhere near memory. A second guard with the real param counts still runs after the load.
 
 ### T29 — One job at a time, enforced in the GUI and the engine
 
@@ -1171,6 +1183,7 @@ accounts for their findings.)
 - **Done:** A merge that would not fit is refused before loading
   anything, with the estimate named; a merge that fits proceeds.
   Tests: estimate math, refusal above the ceiling.
+- **Status:** DONE in v0.10.0 (2026-11-13) — merge RAM guard (estimate_merge_bytes, check_merge_fit in gguf.py): base weights + merged copy + headroom, refused before loading when it does not fit. The converter warning (merge_warnings, on_warning) tells the user to close other apps when merge + converter together pass the ceiling.
 
 ### T32 — Seed everything: torch seed at run start + RNG state in checkpoints
 
@@ -1207,6 +1220,7 @@ accounts for their findings.)
   byte-identical adapters; a paused-and-resumed run matches the
   uninterrupted run's losses and final weights. Tests: two-run
   determinism, pause/resume exactness (losses + weights).
+- **Status:** DONE in v0.10.0 (2026-11-13) — torch.manual_seed at fresh-run start (before the LoRA init), and the torch RNG state saved in every checkpoint and restored on resume. Same seed, same adapter; pause/resume is bit-identical to an uninterrupted run. Old checkpoints without RNG state still resume.
 
 ### T33 — Minimum-val guarantee, or a loud warning
 
@@ -1232,6 +1246,7 @@ accounts for their findings.)
   a visible warning that it has none; the loader's "1 to train
   on, 1 to validate" promise holds. Tests: n=2..6 split sizes,
   warning event when val is empty.
+- **Status:** DONE in v0.10.0 (2026-11-13) — every dataset split keeps at least one validation row: n_val = max(1, round(n x val_fraction)) for n >= 2 (n=2 is 1 train + 1 val, as load_dataset promises). Never silently runs with no val set.
 
 ### T34 — Target-module override for unrecognized architectures
 
@@ -1268,6 +1283,7 @@ accounts for their findings.)
 - **Fix:** Say "estimated": `about X GB RAM (estimated)`.
 - **Done:** The CLI's closing line says "estimated", never
   "used", for the pre-run number. Tests: output text.
+- **Status:** DONE in v0.10.0 (2026-11-13) — the CLI closing line says "about X GB RAM (estimated)", not "GB RAM used": the figure is the pre-run estimate, not a measurement.
 
 ### T36 — Close waits for every worker, without freezing
 
@@ -1868,6 +1884,7 @@ accounts for their findings.)
   and --steps -1 are refused with a readable error. Tests: cap
   respected, 0/negative rejected. Resume with `--steps N` trains
   exactly N more steps from the resume point instead of erroring.
+- **Status:** DONE in v0.10.0 (2026-11-13) — --steps is a real cap: run_training_loop takes a remaining-steps budget (start_step + cap, not an epoch shrink), breaks mid-epoch at the cap, and reaching the cap is completion (adapter saved, status trained), not a pause. 0/negative refused in argparse and in the engine.
 
 ### T57 — Merge, don't discard, the profile block on import
 
@@ -2830,6 +2847,7 @@ accounts for their findings.)
   the completion length; over-long completions are truncated or
   dropped with a count. Tests: 200-char completion at
   max_seq_len=64, normal completions unchanged.
+- **Status:** DONE in v0.10.0 (2026-11-13) — completions are bound to max_seq_len (head + EOS kept, truncated flag); the loop warns with the count of cut examples, shown by the CLI, the GUI, and sleep. No sequence may exceed max_seq_len, because the RAM estimate assumes it cannot.
 
 ### T100 — End the completion with the template's turn terminator
 
@@ -2899,6 +2917,7 @@ accounts for their findings.)
   with a plain error naming the file; an executable one is
   found as before. Tests: chmod-644 quantizer, executable
   quantizer.
+- **Status:** DONE in v0.10.0 (2026-11-13) — find_llama_cpp requires the quantizer to be executable (os.access X_OK); a non-executable file is refused naming the file and the chmod +x fix.
 
 ### T103 — Timeout on the converter/quantizer subprocesses
 
@@ -3807,6 +3826,7 @@ accounts for their findings.)
   T25, T27, T56 first).
 - **Done:** One test per risky path; all pass. Tests: this task IS
   the tests.
+- **Status:** DONE in v0.10.0 (2026-11-13) — tests for the risky CLI paths: unknown/no command (exit 2 + usage), --steps 0/negative, --quant BOGUS, corrupt-home lists, resume-on-trained announcement, --force plumbing, converter-warning print, file-destination export, bad-manifest import, nameless manifest. (The Ctrl+C-pause test landed in v0.9.0.)
 
 ### T143 — Record the mode in training artifacts
 

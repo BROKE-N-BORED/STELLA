@@ -181,19 +181,34 @@ def probe_project(
     # missing adapter is reported even on a base install.
     require_training_deps()
 
+    # One base at a time (T10): the before pass runs, the base is
+    # freed, and only then does the tuned model load. Two 1.7B bases
+    # at once is ~7 GB on an 8 GB machine — the probe could not run
+    # on the machine it was built for.
+    import gc
+
     if _model_loader is not None:
         base_model, tokenizer = _model_loader(base_ref, None)
+        before = run_probe(base_model, tokenizer, _generate=_generate)
+        del base_model
+        gc.collect()
         tuned_model, _ = _model_loader(base_ref, adapter_dir)
+        after = run_probe(tuned_model, tokenizer, _generate=_generate)
+        del tuned_model
+        gc.collect()
     else:
         from peft import PeftModel
 
         base_model, tokenizer = load_base_model(base_ref)
+        before = run_probe(base_model, tokenizer, _generate=_generate)
+        del base_model
+        gc.collect()
         tuned_model = PeftModel.from_pretrained(
             load_base_model(base_ref)[0], str(adapter_dir)
         )
-
-    before = run_probe(base_model, tokenizer, _generate=_generate)
-    after = run_probe(tuned_model, tokenizer, _generate=_generate)
+        after = run_probe(tuned_model, tokenizer, _generate=_generate)
+        del tuned_model
+        gc.collect()
     result = {
         "profile": profile,
         "project": project,

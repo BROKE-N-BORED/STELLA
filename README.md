@@ -59,6 +59,17 @@ job, export it as a usable package.
   validated the same way everywhere, and the Project window falls
   back to the usual value with a note when a stored value is bad
   instead of crashing.
+- v0.10.0 guards and honesty (2026-11-13): the RAM guards estimate
+  before loading anything (training from the model's config +
+  weight sizes, the merge from base + merged copy + headroom),
+  training is reproducible (same seed, same adapter; pause/resume
+  is bit-identical), `--steps` is a real cap, and the destructive
+  paths ask or refuse instead of silently destroying finished
+  work — re-training a trained project needs `--force`, re-exporting
+  over an existing GGUF needs `--force`, and resume on a trained
+  project announces the extension first. Damaged manifests show
+  as rows instead of vanishing, and the Profile/Project windows
+  warn about unsaved edits.
 
 ## Install
 
@@ -122,10 +133,12 @@ slow on a Ryzen 3 — hours for a real run — and that is expected.
   A bundled sample (`sample-tool-calls.jsonl`, 20 synthetic Forge
   tool-call traces) is in the Train panel for the proof run.
 - **RAM guard**: before loading anything, Stella estimates the run
-  (base weights + LoRA gradients + AdamW states + activations + 1 GB
-  headroom) and refuses to start if it will not fit 8 GB. A full
-  fine-tune of a 1.7B model needs ~28 GB of optimizer state alone —
-  it is refused outright, every time.
+  from the model's config + weight sizes (never from a loaded
+  model): base weights + LoRA gradients + AdamW states +
+  activations + 1 GB headroom, and refuses to start if it will
+  not fit 8 GB. The merge gets the same treatment (base + merged
+  copy + headroom). A full fine-tune of a 1.7B model needs ~28 GB
+  of optimizer state alone — it is refused outright, every time.
 - **Checkpoints**: saved every N steps (default 50) under the
   project's `checkpoints/step-N/`, each with the adapter, the
   optimizer state, and the training state. Pause any time (Pause

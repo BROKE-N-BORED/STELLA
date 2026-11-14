@@ -328,11 +328,17 @@ def load_dataset(path: str | Path) -> tuple[list[dict], dict]:
 def split_dataset(
     examples: list[dict], val_fraction: float = 0.1, seed: int = 42
 ) -> tuple[list[dict], list[dict]]:
-    """Deterministic train/validate split (same seed = same split)."""
+    """Deterministic train/validate split (same seed = same split).
+
+    Always keeps at least one example for validation (T33) — a
+    2-example dataset used to validate on 0 rows while load_dataset
+    promised "1 to train on, 1 to validate". The cap at n - 1 keeps
+    at least one example for training.
+    """
     order = list(range(len(examples)))
     random.Random(seed).shuffle(order)
     n_val = int(round(len(examples) * val_fraction))
-    n_val = max(0, min(n_val, len(examples) - 1))
+    n_val = max(1, min(n_val, len(examples) - 1))
     val_idx = set(order[:n_val])
     train = [ex for i, ex in enumerate(examples) if i not in val_idx]
     val = [ex for i, ex in enumerate(examples) if i in val_idx]
@@ -414,6 +420,213 @@ def check_ram_fit(estimate_bytes: int, limit_bytes: int = RAM_LIMIT_BYTES) -> No
             "model. A full fine-tune of a 1.7B model does not fit, ever: "
             "its optimizer state alone is ~28 GB."
         )
+
+
+# -- model metadata: size without loading (T28) ----------------------
+# The RAM guard used to load the base model first and ask whether it
+# fit afterwards — on 8 GB, loading a 1.7B base to ask whether it
+# fits can OOM the machine the guard exists to protect. The estimate
+# now comes from the model's config + weight sizes, read off disk
+# (or fetched as two small files from the Hub), never from a loaded
+# model. A run that will not fit is refused before any load.
+
+_DTYPE_BYTES = {
+    "float32": 4, "fp32": 4,
+    "float16": 2, "fp16": 2,
+    "bfloat16": 2, "bf16": 2,
+}
+
+
+def _metadata_from_config(config: dict, base_bytes: int) -> dict:
+    """Shape + size from a config.json dict and the weight bytes.
+
+    Handles both modern configs (hidden_size / num_hidden_layers /
+    intermediate_size) and GPT-2-style ones (n_embd / n_layer /
+    n_inner). The parameter count is the weight bytes divided by
+    the dtype size — close enough for a guard, and it never
+    understates the weights themselves."""
+    hidden = int(
+        config.get("hidden_size")
+        or config.get("n_embd")
+        or config.get("d_model")
+        or 2048
+    )
+    layers = int(
+        config.get("num_hidden_layers")
+        or config.get("n_layer")
+        or 24
+    )
+    intermediate = int(
+        config.get("intermediate_size")
+        or config.get("n_inner")
+        or config.get("d_ff")
+        or hidden * 4
+    )
+    dtype = str(
+        config.get("torch_dtype") or config.get("dtype") or "bfloat16"
+    ).lower()
+    bpp = _DTYPE_BYTES.get(dtype, 2)
+    return {
+        "params": max(1, base_bytes // bpp),
+        "hidden_size": hidden,
+        "num_layers": layers,
+        "intermediate_size": intermediate,
+        "base_bytes": base_bytes,
+        "bytes_per_param": bpp,
+    }
+
+
+def _local_model_metadata(base_dir: Path) -> dict:
+    """Metadata of a local HF folder, from config.json + the weight
+    files. Raises StellaError when the folder holds no model."""
+    config_path = base_dir / "config.json"
+    if not config_path.is_file():
+        raise StellaError(
+            f"could not check whether {str(base_dir)!r} fits this PC: "
+            "that folder does not hold a model (no config.json)."
+        )
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        raise StellaError(
+            f"could not check whether {str(base_dir)!r} fits this PC: "
+            f"its config.json cannot be read ({exc})."
+        ) from exc
+    if not isinstance(config, dict):
+        raise StellaError(
+            f"could not check whether {str(base_dir)!r} fits this PC: "
+            "its config.json does not hold an object."
+        )
+    index_path = base_dir / "model.safetensors.index.json"
+    total_size = None
+    if index_path.is_file():
+        try:
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+            total_size = index.get("metadata", {}).get("total_size")
+        except (json.JSONDecodeError, OSError, AttributeError):
+            total_size = None
+    if total_size is None:
+        weight_files = sorted(base_dir.glob("*.safetensors")) or sorted(
+            base_dir.glob("*.bin")
+        )
+        total_size = sum(f.stat().st_size for f in weight_files)
+    if not total_size:
+        raise StellaError(
+            f"could not check whether {str(base_dir)!r} fits this PC: "
+            "no weight files found there."
+        )
+    return _metadata_from_config(config, int(total_size))
+
+
+def _fetch_hf_file(repo: str, filename: str) -> Path:
+    """One small file from the Hub (config.json, the safetensors
+    index) — from the local cache when it is there, else the
+    network. A test seam: tests patch this instead of the network."""
+    from huggingface_hub import hf_hub_download
+
+    return Path(hf_hub_download(repo_id=repo, filename=filename))
+
+
+def _remote_model_metadata(base_ref: str) -> dict:
+    """Metadata of a Hub repo, from its config + weight sizes —
+    two small downloads, never the weights."""
+    try:
+        config_path = _fetch_hf_file(base_ref, "config.json")
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise StellaError(
+            f"could not check whether {base_ref!r} fits this PC: its "
+            "config could not be read (no network, or the model is "
+            "not cached locally). Download the weights first, or "
+            "point base_ref at a local folder."
+        ) from exc
+    if not isinstance(config, dict):
+        raise StellaError(
+            f"could not check whether {base_ref!r} fits this PC: its "
+            "config could not be read."
+        )
+    total_size = None
+    try:
+        index_path = _fetch_hf_file(base_ref, "model.safetensors.index.json")
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+        total_size = index.get("metadata", {}).get("total_size")
+    except Exception:
+        total_size = None
+    if total_size is None:
+        # Single-file model, no index: ask the Hub for the file list.
+        try:
+            from huggingface_hub import HfApi
+
+            info = HfApi().model_info(base_ref)
+            total_size = sum(
+                s.size or 0
+                for s in info.siblings
+                if s.rfilename.endswith((".safetensors", ".bin"))
+            ) or None
+        except Exception:
+            total_size = None
+    if not total_size:
+        raise StellaError(
+            f"could not check whether {base_ref!r} fits this PC: the "
+            "size of its weights could not be read."
+        )
+    return _metadata_from_config(config, int(total_size))
+
+
+def load_model_metadata(base_ref: str) -> dict:
+    """A model's size + shape without loading its weights (T28).
+
+    A local folder reads config.json + the weight files; a Hub repo
+    id fetches the config + the safetensors index (two small files).
+    Returns params, hidden_size, num_layers, intermediate_size,
+    base_bytes, bytes_per_param. Raises StellaError when the size
+    cannot be found out — the guard would rather refuse than guess.
+    """
+    path = Path(base_ref).expanduser()
+    if path.is_dir():
+        return _local_model_metadata(path)
+    return _remote_model_metadata(base_ref)
+
+
+def estimate_lora_params(
+    *,
+    hidden_size: int,
+    intermediate_size: int,
+    num_layers: int,
+    rank: int,
+) -> int:
+    """LoRA trainable params, assuming the standard 7 targets
+    (q/k/v/o + gate/up/down). Conservative: a model with fewer
+    targets trains fewer params, so the estimate never understates
+    the optimizer state the guard is budgeting for."""
+    per_layer = rank * (
+        8 * hidden_size + 3 * (hidden_size + intermediate_size)
+    )
+    return per_layer * num_layers
+
+
+def estimate_training_from_metadata(
+    base_ref: str, settings: dict
+) -> tuple[int, dict]:
+    """The RAM estimate from metadata alone (T28) — no weights
+    loaded. Returns (total_bytes, breakdown), like
+    estimate_training_bytes."""
+    meta = load_model_metadata(base_ref)
+    trainable = estimate_lora_params(
+        hidden_size=meta["hidden_size"],
+        intermediate_size=meta["intermediate_size"],
+        num_layers=meta["num_layers"],
+        rank=int(settings.get("rank", 8)),
+    )
+    return estimate_training_bytes(
+        params=meta["params"],
+        trainable_params=trainable,
+        base_bytes_per_param=meta["bytes_per_param"],
+        seq_len=int(settings.get("max_seq_len", 1024)),
+        batch_size=int(settings.get("batch_size", 1)),
+        hidden_size=meta["hidden_size"],
+        num_layers=meta["num_layers"],
+    )
 
 
 # -- model loading --------------------------------------------------
@@ -573,12 +786,26 @@ def tokenize_example(tokenizer, example: dict, max_seq_len: int) -> dict:
     eos = tokenizer.eos_token_id
     if eos is not None:
         completion_ids = completion_ids + [eos]
+    # Bound the completion too (T99): the old code truncated only
+    # the prompt, so a completion longer than max_seq_len sailed
+    # through whole — a 200-char completion at max_seq_len=64 came
+    # out as 202 tokens, and the RAM estimate assumes no sequence
+    # exceeds the cap. An over-long completion is cut to the cap,
+    # keeping its head and the end token; "truncated" says it
+    # happened so the loop can count and report it.
+    truncated = False
+    if len(completion_ids) > max_seq_len:
+        truncated = True
+        if eos is not None:
+            completion_ids = completion_ids[: max_seq_len - 1] + [eos]
+        else:
+            completion_ids = completion_ids[:max_seq_len]
     if len(prompt_ids) + len(completion_ids) > max_seq_len:
         keep = max(0, max_seq_len - len(completion_ids))
         prompt_ids = prompt_ids[-keep:] if keep else []
     input_ids = prompt_ids + completion_ids
     labels = [-100] * len(prompt_ids) + list(completion_ids)
-    return {"input_ids": input_ids, "labels": labels}
+    return {"input_ids": input_ids, "labels": labels, "truncated": truncated}
 
 
 def _collate(tokenizer, batch: list[dict]):
@@ -701,6 +928,11 @@ def _save_checkpoint(model, optimizer, ckpt_dir: Path, state: dict) -> None:
             "step": state["step"],
             "epoch": state["epoch"],
             "examples_seen_in_epoch": state["examples_seen_in_epoch"],
+            # The torch RNG state (T32): resume restores it, so the
+            # dropout draws continue exactly where they left off
+            # and a paused run is bit-identical to an uninterrupted
+            # one. A ByteTensor loads fine under weights_only=True.
+            "rng_state": torch.get_rng_state(),
         },
         ckpt_dir / "optimizer.pt",
     )
@@ -753,9 +985,16 @@ def run_training_loop(
     start_epoch: int = 0,
     skip_in_epoch: int = 0,
     optimizer=None,
+    max_steps: int | None = None,
+    extending: bool = False,
 ) -> dict:
     """The loop itself, separated from model loading so tests can pass
-    a tiny random model. Returns a summary dict."""
+    a tiny random model. Returns a summary dict. `max_steps` caps
+    the run at that many optimizer steps from `start_step` (T56):
+    reaching the cap is completion, not a pause — the adapter is
+    saved and the run reports done. `extending` (T25) marks a
+    resume on a project that already finished training: the loop
+    announces the extension and the new total before starting."""
     # Validate first, before the torch import: a bad value is
     # refused with a plain message naming the setting, never a raw
     # ValueError/ZeroDivisionError from a bare int()/float() (T6).
@@ -778,7 +1017,17 @@ def run_training_loop(
     use_bf16 = next(model.parameters()).dtype == torch.bfloat16
 
     steps_per_epoch = max(1, math.ceil(len(train_examples) / (batch_size * grad_accum)))
-    total_steps = steps_per_epoch * epochs
+    schedule_total = steps_per_epoch * epochs
+    # A step cap (T56) is a remaining-steps budget from wherever
+    # the run starts — fresh or resumed — never more than the
+    # schedule itself. The LR schedule decays over the capped
+    # total, so a short proof run still anneals properly.
+    if max_steps is not None:
+        if max_steps <= 0:
+            raise StellaError("--steps must be at least 1.")
+        total_steps = min(schedule_total, start_step + max_steps)
+    else:
+        total_steps = schedule_total
     if start_step >= total_steps:
         raise StellaError(
             f"already at step {start_step} of {total_steps}. Nothing left to train"
@@ -796,7 +1045,35 @@ def run_training_loop(
             max_seq_len=max_seq_len, batch_size=batch_size, limit=50,
         )
 
+    # A resume on a project that already finished training extends
+    # it past what the user originally asked for (T25): say so
+    # first, with the new total — before the "started" line, so the
+    # announcement is the first thing the user reads. The CLI and
+    # GUI both print it.
+    if extending:
+        emit(
+            {
+                "type": "extending",
+                "trained_steps": start_step,
+                "new_total": total_steps,
+            }
+        )
     emit({"type": "started", "total_steps": total_steps, "rank": rank})
+    # Over-long completions were cut to fit (T99): say how many, so
+    # the user knows the data was shortened instead of wondering why
+    # the model never learned the long answers.
+    cut = sum(1 for b in tokenized if b.get("truncated"))
+    if cut:
+        emit(
+            {
+                "type": "warning",
+                "message": (
+                    f"{cut} example(s) were longer than {max_seq_len} "
+                    "tokens and were cut short to fit. Shorten them, "
+                    "or raise max seq len, to train on the full text."
+                ),
+            }
+        )
     model.train()
     step = start_step
     stopped = False
@@ -846,6 +1123,10 @@ def run_training_loop(
             step += 1
             record = {
                 "step": step,
+                # The run total, so the GUI can re-render this line
+                # later as the same friendly "step N/total" text the
+                # user watched live (T13).
+                "total_steps": total_steps,
                 "epoch": epoch + 1,
                 "loss": round(last_loss, 4),
                 "lr": round(lr * mult, 8),
@@ -874,6 +1155,11 @@ def run_training_loop(
                 emit({"type": "checkpoint", "step": step, "path": str(ckpt)})
             if controller is not None and controller.stop_requested:
                 stopped = True
+                break
+            if step >= total_steps:
+                # The step cap (T56): a completed short run, not a
+                # pause — break out mid-epoch, save the adapter,
+                # report done.
                 break
         if stopped:
             break
@@ -946,6 +1232,7 @@ def train_project(
     base_ref: str | None = None,
     on_event=None,
     controller: TrainController | None = None,
+    force: bool = False,
     _model_loader=None,
     _dtype: str = "bfloat16",
     work_dir: str | Path | None = None,
@@ -966,6 +1253,18 @@ def train_project(
     project settings for this run only (sleep caps the LoRA rank
     at 8) without touching the stored project.
     """
+    # The step cap is validated first, before the training deps
+    # are even required (T56): 0 or a negative number is refused
+    # with a plain message on any machine, torch or no torch.
+    if max_steps is not None:
+        try:
+            max_steps = int(max_steps)
+        except (TypeError, ValueError):
+            raise StellaError(
+                "--steps must be a whole number of steps."
+            ) from None
+        if max_steps <= 0:
+            raise StellaError("--steps must be at least 1.")
     require_training_deps()
     prof = store.get_profile(profile)
     proj = store.get_project(profile, project)
@@ -988,10 +1287,18 @@ def train_project(
     # Engine-side range check on the effective settings, before
     # anything loads (T6, D6).
     settings.update(validate_run_settings(settings))
-    if max_steps is not None:
-        # A step cap is a short proof run: shrink the epoch budget to
-        # fit it (epochs are re-derived from the cap below).
-        settings["_max_steps"] = int(max_steps)
+
+    # A trained project is not re-trained by accident (T25): a
+    # fresh run on one refuses unless --force makes the intent
+    # explicit. Sleep (update_status=False) is a background
+    # consolidation job, not a retrain — it is never blocked.
+    if update_status and not resume and not force:
+        if proj.get("status") == "trained":
+            raise StellaError(
+                f"project {project!r} is already trained. Use "
+                "--force to re-train it (the current adapter will "
+                "be replaced)."
+            )
 
     ref = base_ref or prof.get("base_ref") or ""
     if not ref:
@@ -1029,7 +1336,19 @@ def train_project(
         int(settings.get("seed", 42)),
     )
 
-    # Load the base, then the RAM guard (needs real param counts).
+    # The RAM guard estimates BEFORE loading anything (T28): the
+    # estimate comes from the model's config + weight sizes, never
+    # from a loaded model. A run that will not fit is refused here,
+    # before the base is anywhere near memory. (A test-injected
+    # loader skips the pre-load estimate — the test controls its own
+    # fake world — and the post-load guard below still applies.)
+    if _model_loader is None:
+        pre_estimate, _ = estimate_training_from_metadata(ref, settings)
+        check_ram_fit(pre_estimate)
+
+    # Load the base, then check the guard a second time with the
+    # real param counts (belt and braces: the pre-load estimate
+    # already refused anything that cannot fit).
     if _model_loader is not None:
         model, tokenizer = _model_loader()
     else:
@@ -1075,9 +1394,38 @@ def train_project(
         )
         opt_file = ckpt_dir / "optimizer.pt"
         if opt_file.is_file():
-            saved = torch.load(str(opt_file), map_location="cpu", weights_only=False)
+            # Safe load (T22): optimizer.pt travels cross-machine
+            # inside export packages, so it loads with
+            # weights_only=True — a pickle payload is refused, never
+            # executed. A checkpoint that cannot load safely is a
+            # plain error, not a traceback.
+            try:
+                saved = torch.load(
+                    str(opt_file), map_location="cpu", weights_only=True
+                )
+            except Exception as exc:
+                raise StellaError(
+                    f"checkpoint {ckpt_dir.name} cannot be loaded "
+                    "safely (its optimizer file is not a plain "
+                    f"optimizer state): {exc}"
+                ) from exc
             optimizer.load_state_dict(saved["optimizer"])
+            # Restore the torch RNG state (T32): the dropout draws
+            # continue exactly where the pause left them. Old
+            # checkpoints (before v0.10.0) carry no RNG state —
+            # they resume with the RNG wherever it is, as before.
+            rng_state = saved.get("rng_state")
+            if rng_state is not None:
+                torch.set_rng_state(rng_state)
     else:
+        # Seed everything (T32): the seed drives the LoRA init
+        # (A/B matrices) and every dropout draw, so a fresh run
+        # with the same seed trains the same adapter. Set before
+        # the adapter is built — the init itself is random. A
+        # resume never reseeds: the checkpoint's RNG state is
+        # restored above instead, and reseeding would break
+        # pause/resume exactness.
+        torch.manual_seed(int(settings.get("seed", 42)))
         model = get_peft_model(model, peft_config)
 
     total_params = sum(p.numel() for p in model.parameters())
@@ -1097,19 +1445,6 @@ def train_project(
     )
     check_ram_fit(estimate)
 
-    # A step cap turns into fewer epochs (never partial-epoch math in
-    # the loop — the loop always runs whole epochs).
-    if settings.get("_max_steps"):
-        steps_per_epoch = max(
-            1,
-            math.ceil(
-                len(train_examples)
-                / (int(settings.get("batch_size", 1)) * int(settings.get("grad_accum", 8)))
-            ),
-        )
-        epochs_needed = max(1, math.ceil(int(settings["_max_steps"]) / steps_per_epoch))
-        settings["epochs"] = min(int(settings.get("epochs", 3)), epochs_needed)
-
     if update_status:
         store.update_project(profile, project, status="training")
     try:
@@ -1126,6 +1461,13 @@ def train_project(
             start_epoch=start_epoch,
             skip_in_epoch=skip_in_epoch,
             optimizer=optimizer,
+            max_steps=max_steps,
+            # A resume on a trained project extends a finished run
+            # (T25): the loop announces it before starting.
+            extending=bool(
+                resume and update_status
+                and proj.get("status") == "trained"
+            ),
         )
     except Exception:
         if update_status:

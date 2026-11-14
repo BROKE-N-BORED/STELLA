@@ -371,3 +371,70 @@ def test_slug_from_model():
     assert slug_from_model("lfm3") == "lfm3"
     assert slug_from_model("  Qwen/Qwen3-0.6B  ") == "qwen3-0-6b"
     assert slug_from_model("!!!") == "profile"
+
+
+# -- T3: corrupt manifests are damaged rows, never silent skips -----
+
+
+def test_list_profiles_reports_corrupt_manifest(seeded):
+    import json
+
+    manifest = (
+        seeded.home / "profiles" / "lfm3-tool" / "profile.json"
+    )
+    manifest.write_text("{not valid json", encoding="utf-8")
+    rows = seeded.list_profiles()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["name"] == "lfm3-tool"
+    assert row["_damaged"] is True
+    assert "not valid JSON" in row["_error"]
+    # The folder is untouched: fixing the JSON by hand restores it.
+    manifest.write_text(
+        json.dumps({"name": "lfm3-tool", "role": "fast"}),
+        encoding="utf-8",
+    )
+    rows = seeded.list_profiles()
+    assert len(rows) == 1
+    assert rows[0].get("_damaged") is None
+    assert rows[0]["role"] == "fast"
+
+
+def test_list_projects_reports_corrupt_manifest(seeded):
+    manifest = (
+        seeded.home / "profiles" / "lfm3-tool" / "projects"
+        / "tool-calls" / "project.json"
+    )
+    manifest.write_text("[1, 2, 3]", encoding="utf-8")  # valid JSON, not an object
+    rows = seeded.list_projects("lfm3-tool")
+    assert len(rows) == 1
+    assert rows[0]["name"] == "tool-calls"
+    assert rows[0]["_damaged"] is True
+    assert "must hold a JSON object" in rows[0]["_error"]
+
+
+def test_list_profiles_keeps_good_rows_beside_damaged(store):
+    store.create_profile("good", ollama_tag="x:1b")
+    store.create_profile("broken", ollama_tag="y:1b")
+    manifest = store.home / "profiles" / "broken" / "profile.json"
+    manifest.write_text("{oops", encoding="utf-8")
+    rows = store.list_profiles()
+    assert [r["name"] for r in rows] == ["broken", "good"]
+    assert rows[0]["_damaged"] is True
+    assert rows[1].get("_damaged") is None
+
+
+def test_rename_profile_skips_damaged_project(seeded):
+    import json
+
+    manifest = (
+        seeded.home / "profiles" / "lfm3-tool" / "projects"
+        / "tool-calls" / "project.json"
+    )
+    manifest.write_text("{oops", encoding="utf-8")
+    data = seeded.rename_profile("lfm3-tool", "renamed")
+    assert data["name"] == "renamed"
+    # The damaged project moved with the profile, still damaged.
+    rows = seeded.list_projects("renamed")
+    assert len(rows) == 1
+    assert rows[0]["_damaged"] is True

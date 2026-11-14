@@ -26,6 +26,7 @@ talk to the window through Qt signals.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -37,10 +38,11 @@ from PySide6.QtCore import (
     QSettings,
     Qt,
     QThread,
+    QUrl,
     Signal,
 )
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QBrush, QColor, QDesktopServices, QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -155,6 +157,74 @@ def _weights_label(status):
     return f"Ready: {provision.format_size(status['size_bytes'])} on disk."
 
 
+def _tag_warnings(store, tag, *, exclude_slug=None):
+    """Plain-words problems with an Ollama tag (T12): not installed
+    locally, or already used by another profile. Empty list = no
+    problem. An empty tag is not a problem, and neither is an Ollama
+    that is not answering — with no installed list there is nothing
+    to check against, so a tag is never warned about on a guess."""
+    warnings = []
+    if not tag:
+        return warnings
+    installed = list_models()
+    if installed and tag not in installed:
+        warnings.append(f"{tag!r} is not installed locally")
+    for p in store.list_profiles():
+        if p.get("_damaged"):
+            continue
+        if p.get("name") == exclude_slug:
+            continue
+        if p.get("ollama_tag") == tag:
+            warnings.append(f"profile {p['name']!r} already uses this tag")
+            break
+    return warnings
+
+
+def _confirm_tag(parent, warnings):
+    """One Proceed / Cancel dialog for tag warnings (T12). A
+    deliberate entry — a tag about to be pulled — must never be
+    blocked, so the choice is always the user's. True = proceed."""
+    text = ". ".join(warnings) + ". Use this tag anyway?"
+    return (
+        QMessageBox.question(
+            parent, "Stella", text,
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        == QMessageBox.Yes
+    )
+
+
+def _friendly_log_line(line: str) -> str:
+    """One train_log.jsonl record as the friendly line the live log
+    showed ("step 3/4 loss 2.1000"), never raw JSON (T13). A record
+    without a total (written before v0.10) renders without it; a
+    line that is not a record passes through untouched."""
+    try:
+        record = json.loads(line)
+    except ValueError:
+        return line
+    if not isinstance(record, dict):
+        return line
+    if "val_loss" in record:
+        try:
+            return (
+                f"epoch {record.get('epoch', '?')} validation loss "
+                f"{float(record['val_loss']):.4f}"
+            )
+        except (TypeError, ValueError):
+            return line
+    if "loss" in record and "step" in record:
+        try:
+            loss = float(record["loss"])
+        except (TypeError, ValueError):
+            return line
+        total = record.get("total_steps")
+        if total:
+            return f"step {record['step']}/{total} loss {loss:.4f}"
+        return f"step {record['step']} loss {loss:.4f}"
+    return line
+
+
 class NewProfileDialog(QDialog):
     """The New Profile form, as a real window: pick a model, done.
 
@@ -225,12 +295,14 @@ class TrainWorker(QThread):
     log = Signal(str)
     finished = Signal(bool, str)  # ok, message
 
-    def __init__(self, store, profile, project, resume=False, parent=None):
+    def __init__(self, store, profile, project, resume=False, force=False,
+                 parent=None):
         super().__init__(parent)
         self._store = store
         self._profile = profile
         self._project = project
         self._resume = resume
+        self._force = force
         self._controller = TrainController()
 
     def request_stop(self):
@@ -259,6 +331,18 @@ class TrainWorker(QThread):
                 f"epoch {event['epoch']} validation loss "
                 f"{event['loss']:.4f}"
             )
+        elif kind == "warning":
+            # A run warning (T99: over-long examples cut short) goes
+            # to the log like any other run line.
+            self.log.emit(f"Warning: {event.get('message', '')}")
+        elif kind == "extending":
+            # A resume on a project that already finished training
+            # extends it past the original run (T25).
+            self.log.emit(
+                f"This project already finished training "
+                f"({event['trained_steps']} steps). Resuming extends "
+                f"it to {event['new_total']} total steps."
+            )
         elif kind == "paused":
             self.log.emit(f"Paused at step {event['step']}.")
         elif kind == "done":
@@ -273,6 +357,7 @@ class TrainWorker(QThread):
                 self._profile,
                 self._project,
                 resume=self._resume,
+                force=self._force,
                 on_event=self._event,
                 controller=self._controller,
             )
@@ -337,6 +422,8 @@ class SleepWorker(QThread):
                 f"epoch {event['epoch']} validation loss "
                 f"{event['loss']:.4f}"
             )
+        elif kind == "warning":
+            self.log.emit(f"Warning: {event.get('message', '')}")
         elif kind == "replay":
             self.log.emit("Replay check: old rows vs new adapter...")
         elif kind == "replay_done":
@@ -648,6 +735,19 @@ class ProfileWindow(QDialog):
         layout.addLayout(btns)
         layout.addStretch(1)
 
+        # Dirty tracking (T2): a snapshot of the loaded values, so
+        # an edit can be told apart from a save. _loading is set
+        # while _load fills the widgets, so the fill itself never
+        # counts as an edit.
+        self._snapshot = None
+        self._loading = False
+        for widget, signal in (
+            (self.display_edit, self.display_edit.textChanged),
+            (self.role_edit, self.role_edit.textChanged),
+            (self.tag_combo, self.tag_combo.currentTextChanged),
+            (self.base_edit, self.base_edit.textChanged),
+        ):
+            signal.connect(self._on_edited)
         self._load()
         self.refresh_download_status()
 
@@ -662,7 +762,69 @@ class ProfileWindow(QDialog):
         self._load()
         self.refresh_download_status()
 
+    def _current_values(self):
+        return {
+            "display": self.display_edit.text(),
+            "role": self.role_edit.text(),
+            "tag": self.tag_combo.currentText(),
+            "base": self.base_edit.text(),
+        }
+
+    def _capture_snapshot(self):
+        self._snapshot = self._current_values()
+
+    def is_modified(self):
+        """True when the form differs from what was last loaded or
+        saved (T2)."""
+        if self._snapshot is None:
+            return False
+        return self._current_values() != self._snapshot
+
+    def _on_edited(self, *args):
+        if self._loading:
+            return
+        self._update_title()
+
+    def _update_title(self):
+        title = f"Profile: {self._slug}"
+        if self.is_modified():
+            title += " *"
+        self.setWindowTitle(title)
+
+    def maybe_save(self):
+        """Prompt when there are unsaved edits (T2). True means it
+        is fine to go on: nothing to save, saved, or discarded.
+        False means the user said wait — stay here."""
+        if not self.is_modified():
+            return True
+        answer = QMessageBox.question(
+            self, "Stella",
+            f"Save changes to profile {self._slug}?",
+            QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+            QMessageBox.Save,
+        )
+        if answer == QMessageBox.Save:
+            return self.save()
+        if answer == QMessageBox.Discard:
+            return True
+        return False
+
+    def closeEvent(self, event):
+        if not self.maybe_save():
+            event.ignore()
+        else:
+            super().closeEvent(event)
+
     def _load(self):
+        self._loading = True
+        try:
+            self._load_inner()
+        finally:
+            self._loading = False
+            self._capture_snapshot()
+            self._update_title()
+
+    def _load_inner(self):
         self.tag_combo.clear()
         models = list_models()
         if models:
@@ -683,6 +845,17 @@ class ProfileWindow(QDialog):
         self.base_edit.setText(p.get("base_ref", ""))
 
     def save(self):
+        """Save the profile form. Returns True on success, False
+        when nothing was saved (T2: the prompt needs the answer)."""
+        # Soft tag check (T12): warn when the tag is not installed
+        # or already used by another profile, and let the user
+        # proceed anyway. Cancelling saves nothing.
+        tag = self.tag_combo.currentText().strip()
+        warnings = _tag_warnings(
+            self._main.store, tag, exclude_slug=self._slug
+        )
+        if warnings and not _confirm_tag(self, warnings):
+            return False
         try:
             self._main.store.update_profile(
                 self._slug,
@@ -693,11 +866,14 @@ class ProfileWindow(QDialog):
             )
         except StellaError as exc:
             QMessageBox.warning(self, "Stella", str(exc))
-            return
+            return False
         self._main.refresh_tree()
         self._main.refresh_session()
         self.refresh_download_status()
         self._main._say(f"Saved profile {self._slug}.")
+        self._capture_snapshot()
+        self._update_title()
+        return True
 
     def refresh_download_status(self):
         """Re-read the weights state from disk (called after a
@@ -838,13 +1014,20 @@ class ProjectWindow(QDialog):
         )
         layout.addLayout(form)
 
-        layout.addWidget(QLabel("Notes"))
+        self.notes_label = QLabel("Notes")
+        layout.addWidget(self.notes_label)
         self.notes_edit = QPlainTextEdit()
         self.notes_edit.setMinimumHeight(100)
         layout.addWidget(self.notes_edit)
         layout.addWidget(
             _help_label("Anything you want to remember about this fine-tune.")
         )
+        # The notes area has its own save control (T2): notes can be
+        # saved without hunting for the project Save button, and the
+        # label says when the notes are edited but unsaved.
+        self.save_notes_btn = QPushButton("Save notes")
+        self.save_notes_btn.clicked.connect(self.save_notes)
+        layout.addWidget(self.save_notes_btn)
 
         save_btn = QPushButton("Save project")
         save_btn.clicked.connect(self.save)
@@ -868,6 +1051,24 @@ class ProjectWindow(QDialog):
         layout.addLayout(btns)
         layout.addStretch(1)
 
+        # Dirty tracking (T2): same pattern as ProfileWindow — a
+        # snapshot of the loaded values, an asterisk on the title
+        # when the form differs, and a Save / Discard / Cancel
+        # prompt on close instead of silently dropping edits.
+        self._snapshot = None
+        self._loading = False
+        for signal in (
+            self.display_edit.textChanged,
+            self.dataset_edit.textChanged,
+            self.method_combo.currentTextChanged,
+            self.rank_spin.valueChanged,
+            self.lr_edit.textChanged,
+            self.epochs_spin.valueChanged,
+            self.batch_spin.valueChanged,
+            self.seq_spin.valueChanged,
+            self.notes_edit.textChanged,
+        ):
+            signal.connect(self._on_edited)
         self._load()
 
     @property
@@ -890,6 +1091,91 @@ class ProjectWindow(QDialog):
         self.setWindowTitle(f"Project: {new_profile} / {self._project}")
         self._load()
 
+    def _current_values(self):
+        return {
+            "display": self.display_edit.text(),
+            "dataset": self.dataset_edit.text(),
+            "method": self.method_combo.currentText(),
+            "rank": self.rank_spin.value(),
+            "lr": self.lr_edit.text(),
+            "epochs": self.epochs_spin.value(),
+            "batch": self.batch_spin.value(),
+            "seq": self.seq_spin.value(),
+            "notes": self.notes_edit.toPlainText(),
+        }
+
+    def _capture_snapshot(self):
+        self._snapshot = self._current_values()
+
+    def is_modified(self):
+        """True when the form differs from what was last loaded or
+        saved (T2)."""
+        if self._snapshot is None:
+            return False
+        return self._current_values() != self._snapshot
+
+    def _notes_modified(self):
+        """True when the notes alone are edited but unsaved (T2)."""
+        if self._snapshot is None:
+            return False
+        return self.notes_edit.toPlainText() != self._snapshot["notes"]
+
+    def _on_edited(self, *args):
+        if self._loading:
+            return
+        self._update_title()
+
+    def _update_title(self):
+        title = f"Project: {self._profile} / {self._project}"
+        if self.is_modified():
+            title += " *"
+        self.setWindowTitle(title)
+        self.notes_label.setText(
+            "Notes (modified)" if self._notes_modified() else "Notes"
+        )
+
+    def maybe_save(self):
+        """Prompt when there are unsaved edits (T2). True means it
+        is fine to go on: nothing to save, saved, or discarded.
+        False means the user said wait — stay here."""
+        if not self.is_modified():
+            return True
+        answer = QMessageBox.question(
+            self, "Stella",
+            f"Save changes to project {self._project}?",
+            QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+            QMessageBox.Save,
+        )
+        if answer == QMessageBox.Save:
+            return self.save()
+        if answer == QMessageBox.Discard:
+            return True
+        return False
+
+    def closeEvent(self, event):
+        if not self.maybe_save():
+            event.ignore()
+        else:
+            super().closeEvent(event)
+
+    def save_notes(self) -> bool:
+        """Save only the notes (T2): the notes area has its own save
+        control. Returns True on success."""
+        try:
+            self._main.store.write_notes(
+                self._profile,
+                self._project,
+                self.notes_edit.toPlainText(),
+            )
+        except StellaError as exc:
+            QMessageBox.warning(self, "Stella", str(exc))
+            return False
+        if self._snapshot is not None:
+            self._snapshot["notes"] = self.notes_edit.toPlainText()
+        self._update_title()
+        self._main._say(f"Saved notes for {self._project}.")
+        return True
+
     def _load(self):
         """Fill the form from the stored project, defensively (T21).
 
@@ -899,6 +1185,15 @@ class ProjectWindow(QDialog):
         values mixed with this one's, and Save can never write such
         a mix back. The fallback defaults and ranges match the
         model validation (T6)."""
+        self._loading = True
+        try:
+            self._load_inner()
+        finally:
+            self._loading = False
+            self._capture_snapshot()
+            self._update_title()
+
+    def _load_inner(self):
         try:
             p = self._main.store.get_project(self._profile, self._project)
             notes = self._main.store.read_notes(self._profile, self._project)
@@ -1012,6 +1307,8 @@ class ProjectWindow(QDialog):
         self._main.refresh_tree()
         self._main.refresh_session()
         self._main._say(f"Saved project {self._project}.")
+        self._capture_snapshot()
+        self._update_title()
         return True
 
 
@@ -1689,7 +1986,13 @@ class MainWindow(QMainWindow):
                 item.setExpanded(True)
         saved_profile = self.settings.value("session/profile") or None
         saved_project = self.settings.value("session/project") or None
-        if saved_profile and saved_profile in self._tree_profiles:
+        # A damaged row (T3) is never restored as the session: its
+        # manifest cannot be read, so there is nothing to show.
+        saved_damaged = (
+            saved_profile in self._tree_profiles
+            and self._tree_profiles[saved_profile].data(0, Qt.UserRole + 1)
+        )
+        if saved_profile and saved_profile in self._tree_profiles and not saved_damaged:
             if saved_project and (saved_profile, saved_project) in (
                 self._tree_projects
             ):
@@ -1953,6 +2256,22 @@ class MainWindow(QMainWindow):
             label += " (warning: metamorph setting is broken)"
         return label
 
+    @staticmethod
+    def _set_tree_row(item, label, damaged):
+        """One tree row's text + look. A damaged row (T3) is greyed
+        and italic with its error in the label; a healed row goes
+        back to plain text. The damaged flag lives in UserRole + 1
+        so clicks can tell the row apart from a healthy one."""
+        item.setText(0, label)
+        item.setData(0, Qt.UserRole + 1, bool(damaged))
+        font = item.font(0)
+        font.setItalic(bool(damaged))
+        item.setFont(0, font)
+        if damaged:
+            item.setForeground(0, QBrush(QColor("#888888")))
+        else:
+            item.setForeground(0, QBrush())
+
     def refresh_tree(self):
         """Sync the tree with the store WITHOUT rebuilding it (U28):
         add missing rows, remove stale ones, relabel in place.
@@ -1974,13 +2293,17 @@ class MainWindow(QMainWindow):
                     self.tree.indexOfTopLevelItem(item)
                 )
         for slug, p in profiles.items():
+            damaged = bool(p.get("_damaged"))
+            if damaged:
+                label = f"{slug} (damaged: {p.get('_error', 'bad file')})"
+            else:
+                label = self._profile_label(p)
             item = self._tree_profiles.get(slug)
             if item is None:
-                item = QTreeWidgetItem(self.tree, [self._profile_label(p)])
+                item = QTreeWidgetItem(self.tree, [label])
                 item.setData(0, Qt.UserRole, (slug, None))
                 self._tree_profiles[slug] = item
-            else:
-                item.setText(0, self._profile_label(p))
+            self._set_tree_row(item, label, damaged)
             projects = {
                 pr["name"]: pr for pr in self.store.list_projects(slug)
             }
@@ -1989,13 +2312,19 @@ class MainWindow(QMainWindow):
                     item.removeChild(self._tree_projects.pop(key))
             for pname, pr in projects.items():
                 key = (slug, pname)
+                pr_damaged = bool(pr.get("_damaged"))
+                if pr_damaged:
+                    pr_label = (
+                        f"{pname} (damaged: {pr.get('_error', 'bad file')})"
+                    )
+                else:
+                    pr_label = self._project_label(pr)
                 child = self._tree_projects.get(key)
                 if child is None:
-                    child = QTreeWidgetItem(item, [self._project_label(pr)])
+                    child = QTreeWidgetItem(item, [pr_label])
                     child.setData(0, Qt.UserRole, key)
                     self._tree_projects[key] = child
-                else:
-                    child.setText(0, self._project_label(pr))
+                self._set_tree_row(child, pr_label, pr_damaged)
         self.tree.sortItems(0, Qt.AscendingOrder)
         for slug, item in self._tree_profiles.items():
             item.setExpanded(slug in expanded)
@@ -2030,6 +2359,14 @@ class MainWindow(QMainWindow):
         data = current.data(0, Qt.UserRole)
         if data is None:
             return
+        if current.data(0, Qt.UserRole + 1):
+            # A damaged row (T3) is not a session: it says what is
+            # wrong and waits for a repair, it does not set anything.
+            self._say(
+                "That file is damaged. Double-click the row to open "
+                "it and fix it."
+            )
+            return
         profile, project = data
         self.set_session(profile, project)
 
@@ -2037,11 +2374,26 @@ class MainWindow(QMainWindow):
         data = item.data(0, Qt.UserRole)
         if data is None:
             return
+        if item.data(0, Qt.UserRole + 1):
+            self._repair_damaged(data[0], data[1])
+            return
         profile, project = data
         if project is None:
             self.open_profile_window(profile)
         else:
             self.open_project_window(profile, project)
+
+    def _repair_damaged(self, profile, project):
+        """Repair for a damaged row (T3): open the broken manifest
+        in the text editor so it can be fixed by hand. The folder
+        is untouched; fixing the file and refreshing the list brings
+        the normal row back."""
+        if project is None:
+            path = self.store.profile_dir(profile) / "profile.json"
+        else:
+            path = self.store.project_dir(profile, project) / "project.json"
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+        self._say(f"Opened {path.name} to fix. Save it and the row comes back.")
 
     # -- session ----------------------------------------------------
     def set_session(self, profile, project):
@@ -2387,6 +2739,11 @@ class MainWindow(QMainWindow):
             tag, ref = model, ""
         else:
             tag, ref = "", model
+        # Soft tag check (T12): warn when the tag is not installed
+        # or already used, and let the user proceed anyway.
+        warnings = _tag_warnings(self.store, tag)
+        if warnings and not _confirm_tag(self, warnings):
+            return
         slug = slug_from_model(model)
         base = slug
         i = 2
@@ -2407,6 +2764,17 @@ class MainWindow(QMainWindow):
         slug = slug or self._current_profile
         if not slug:
             return
+        # A rename retargets the open windows and reloads them (T2):
+        # ask about unsaved edits BEFORE the store rename, while
+        # Save can still write to the old name.
+        win = self._profile_windows.get(slug)
+        if win is not None and not win.maybe_save():
+            return
+        for key in list(self._project_windows):
+            if key[0] == slug:
+                proj_win = self._project_windows[key]
+                if not proj_win.maybe_save():
+                    return
         text, ok = QInputDialog.getText(self, "Rename profile", "New name:", text=slug)
         if not ok or not text.strip():
             return
@@ -2496,6 +2864,12 @@ class MainWindow(QMainWindow):
         profile = profile or self._selected_profile()
         project = project or self._selected_project()
         if not profile or not project:
+            return
+        # A rename retargets the open window and reloads it (T2):
+        # ask about unsaved edits BEFORE the store rename, while
+        # Save can still write to the old name.
+        win = self._project_windows.get((profile, project))
+        if win is not None and not win.maybe_save():
             return
         text, ok = QInputDialog.getText(
             self, "Rename project", "New name:", text=project
@@ -2624,7 +2998,8 @@ class MainWindow(QMainWindow):
         # keeps its last progress (a finished run's final step/loss
         # must survive the refresh that follows it).
         key = (self._current_profile, self._current_project)
-        if self._train_panel_project != key:
+        switched = self._train_panel_project != key
+        if switched:
             self._train_panel_project = key
             if not self._training_running() and not self._sleep_running():
                 self.train_loss.setText("Not started.")
@@ -2659,13 +3034,20 @@ class MainWindow(QMainWindow):
             self.sleep_cycles.addItem(item)
         if self._training_running():
             return  # never wipe the live log mid-run
+        if not switched:
+            # Same project: keep the lines the user watched (T13).
+            # The finish refresh used to overwrite them with the raw
+            # JSONL file, or blank them when there was no file at all.
+            return
         log_path = (
             self.store.project_dir(self._current_profile, self._current_project)
             / "train_log.jsonl"
         )
         if log_path.is_file():
             lines = log_path.read_text(encoding="utf-8").splitlines()[-30:]
-            self.train_log.setPlainText("\n".join(lines))
+            self.train_log.setPlainText(
+                "\n".join(_friendly_log_line(line) for line in lines)
+            )
         else:
             self.train_log.setPlainText("")
 
@@ -2722,6 +3104,39 @@ class MainWindow(QMainWindow):
             # both at once would blow the 8 GB ceiling.
             self._say("Sleep is already running.")
             return
+        # An open Project window may hold unsaved edits (T8): the
+        # run trains on the STORED settings, so a bad learning rate
+        # sitting unsaved in the form must stop the start, not train
+        # on stale settings behind a warning. Save / Discard /
+        # Cancel, the same prompt as closing the window (T2).
+        proj_win = self._project_windows.get((profile, project))
+        if proj_win is not None and proj_win.is_modified():
+            if not proj_win.maybe_save():
+                self._say(
+                    "Training not started: the project has unsaved changes."
+                )
+                return
+        # Re-training a trained project replaces the finished
+        # adapter (T25): ask first. A "yes" passes force through
+        # to the worker; a "no" stops here. Resume never asks —
+        # it extends, and the loop announces that instead.
+        force = False
+        if not resume:
+            status = self.store.get_project(profile, project).get("status")
+            if status == "trained":
+                answer = QMessageBox.question(
+                    self,
+                    "Train again?",
+                    "This project already finished training. Train it "
+                    "again from the start? The current adapter will "
+                    "be replaced.",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No,
+                )
+                if answer != QMessageBox.Yes:
+                    self._say("Training not started.")
+                    return
+                force = True
         from .train import training_deps_missing
 
         missing = training_deps_missing()
@@ -2739,7 +3154,7 @@ class MainWindow(QMainWindow):
         if not self._weights_offer(profile):
             return
         self._train_worker = TrainWorker(
-            self.store, profile, project, resume=resume
+            self.store, profile, project, resume=resume, force=force
         )
         self._train_worker.progress.connect(self._on_train_progress)
         self._train_worker.log.connect(self._train_log_line)
@@ -2884,7 +3299,10 @@ class MainWindow(QMainWindow):
         from .gguf import export_gguf
 
         def job(log):
-            result = export_gguf(self.store, profile, project, dest)
+            result = export_gguf(
+                self.store, profile, project, dest,
+                on_warning=log,  # T31: converter warning, before the merge
+            )
             return (
                 f"GGUF ready: {result['gguf']} "
                 f"({result['gguf_bytes']:,} bytes).\n"

@@ -533,3 +533,822 @@ def test_load_base_model_names_repo_not_found(monkeypatch):
     )
     with pytest.raises(StellaError, match="no model with that name"):
         train_mod.load_base_model("someone/no-such-model")
+
+
+# -- T22: optimizer.pt loads safely -----------------------------------
+
+
+def test_resume_refuses_malicious_optimizer_pickle(need_torch, tmp_path):
+    import os
+    import pickle
+
+    from stella.model import Store
+
+    store = _tiny_project(Store(tmp_path / "home"), tmp_path)
+    store.update_project("tiny", "proof", settings={"epochs": 2})
+    controller = TrainController()
+
+    def stop_after_first_step(event):
+        if event.get("type") == "step" and event["step"] >= 1:
+            controller.request_stop()
+
+    train_project(
+        store, "tiny", "proof",
+        on_event=stop_after_first_step,
+        controller=controller,
+        _model_loader=tiny_model_and_tokenizer,
+        _dtype="float32",
+    )
+    ckpt = store.project_dir("tiny", "proof") / "checkpoints" / "step-1"
+    assert (ckpt / "optimizer.pt").is_file()
+    marker = tmp_path / "pwned"
+
+    class Boom:
+        def __reduce__(self):
+            return (os.system, (f"touch {marker}",))
+
+    # A crafted optimizer.pt carrying a pickle payload, as a hostile
+    # export package could: loading it must refuse, never execute.
+    (ckpt / "optimizer.pt").write_bytes(
+        pickle.dumps(
+            {
+                "optimizer": Boom(),
+                "step": 1,
+                "epoch": 1,
+                "examples_seen_in_epoch": 0,
+            }
+        )
+    )
+    with pytest.raises(StellaError, match="cannot be loaded safely"):
+        train_project(
+            store, "tiny", "proof",
+            resume=True,
+            _model_loader=tiny_model_and_tokenizer,
+            _dtype="float32",
+        )
+    assert not marker.exists()
+
+
+def test_no_torch_load_runs_unsafe():
+    # Audit pin (T22): the only torch.load in the tree is the resume
+    # path, and it loads with weights_only=True.
+    text = (ROOT / "stella" / "train.py").read_text()
+    assert text.count("torch.load(") == 1
+    assert "weights_only=False" not in text
+    call = text[text.index("torch.load("):]
+    assert "weights_only=True" in call[:300]
+
+
+# -- T99: completions are bound to max_seq_len ------------------------
+
+
+def test_tokenize_bounds_overlong_completion():
+    from stella.train import tokenize_example
+
+    # The audit's probe: a 200-char completion at max_seq_len=64
+    # used to come out as 202 tokens. Now it is bound to the cap.
+    example = {
+        "messages": [
+            {"role": "user", "content": "Question?"},
+            {"role": "assistant", "content": "A" * 200},
+        ]
+    }
+    out = tokenize_example(FakeTokenizer(), example, 64)
+    assert len(out["input_ids"]) == 64
+    assert out["truncated"] is True
+    # The head of the answer survives, and the end token closes it.
+    assert out["input_ids"][-1] == 0  # eos
+    assert out["labels"][-1] == 0
+    # The prompt was dropped entirely (no room left); the labels
+    # still mask exactly the prompt part (here: nothing).
+    assert len(out["labels"]) == 64
+
+
+def test_tokenize_normal_completion_unchanged():
+    from stella.train import tokenize_example
+
+    example = {
+        "messages": [
+            {"role": "user", "content": "Question?"},
+            {"role": "assistant", "content": "Answer."},
+        ]
+    }
+    out = tokenize_example(FakeTokenizer(), example, 64)
+    assert out["truncated"] is False
+    # Prompt (fallback render) + completion + eos, nothing cut.
+    assert len(out["input_ids"]) == len("User: Question?\nAssistant:") + len(" Answer.") + 1
+    assert out["input_ids"][-1] == 0
+    assert out["labels"][: len("User: Question?\nAssistant:")] == (
+        [-100] * len("User: Question?\nAssistant:")
+    )
+
+
+def test_tokenize_bounds_completion_without_eos():
+    from stella.train import tokenize_example
+
+    class NoEosTokenizer(FakeTokenizer):
+        def __init__(self):
+            super().__init__()
+            self.eos_token_id = None
+
+    example = {
+        "messages": [
+            {"role": "user", "content": "Q?"},
+            {"role": "assistant", "content": "B" * 200},
+        ]
+    }
+    out = tokenize_example(NoEosTokenizer(), example, 64)
+    assert len(out["input_ids"]) == 64
+    assert out["truncated"] is True
+
+
+def test_training_loop_warns_on_cut_examples(need_torch, tmp_path):
+    from stella.model import Store
+
+    store = Store(tmp_path / "home")
+    store.create_profile(
+        "tiny", ollama_tag="", role="test", base_ref="test/tiny-model"
+    )
+    rows = [
+        {"prompt": f"Question {i}?", "completion": "Long answer " * 20}
+        for i in range(4)
+    ]
+    data = write_dataset(tmp_path / "long.jsonl", rows)
+    store.create_project(
+        "tiny", "proof",
+        dataset_ref=str(data),
+        settings={
+            "epochs": 1,
+            "batch_size": 1,
+            "grad_accum": 1,
+            "rank": 2,
+            "max_seq_len": 128,
+            "checkpoint_steps": 0,
+            "val_fraction": 0.25,
+            "warmup_steps": 1,
+            "seed": 42,
+        },
+    )
+    events = []
+
+    def long_loader():
+        # The stock tiny model has 64 positions; the cut sequences
+        # are 128 tokens, so this loader widens the positions.
+        from transformers import GPT2Config, GPT2LMHeadModel
+
+        config = GPT2Config(
+            vocab_size=256, n_layer=2, n_head=2, n_embd=64,
+            n_positions=256, n_ctx=256,
+        )
+        return GPT2LMHeadModel(config), FakeTokenizer()
+
+    train_project(
+        store, "tiny", "proof",
+        on_event=events.append,
+        _model_loader=long_loader,
+        _dtype="float32",
+    )
+    warnings = [e for e in events if e["type"] == "warning"]
+    assert len(warnings) == 1
+    # 4 rows, 1 val: 3 train rows were cut to fit.
+    assert "3 example(s)" in warnings[0]["message"]
+    assert "128" in warnings[0]["message"]
+
+
+# -- T28: the RAM guard estimates before loading anything ------------
+
+
+def _fake_model_dir(tmp_path, *, total_size=3_460_000_000, dtype="bfloat16"):
+    """A local HF folder with a config + a safetensors index, but no
+    weights: enough to estimate from, impossible to load from."""
+    d = tmp_path / "fake-model"
+    d.mkdir()
+    (d / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "lfm3",
+                "hidden_size": 2048,
+                "num_hidden_layers": 24,
+                "intermediate_size": 8192,
+                "vocab_size": 128000,
+                "torch_dtype": dtype,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (d / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "metadata": {"total_size": total_size},
+                "weight_map": {"w": "model-00001-of-00001.safetensors"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    return d
+
+
+def test_load_model_metadata_local_dir(tmp_path):
+    from stella.train import load_model_metadata
+
+    d = _fake_model_dir(tmp_path)
+    meta = load_model_metadata(str(d))
+    assert meta["hidden_size"] == 2048
+    assert meta["num_layers"] == 24
+    assert meta["intermediate_size"] == 8192
+    assert meta["base_bytes"] == 3_460_000_000
+    assert meta["bytes_per_param"] == 2
+    assert meta["params"] == 1_730_000_000
+
+
+def test_load_model_metadata_single_safetensors(tmp_path):
+    from stella.train import load_model_metadata
+
+    d = tmp_path / "single"
+    d.mkdir()
+    (d / "config.json").write_text(
+        json.dumps(
+            {
+                "hidden_size": 512,
+                "num_hidden_layers": 6,
+                "intermediate_size": 2048,
+                "torch_dtype": "float32",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (d / "model.safetensors").write_bytes(b"x" * 1000)
+    meta = load_model_metadata(str(d))
+    assert meta["base_bytes"] == 1000
+    assert meta["bytes_per_param"] == 4
+    assert meta["params"] == 250
+
+
+def test_load_model_metadata_gpt2_style_config(tmp_path):
+    from stella.train import load_model_metadata
+
+    d = tmp_path / "gpt2ish"
+    d.mkdir()
+    (d / "config.json").write_text(
+        json.dumps(
+            {
+                "n_embd": 64,
+                "n_layer": 2,
+                "vocab_size": 256,
+                "torch_dtype": "float32",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (d / "model.safetensors").write_bytes(b"x" * 800)
+    meta = load_model_metadata(str(d))
+    assert meta["hidden_size"] == 64
+    assert meta["num_layers"] == 2
+    assert meta["intermediate_size"] == 256  # hidden * 4 fallback
+    assert meta["params"] == 200
+
+
+def test_load_model_metadata_missing_config(tmp_path):
+    from stella.train import load_model_metadata
+
+    d = tmp_path / "empty"
+    d.mkdir()
+    with pytest.raises(StellaError, match="does not hold a model"):
+        load_model_metadata(str(d))
+
+
+def test_load_model_metadata_no_weights(tmp_path):
+    from stella.train import load_model_metadata
+
+    d = tmp_path / "noweights"
+    d.mkdir()
+    (d / "config.json").write_text(
+        json.dumps({"hidden_size": 64, "num_hidden_layers": 2}),
+        encoding="utf-8",
+    )
+    with pytest.raises(StellaError, match="no weight files"):
+        load_model_metadata(str(d))
+
+
+def test_estimate_training_from_metadata_lfm3_fits(tmp_path):
+    from stella.train import estimate_training_from_metadata
+
+    d = _fake_model_dir(tmp_path)
+    total, breakdown = estimate_training_from_metadata(
+        str(d), {"rank": 8, "max_seq_len": 1024, "batch_size": 1}
+    )
+    assert total < 8 * 1024**3
+    assert breakdown["base_weights"] == 3_460_000_000
+    # The LoRA estimate assumes all 7 targets: ~9M trainable for
+    # LFM3 at rank 8 (the old hand-counted figure was 8.1M).
+    assert breakdown["optimizer_states"] > 0
+
+
+def test_estimate_lora_params_math():
+    from stella.train import estimate_lora_params
+
+    # rank 2, hidden 64, intermediate 256, 2 layers:
+    # per layer 2 * (8*64 + 3*(64+256)) = 2 * 1472 = 2944; x2 = 5888.
+    assert estimate_lora_params(
+        hidden_size=64, intermediate_size=256, num_layers=2, rank=2
+    ) == 5888
+
+
+def test_train_refuses_before_loading_when_it_wont_fit(
+    monkeypatch, tmp_path
+):
+    # A model that cannot fit is refused before any load: the loader
+    # is booby-trapped, so a load attempt would explode instead of
+    # raising the RAM error. No torch needed — nothing loads.
+    import stella.train as train_mod
+    from stella.model import Store
+
+    monkeypatch.setattr(train_mod, "require_training_deps", lambda: None)
+    monkeypatch.setattr(
+        train_mod, "load_base_model",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("the base was loaded")
+        ),
+    )
+    d = _fake_model_dir(tmp_path, total_size=20_000_000_000)
+    store = Store(tmp_path / "home")
+    store.create_profile("big", base_ref=str(d))
+    data = write_dataset(tmp_path / "d.jsonl", prompt_rows(4))
+    store.create_project("big", "proof", dataset_ref=str(data))
+    with pytest.raises(StellaError, match="over the 8.00 GB ceiling"):
+        train_project(store, "big", "proof")
+
+
+def test_train_metadata_estimate_then_loads_tiny_model(need_torch, tmp_path):
+    # The fits path, end to end with no injected loader: the
+    # metadata estimate runs on a real saved tiny model, it fits,
+    # the model loads, and the run completes.
+    from stella.model import Store
+
+    base, tokenizer = tiny_model_and_tokenizer()
+    model_dir = tmp_path / "tiny-model"
+    base.save_pretrained(str(model_dir))
+    tokenizer.save_pretrained(str(model_dir))
+    store = Store(tmp_path / "home")
+    store.create_profile("tiny", base_ref=str(model_dir))
+    data = write_dataset(tmp_path / "d.jsonl", prompt_rows(4))
+    store.create_project(
+        "tiny", "proof",
+        dataset_ref=str(data),
+        settings={
+            "epochs": 1,
+            "batch_size": 1,
+            "grad_accum": 1,
+            "rank": 2,
+            "max_seq_len": 128,
+            "checkpoint_steps": 0,
+            "val_fraction": 0.25,
+            "warmup_steps": 1,
+            "seed": 42,
+        },
+    )
+    summary = train_project(store, "tiny", "proof", _dtype="float32")
+    assert summary["steps"] == 3
+    assert summary["stopped"] is False
+    assert (store.project_dir("tiny", "proof") / "adapter").is_dir()
+    assert store.get_project("tiny", "proof")["status"] == "trained"
+
+
+def test_remote_metadata_from_fetched_files(monkeypatch, tmp_path):
+    # The Hub path, with the network replaced by local files.
+    import stella.train as train_mod
+    from stella.train import load_model_metadata
+
+    config_file = tmp_path / "config.json"
+    config_file.write_text(
+        json.dumps(
+            {
+                "hidden_size": 1024,
+                "num_hidden_layers": 12,
+                "intermediate_size": 4096,
+                "torch_dtype": "bfloat16",
+            }
+        ),
+        encoding="utf-8",
+    )
+    index_file = tmp_path / "index.json"
+    index_file.write_text(
+        json.dumps({"metadata": {"total_size": 2_000_000_000}}),
+        encoding="utf-8",
+    )
+
+    def fake_fetch(repo, filename):
+        if filename == "config.json":
+            return config_file
+        if filename == "model.safetensors.index.json":
+            return index_file
+        raise FileNotFoundError(filename)
+
+    monkeypatch.setattr(train_mod, "_fetch_hf_file", fake_fetch)
+    meta = load_model_metadata("someone/some-model")
+    assert meta["params"] == 1_000_000_000
+    assert meta["hidden_size"] == 1024
+
+
+def test_remote_metadata_unreadable_config_refuses(monkeypatch):
+    import stella.train as train_mod
+    from stella.train import load_model_metadata
+
+    def fake_fetch(repo, filename):
+        raise ConnectionError("no network here")
+
+    monkeypatch.setattr(train_mod, "_fetch_hf_file", fake_fetch)
+    with pytest.raises(StellaError, match="could not check whether"):
+        load_model_metadata("someone/some-model")
+
+
+# -- T33: every split keeps at least one validation row --------------
+
+
+@pytest.mark.parametrize("n", [2, 3, 4, 5, 6])
+def test_split_keeps_at_least_one_val_row(n):
+    examples = [{"prompt": f"Q{i}?", "completion": f"A{i}."} for i in range(n)]
+    train, val = split_dataset(examples, 0.1, 42)
+    assert len(val) >= 1
+    assert len(train) >= 1
+    assert len(train) + len(val) == n
+    # No row is in both halves, none is lost.
+    assert {id(x) for x in train}.isdisjoint({id(x) for x in val})
+
+
+def test_split_two_examples_is_one_and_one():
+    # The case load_dataset promises: "1 to train on, 1 to
+    # validate". Before T33 it validated on 0.
+    examples = [
+        {"prompt": "Q0?", "completion": "A0."},
+        {"prompt": "Q1?", "completion": "A1."},
+    ]
+    train, val = split_dataset(examples, 0.1, 42)
+    assert len(train) == 1
+    assert len(val) == 1
+
+
+# -- T32: seeding — same seed, same adapter --------------------------
+
+
+def _seeded_loader(seed=123):
+    """A loader that builds the same random base every time: the
+    base init itself is random, so the loader seeds it."""
+
+    def load():
+        import torch
+
+        torch.manual_seed(seed)
+        return tiny_model_and_tokenizer()
+
+    return load
+
+
+def _adapter_tensors(adapter_dir):
+    from safetensors.torch import load_file
+
+    return load_file(str(Path(adapter_dir) / "adapter_model.safetensors"))
+
+
+def test_same_seed_trains_identical_adapters(need_torch, tmp_path):
+    import torch
+    from stella.model import Store
+
+    summaries = []
+    adapters = []
+    for i in range(2):
+        data_dir = tmp_path / f"d{i}"
+        data_dir.mkdir()
+        store = _tiny_project(Store(tmp_path / f"home{i}"), data_dir)
+        summary = train_project(
+            store, "tiny", "proof",
+            _model_loader=_seeded_loader(), _dtype="float32",
+        )
+        summaries.append(summary)
+        adapters.append(
+            _adapter_tensors(
+                store.project_dir("tiny", "proof") / "adapter"
+            )
+        )
+    assert summaries[0]["final_loss"] == summaries[1]["final_loss"]
+    assert adapters[0].keys() == adapters[1].keys()
+    for key in adapters[0]:
+        assert torch.equal(adapters[0][key], adapters[1][key]), key
+
+
+def test_pause_resume_matches_uninterrupted(need_torch, tmp_path):
+    # The audit's probe: pause after step 2, resume — pre-pause
+    # losses matched, post-pause losses diverged (5.6149 vs
+    # 5.6010) because the RNG state was not saved. Now the whole
+    # run is bit-identical to an uninterrupted one.
+    import torch
+    from stella.model import Store
+
+    def run(store_dir, pause_at=None):
+        store_dir.mkdir(parents=True, exist_ok=True)
+        store = _tiny_project(Store(store_dir), store_dir)
+        store.update_project("tiny", "proof", settings={"epochs": 2})
+        controller = TrainController()
+        losses: list[float] = []
+
+        def collect(event):
+            if event.get("type") == "step":
+                losses.append(event["loss"])
+                if pause_at is not None and event["step"] >= pause_at:
+                    controller.request_stop()
+
+        summary = train_project(
+            store, "tiny", "proof",
+            on_event=collect, controller=controller,
+            _model_loader=_seeded_loader(), _dtype="float32",
+        )
+        if pause_at is not None:
+            assert summary["stopped"] is True
+            assert summary["steps"] == pause_at
+            resumed = train_project(
+                store, "tiny", "proof", resume=True,
+                on_event=collect,
+                _model_loader=_seeded_loader(), _dtype="float32",
+            )
+            assert resumed["stopped"] is False
+            assert resumed["steps"] == 6
+        return losses, _adapter_tensors(
+            store.project_dir("tiny", "proof") / "adapter"
+        )
+
+    plain_losses, plain_adapter = run(tmp_path / "plain")
+    paused_losses, paused_adapter = run(tmp_path / "paused", pause_at=2)
+    assert len(plain_losses) == 6
+    assert plain_losses == paused_losses
+    assert plain_adapter.keys() == paused_adapter.keys()
+    for key in plain_adapter:
+        assert torch.equal(plain_adapter[key], paused_adapter[key]), key
+
+
+def test_checkpoint_saves_rng_state(need_torch, tmp_path):
+    import torch
+    from stella.model import Store
+
+    store = _tiny_project(Store(tmp_path / "home"), tmp_path)
+    train_project(
+        store, "tiny", "proof",
+        _model_loader=_seeded_loader(), _dtype="float32",
+    )
+    opt_file = (
+        store.project_dir("tiny", "proof")
+        / "checkpoints" / "step-3" / "optimizer.pt"
+    )
+    saved = torch.load(str(opt_file), map_location="cpu", weights_only=True)
+    assert "rng_state" in saved
+    assert saved["rng_state"].dtype == torch.uint8
+
+
+def test_resume_without_rng_state_still_works(need_torch, tmp_path):
+    # A pre-v0.10.0 checkpoint carries no RNG state: the resume
+    # proceeds without it instead of crashing.
+    import torch
+    from stella.model import Store
+
+    store = _tiny_project(Store(tmp_path / "home"), tmp_path)
+    store.update_project("tiny", "proof", settings={"epochs": 2})
+    controller = TrainController()
+
+    def stop_after_first_step(event):
+        if event.get("type") == "step" and event["step"] >= 1:
+            controller.request_stop()
+
+    train_project(
+        store, "tiny", "proof",
+        on_event=stop_after_first_step, controller=controller,
+        _model_loader=_seeded_loader(), _dtype="float32",
+    )
+    ckpt = store.project_dir("tiny", "proof") / "checkpoints" / "step-1"
+    opt_file = ckpt / "optimizer.pt"
+    saved = torch.load(str(opt_file), map_location="cpu", weights_only=True)
+    assert "rng_state" in saved
+    del saved["rng_state"]
+    torch.save(saved, opt_file)
+    resumed = train_project(
+        store, "tiny", "proof", resume=True,
+        _model_loader=_seeded_loader(), _dtype="float32",
+    )
+    assert resumed["stopped"] is False
+    assert resumed["steps"] == 6
+
+
+# -- T56: --steps is a real cap --------------------------------------
+
+
+def test_steps_cap_runs_exactly_n_steps(need_torch, tmp_path):
+    from stella.model import Store
+
+    store = _tiny_project(Store(tmp_path / "home"), tmp_path)
+    store.update_project("tiny", "proof", settings={"epochs": 3})
+    events: list[dict] = []
+    summary = train_project(
+        store, "tiny", "proof", max_steps=2,
+        on_event=events.append,
+        _model_loader=_seeded_loader(), _dtype="float32",
+    )
+    # 3 epochs x 3 steps = 9 on the schedule; the cap stops at 2,
+    # mid-epoch — and that is completion, not a pause.
+    assert summary["steps"] == 2
+    assert summary["stopped"] is False
+    assert summary["total_steps"] == 2
+    assert store.get_project("tiny", "proof")["status"] == "trained"
+    assert (store.project_dir("tiny", "proof") / "adapter").is_dir()
+    started = [e for e in events if e["type"] == "started"]
+    assert started[0]["total_steps"] == 2
+    assert len([e for e in events if e["type"] == "step"]) == 2
+    assert any(e["type"] == "done" for e in events)
+
+
+def test_steps_cap_larger_than_schedule_runs_schedule(need_torch, tmp_path):
+    from stella.model import Store
+
+    store = _tiny_project(Store(tmp_path / "home"), tmp_path)
+    summary = train_project(
+        store, "tiny", "proof", max_steps=99,
+        _model_loader=_seeded_loader(), _dtype="float32",
+    )
+    assert summary["steps"] == 3
+    assert summary["total_steps"] == 3
+
+
+@pytest.mark.parametrize("bad", [0, -1, -10])
+def test_steps_zero_or_negative_refused(bad, tmp_path):
+    # The engine refuses on its own, before the training deps are
+    # even required — no torch needed for this test.
+    from stella.model import Store
+
+    store = _tiny_project(Store(tmp_path / "home"), tmp_path)
+    with pytest.raises(StellaError, match="--steps must be at least 1"):
+        train_project(store, "tiny", "proof", max_steps=bad)
+
+
+def test_resume_with_steps_trains_exactly_n_more(need_torch, tmp_path):
+    from stella.model import Store
+
+    store = _tiny_project(Store(tmp_path / "home"), tmp_path)
+    store.update_project("tiny", "proof", settings={"epochs": 2})
+    controller = TrainController()
+
+    def stop_after_first_step(event):
+        if event.get("type") == "step" and event["step"] >= 1:
+            controller.request_stop()
+
+    first = train_project(
+        store, "tiny", "proof",
+        on_event=stop_after_first_step, controller=controller,
+        _model_loader=_seeded_loader(), _dtype="float32",
+    )
+    assert first["steps"] == 1
+    events: list[dict] = []
+    resumed = train_project(
+        store, "tiny", "proof", resume=True, max_steps=2,
+        on_event=events.append,
+        _model_loader=_seeded_loader(), _dtype="float32",
+    )
+    # 1 done + 2 more = 3 of the 6-step schedule. The cap is a
+    # remaining-steps budget, so the new total is 3, not 2.
+    assert resumed["steps"] == 3
+    assert resumed["total_steps"] == 3
+    assert resumed["stopped"] is False
+    assert store.get_project("tiny", "proof")["status"] == "trained"
+    started = [e for e in events if e["type"] == "started"]
+    assert started[0]["total_steps"] == 3
+
+
+# -- T25: re-training a trained project refuses (or --force) ---------
+
+
+def _adapter_bytes(project_dir):
+    adapter = Path(project_dir) / "adapter"
+    return {
+        p.name: p.read_bytes()
+        for p in sorted(adapter.iterdir())
+        if p.is_file()
+    }
+
+
+def test_retrain_trained_project_refuses_without_force(need_torch, tmp_path):
+    from stella.model import Store
+
+    store = _tiny_project(Store(tmp_path / "home"), tmp_path)
+    train_project(
+        store, "tiny", "proof",
+        _model_loader=_seeded_loader(), _dtype="float32",
+    )
+    assert store.get_project("tiny", "proof")["status"] == "trained"
+    before = _adapter_bytes(store.project_dir("tiny", "proof"))
+    with pytest.raises(StellaError, match="already trained"):
+        train_project(
+            store, "tiny", "proof",
+            _model_loader=_seeded_loader(), _dtype="float32",
+        )
+    try:
+        train_project(
+            store, "tiny", "proof",
+            _model_loader=_seeded_loader(), _dtype="float32",
+        )
+    except StellaError as exc:
+        assert "--force" in str(exc)
+    # The finished adapter is untouched, byte for byte.
+    assert _adapter_bytes(store.project_dir("tiny", "proof")) == before
+
+
+def test_retrain_trained_project_with_force_retrains(need_torch, tmp_path):
+    from stella.model import Store
+
+    store = _tiny_project(Store(tmp_path / "home"), tmp_path)
+    train_project(
+        store, "tiny", "proof",
+        _model_loader=_seeded_loader(), _dtype="float32",
+    )
+    summary = train_project(
+        store, "tiny", "proof", force=True,
+        _model_loader=_seeded_loader(), _dtype="float32",
+    )
+    assert summary["steps"] == 3
+    assert summary["stopped"] is False
+    assert store.get_project("tiny", "proof")["status"] == "trained"
+
+
+def test_resume_on_trained_announces_extension(need_torch, tmp_path):
+    # The audit's case: a --steps 2 proof run finishes (status
+    # trained), then --resume extends it to the full schedule.
+    # The run announces the extension + the new total first.
+    from stella.model import Store
+
+    store = _tiny_project(Store(tmp_path / "home"), tmp_path)
+    store.update_project("tiny", "proof", settings={"epochs": 3})
+    first = train_project(
+        store, "tiny", "proof", max_steps=2,
+        _model_loader=_seeded_loader(), _dtype="float32",
+    )
+    assert first["steps"] == 2
+    assert store.get_project("tiny", "proof")["status"] == "trained"
+    events: list[dict] = []
+    resumed = train_project(
+        store, "tiny", "proof", resume=True,
+        on_event=events.append,
+        _model_loader=_seeded_loader(), _dtype="float32",
+    )
+    assert resumed["steps"] == 9
+    kinds = [e["type"] for e in events]
+    assert "extending" in kinds
+    # The announcement comes before the "started" line.
+    assert kinds.index("extending") < kinds.index("started")
+    extending = events[kinds.index("extending")]
+    assert extending["trained_steps"] == 2
+    assert extending["new_total"] == 9
+
+
+def test_resume_on_paused_does_not_announce_extension(need_torch, tmp_path):
+    # A resume on a merely paused project is normal, not an
+    # extension: no announcement.
+    from stella.model import Store
+
+    store = _tiny_project(Store(tmp_path / "home"), tmp_path)
+    store.update_project("tiny", "proof", settings={"epochs": 2})
+    controller = TrainController()
+
+    def stop_after_first_step(event):
+        if event.get("type") == "step" and event["step"] >= 1:
+            controller.request_stop()
+
+    train_project(
+        store, "tiny", "proof",
+        on_event=stop_after_first_step, controller=controller,
+        _model_loader=_seeded_loader(), _dtype="float32",
+    )
+    assert store.get_project("tiny", "proof")["status"] == "paused"
+    events: list[dict] = []
+    train_project(
+        store, "tiny", "proof", resume=True,
+        on_event=events.append,
+        _model_loader=_seeded_loader(), _dtype="float32",
+    )
+    assert "extending" not in [e["type"] for e in events]
+
+
+def test_sleep_not_blocked_by_trained_status(need_torch, tmp_path):
+    # Sleep consolidates a trained project with update_status=False:
+    # the T25 refusal must not block it.
+    from stella.model import Store
+
+    store = _tiny_project(Store(tmp_path / "home"), tmp_path)
+    train_project(
+        store, "tiny", "proof",
+        _model_loader=_seeded_loader(), _dtype="float32",
+    )
+    assert store.get_project("tiny", "proof")["status"] == "trained"
+    cycle_dir = tmp_path / "cycle"
+    summary = train_project(
+        store, "tiny", "proof",
+        _model_loader=_seeded_loader(), _dtype="float32",
+        work_dir=cycle_dir, update_status=False,
+    )
+    assert summary["steps"] == 3
+    assert (cycle_dir / "adapter").is_dir()
+    assert store.get_project("tiny", "proof")["status"] == "trained"

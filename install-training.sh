@@ -19,7 +19,7 @@ DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 cd "$DIR"
 
 echo "Installing Stella training packages into $DIR/.venv ..."
-echo "(about 2 GB — torch CPU, transformers, peft, accelerate)"
+echo "(about 2 GB - torch CPU, transformers, peft, accelerate)"
 
 if [ ! -x "$DIR/.venv/bin/python" ]; then
   echo "ERROR: Stella is not installed yet. Run bash install.sh first." >&2
@@ -39,7 +39,7 @@ if ! "$DIR/.venv/bin/python" -c "import torch, transformers, peft, accelerate" 2
   exit 1
 fi
 
-"$DIR/.venv/bin/python" -c "import torch; print('torch', torch.__version__, '— CPU threads:', torch.get_num_threads())"
+"$DIR/.venv/bin/python" -c "import torch; print('torch', torch.__version__, '- CPU threads:', torch.get_num_threads())"
 
 echo ""
 echo "Training packages installed. Next: pull the base weights, e.g."

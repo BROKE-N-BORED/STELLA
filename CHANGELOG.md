@@ -1,5 +1,87 @@
 # Changelog
 
+## v0.10.0 — 2026-11-13
+
+The finish list, second slice: the RAM guards estimate before
+loading anything, the training loop is reproducible and honestly
+capped, and the destructive paths (re-train, re-export) ask or
+refuse instead of silently destroying finished work.
+
+- T28 — the RAM guard estimates from the model's config + weight
+  sizes (`load_model_metadata`, `estimate_training_from_metadata`)
+  before loading anything; a run that will not fit is refused
+  before the base is anywhere near memory. A second guard with
+  the real param counts still runs after the load.
+- T31 — merge RAM guard (`estimate_merge_bytes`, `check_merge_fit`
+  in `gguf.py`): base + merged copy + headroom, refused before
+  loading when it does not fit. The converter warning
+  (`merge_warnings`, `on_warning`) tells the user to close other
+  apps when merge + converter together pass the ceiling.
+- T32 — seed everything: `torch.manual_seed` at fresh-run start
+  (before the LoRA init), and the torch RNG state saved in every
+  checkpoint and restored on resume. Same seed, same adapter;
+  pause/resume is bit-identical to an uninterrupted run. Old
+  checkpoints without RNG state still resume.
+- T56 — `--steps` is a real cap: `run_training_loop` takes a
+  remaining-steps budget, breaks mid-epoch at the cap, and
+  reaching the cap is completion (adapter saved, status trained),
+  not a pause. 0/negative refused in argparse and in the engine.
+  The old epochs-shrink hack is gone.
+- T25 — re-training a trained project refuses ("already trained.
+  Use --force to re-train it") and leaves the adapter untouched;
+  `--force` re-trains deliberately. `--resume` on a trained
+  project announces the extension and the new total first (the
+  `extending` event, printed by the CLI and the GUI). The GUI
+  asks before re-training. Sleep is never blocked (it runs with
+  `update_status=False`).
+- T24 — GGUF export refuses to overwrite an existing GGUF (the
+  REFUSE pick, checked before the merge); `--force` on
+  `export-gguf` overwrites deliberately. Never deletes a previous
+  export silently.
+- T26 — `export_gguf` checks llama.cpp before the merge; a failed
+  export removes the half-finished merged dir and the F16
+  intermediate and says so in the error.
+- T27 — the GGUF path validates `--quant` up front with the
+  existing `requant.validate_quant` (no second validator): a
+  bogus quant fails in a millisecond, before the merge.
+- T102 — `find_llama_cpp` requires an executable quantizer; a
+  non-executable file is refused naming the file and the
+  `chmod +x` fix.
+- T99 — completions are bound to `max_seq_len` (head + EOS kept,
+  `truncated` flag); the loop warns with the count of cut
+  examples, shown by the CLI, the GUI, and sleep.
+- T2 — dirty tracking in the Profile and Project windows:
+  snapshot-based `is_modified`, title asterisk, Save/Discard/
+  Cancel on close and on rename, notes-only save.
+- T3 — damaged manifests are rows, not silent skips: greyed +
+  italic in the GUI tree (click = status message, double-click
+  opens the manifest for repair), `(damaged: ...)` rows in the
+  CLI lists, skipped by session restore and rename.
+- T8 — Start training checks the open Project window's unsaved
+  edits first (Save/Discard/Cancel); a bad learning rate sitting
+  unsaved stops the start instead of training on stale settings.
+- T10 — the refusal probe loads one base at a time (before run,
+  free, after run) instead of holding both in memory.
+- T12 — soft tag validation: creating a profile (or saving one)
+  with an Ollama tag that is not installed locally warns and
+  asks, default No. An empty tag or an unanswered Ollama never
+  warns.
+- T13 — the live training log keeps its in-memory lines when the
+  panel refreshes; JSONL re-renders as friendly
+  `step N/total loss x.xxxx` lines on project switch.
+- T22 — checkpoint resume loads `optimizer.pt` with
+  `weights_only=True`; a malicious pickle is refused, never
+  executed.
+- T33 — every dataset split keeps at least one validation row
+  (n=2 is 1 train + 1 val, as `load_dataset` promises).
+- T35 — the CLI closing line says "GB RAM (estimated)", not
+  "GB RAM used": the figure is the pre-run estimate, not a
+  measurement.
+- T142 — tests for the risky CLI paths: unknown/no command (exit
+  2 + usage), `--steps` 0/negative, `--quant BOGUS`, corrupt-home
+  lists, resume-on-trained announcement, `--force` plumbing,
+  converter-warning print.
+
 ## v0.9.0 — 2026-11-13
 
 Auto-config backend plus the P0 foundations from the finish list.

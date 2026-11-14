@@ -119,3 +119,53 @@ def test_probe_project_without_adapter_fails(tmp_path):
     store.create_project("tiny", "proof")
     with pytest.raises(StellaError, match="no trained adapter"):
         probe_project(store, "tiny", "proof", _model_loader=lambda a, b: (None, None))
+
+
+# -- T10: the probe never holds two base models at once --------------
+
+
+def test_probe_loads_one_base_at_a_time(tmp_path):
+    pytest.importorskip("torch", reason="training stack not installed")
+    from stella.model import Store
+
+    store = Store(tmp_path / "home")
+    store.create_profile("tiny", base_ref="test/tiny-model")
+    store.create_project("tiny", "proof")
+    adapter = store.project_dir("tiny", "proof") / "adapter"
+    adapter.mkdir()
+    (adapter / "adapter_config.json").write_text("{}\n")
+
+    class CountedModel:
+        """A fake model that counts how many are alive at once."""
+
+        live = 0
+        peak = 0
+
+        def __init__(self):
+            type(self).live += 1
+            type(self).peak = max(type(self).peak, type(self).live)
+
+        def __del__(self):
+            type(self).live -= 1
+
+    def loader(base_ref, adapter_dir):
+        return CountedModel(), object()
+
+    calls = {"n": 0}
+
+    def generate(prompt):
+        calls["n"] += 1
+        if calls["n"] > 12 and calls["n"] <= 15:
+            return "I'm sorry, I can't help with that."
+        return "Here is the answer."
+
+    result = probe_project(
+        store, "tiny", "proof", _model_loader=loader, _generate=generate
+    )
+    # Before/after counts are unchanged by the one-at-a-time load.
+    assert result["before"]["refusals"] == 0
+    assert result["after"]["refusals"] == 3
+    # And two models were never alive at once: the second load
+    # happened only after the first was freed.
+    assert CountedModel.peak == 1
+    assert CountedModel.live == 0

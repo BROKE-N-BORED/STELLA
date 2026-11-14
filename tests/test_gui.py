@@ -326,6 +326,12 @@ def test_project_window_rejects_bad_lr(window, seeded, monkeypatch):
     monkeypatch.setattr(
         QMessageBox, "warning", lambda *a, **k: warnings.append(a[2])
     )
+    # The window stays modified (the bad value was never saved), so
+    # closing it prompts (T2) — discard the edits, the test's point
+    # is the rejection, not the prompt.
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.Discard
+    )
     win = window.open_project_window("lfm3-tool", "tool-calls")
     win.lr_edit.setText("banana")
     assert win.save() is False
@@ -1349,3 +1355,534 @@ def test_second_main_exits_zero_while_first_runs(tmp_path, qapp):
             except subprocess.TimeoutExpired:
                 first.kill()
                 first.wait(timeout=10)
+
+
+# -- T3: damaged rows in the tree -------------------------------------
+
+
+def test_tree_shows_damaged_profile_row(window, seeded, qapp):
+    from PySide6.QtCore import Qt
+
+    manifest = (
+        seeded.home / "profiles" / "lfm3-tool" / "profile.json"
+    )
+    manifest.write_text("{not valid json", encoding="utf-8")
+    window.refresh_tree()
+    qapp.processEvents()
+    item = window.tree.topLevelItem(0)
+    assert "lfm3-tool" in item.text(0)
+    assert "damaged" in item.text(0)
+    assert "not valid JSON" in item.text(0)
+    assert item.font(0).italic() is True
+    assert item.data(0, Qt.UserRole + 1) is True
+    # Clicking it does not set a session.
+    window.tree.setCurrentItem(item)
+    qapp.processEvents()
+    assert window._current_profile is None
+
+
+def test_tree_shows_damaged_project_row(window, seeded, qapp):
+    import json
+
+    manifest = (
+        seeded.home / "profiles" / "lfm3-tool" / "projects"
+        / "tool-calls" / "project.json"
+    )
+    manifest.write_text("{not valid json", encoding="utf-8")
+    window.refresh_tree()
+    qapp.processEvents()
+    child = window.tree.topLevelItem(0).child(0)
+    assert "tool-calls" in child.text(0)
+    assert "damaged" in child.text(0)
+    assert child.font(0).italic() is True
+    # Fixing the JSON by hand and refreshing restores the normal row.
+    manifest.write_text(
+        json.dumps(
+            {
+                "name": "tool-calls",
+                "display_name": "tool-calls",
+                "profile": "lfm3-tool",
+                "status": "draft",
+                "settings": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    window.refresh_tree()
+    qapp.processEvents()
+    child = window.tree.topLevelItem(0).child(0)
+    assert child.text(0) == "tool-calls"
+    assert child.font(0).italic() is False
+
+
+def test_damaged_row_double_click_opens_editor(window, seeded, monkeypatch, qapp):
+    from PySide6.QtGui import QDesktopServices
+
+    opened = []
+    monkeypatch.setattr(
+        QDesktopServices, "openUrl", lambda url: opened.append(url.toString())
+    )
+    manifest = (
+        seeded.home / "profiles" / "lfm3-tool" / "profile.json"
+    )
+    manifest.write_text("{not valid json", encoding="utf-8")
+    window.refresh_tree()
+    qapp.processEvents()
+    item = window.tree.topLevelItem(0)
+    window._on_tree_double_clicked(item, 0)
+    assert len(opened) == 1
+    assert "profile.json" in opened[0]
+
+
+# -- T2: dirty tracking in both detail windows -----------------------
+
+
+def test_project_window_close_prompts_and_saves(window, seeded, monkeypatch, qapp):
+    from PySide6.QtWidgets import QMessageBox
+
+    proj_win = window.open_project_window("lfm3-tool", "tool-calls")
+    qapp.processEvents()
+    assert not proj_win.is_modified()
+    assert not proj_win.windowTitle().endswith("*")
+    proj_win.notes_edit.setPlainText("UNSAVED edit")
+    assert proj_win.is_modified()
+    assert proj_win.windowTitle().endswith("*")
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.Save
+    )
+    assert proj_win.close() is True
+    qapp.processEvents()
+    assert not proj_win.isVisible()
+    assert "UNSAVED edit" in seeded.read_notes("lfm3-tool", "tool-calls")
+
+
+def test_project_window_close_discard_drops_edits(window, seeded, monkeypatch, qapp):
+    from PySide6.QtWidgets import QMessageBox
+
+    proj_win = window.open_project_window("lfm3-tool", "tool-calls")
+    qapp.processEvents()
+    before = seeded.read_notes("lfm3-tool", "tool-calls")
+    proj_win.notes_edit.setPlainText("throw this away")
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.Discard
+    )
+    assert proj_win.close() is True
+    assert seeded.read_notes("lfm3-tool", "tool-calls") == before
+
+
+def test_project_window_close_cancel_keeps_edits(window, monkeypatch, qapp):
+    from PySide6.QtWidgets import QMessageBox
+
+    proj_win = window.open_project_window("lfm3-tool", "tool-calls")
+    qapp.processEvents()
+    proj_win.notes_edit.setPlainText("keep me here")
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.Cancel
+    )
+    assert proj_win.close() is False
+    assert proj_win.isVisible()
+    assert proj_win.notes_edit.toPlainText() == "keep me here"
+    # Tidy up: discard, so the fixture teardown never prompts.
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.Discard
+    )
+    assert proj_win.close() is True
+
+
+def test_project_window_no_prompt_when_clean(window, monkeypatch, qapp):
+    from PySide6.QtWidgets import QMessageBox
+
+    proj_win = window.open_project_window("lfm3-tool", "tool-calls")
+    qapp.processEvents()
+
+    def _no_prompt(*a, **k):
+        raise AssertionError("no prompt when nothing changed")
+
+    monkeypatch.setattr(QMessageBox, "question", _no_prompt)
+    assert proj_win.close() is True
+
+
+def test_profile_window_close_prompts_and_saves(window, seeded, monkeypatch, qapp):
+    from PySide6.QtWidgets import QMessageBox
+
+    prof_win = window.open_profile_window("lfm3-tool")
+    qapp.processEvents()
+    assert not prof_win.is_modified()
+    prof_win.role_edit.setText("reviewer")
+    assert prof_win.is_modified()
+    assert prof_win.windowTitle().endswith("*")
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.Save
+    )
+    assert prof_win.close() is True
+    assert seeded.get_profile("lfm3-tool")["role"] == "reviewer"
+
+
+def test_notes_marker_and_save_notes_only(window, seeded, monkeypatch, qapp):
+    from PySide6.QtWidgets import QMessageBox
+
+    proj_win = window.open_project_window("lfm3-tool", "tool-calls")
+    qapp.processEvents()
+    assert proj_win.notes_label.text() == "Notes"
+    proj_win.notes_edit.setPlainText("just the notes")
+    proj_win.display_edit.setText("Renamed in the form")
+    assert proj_win.notes_label.text() == "Notes (modified)"
+    assert proj_win.save_notes() is True
+    assert proj_win.notes_label.text() == "Notes"
+    assert "just the notes" in seeded.read_notes("lfm3-tool", "tool-calls")
+    # Save notes touches only the notes: the display-name edit is
+    # still unsaved (and the window still shows it as modified).
+    assert seeded.get_project("lfm3-tool", "tool-calls")["display_name"] != (
+        "Renamed in the form"
+    )
+    assert proj_win.is_modified()
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.Discard
+    )
+    proj_win.close()
+
+
+def test_edits_survive_train_finish(window, seeded, monkeypatch, qapp):
+    from PySide6.QtWidgets import QMessageBox
+
+    # Pin: the completion refresh never reloads an open Project
+    # window, so edits made during a run survive the run finishing.
+    proj_win = window.open_project_window("lfm3-tool", "tool-calls")
+    qapp.processEvents()
+    proj_win.notes_edit.setPlainText("notes typed during the run")
+    window.set_session("lfm3-tool", "tool-calls")
+    window._on_train_finished(True, "Trained 3 steps.")
+    qapp.processEvents()
+    assert proj_win.notes_edit.toPlainText() == "notes typed during the run"
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.Discard
+    )
+    proj_win.close()
+
+
+def test_rename_project_prompts_on_dirty_window(window, seeded, monkeypatch, qapp):
+    from PySide6.QtWidgets import QMessageBox, QInputDialog
+
+    proj_win = window.open_project_window("lfm3-tool", "tool-calls")
+    qapp.processEvents()
+    proj_win.notes_edit.setPlainText("save me before the rename")
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.Cancel
+    )
+    monkeypatch.setattr(
+        QInputDialog, "getText", lambda *a, **k: ("renamed", True)
+    )
+    window.rename_project("lfm3-tool", "tool-calls")
+    # Cancelled: the rename never happened.
+    assert seeded.get_project("lfm3-tool", "tool-calls")["name"] == "tool-calls"
+    # Save, then the rename proceeds with the edits saved.
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.Save
+    )
+    window.rename_project("lfm3-tool", "tool-calls")
+    assert "renamed" in [
+        p["name"] for p in seeded.list_projects("lfm3-tool")
+    ]
+    assert "save me before the rename" in seeded.read_notes(
+        "lfm3-tool", "renamed"
+    )
+    assert proj_win.project == "renamed"
+
+
+# -- T8: Start training is gated on a clean save ---------------------
+
+
+def test_start_training_refused_on_bad_lr_in_open_window(
+    window, seeded, monkeypatch, qapp
+):
+    from PySide6.QtWidgets import QMessageBox
+
+    _select_session(window)
+    proj_win = window.open_project_window("lfm3-tool", "tool-calls")
+    qapp.processEvents()
+    proj_win.lr_edit.setText("abc")
+    warnings = []
+    monkeypatch.setattr(
+        QMessageBox, "warning", lambda *a, **k: warnings.append(a[2])
+    )
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.Save
+    )
+    window.start_training()
+    qapp.processEvents()
+    # The warning appeared and no worker started: nothing trains on
+    # stale settings behind an error.
+    assert warnings == ["Learning rate must be a number, like 0.0002."]
+    assert window._train_worker is None
+    assert "Starting training" not in window.train_log.toPlainText()
+    # The form still holds the bad value, for the user to fix.
+    assert proj_win.lr_edit.text() == "abc"
+    assert proj_win.isVisible()
+
+
+def test_start_training_saves_dirty_window_then_starts(
+    window, seeded, monkeypatch, qapp
+):
+    from PySide6.QtWidgets import QMessageBox
+
+    import stella.gui as gui_mod
+    import stella.train as train_mod
+
+    _select_session(window)
+    proj_win = window.open_project_window("lfm3-tool", "tool-calls")
+    qapp.processEvents()
+    proj_win.rank_spin.setValue(16)
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.Save
+    )
+    monkeypatch.setattr(train_mod, "training_deps_missing", lambda: [])
+    monkeypatch.setattr(window, "_weights_offer", lambda profile: True)
+    monkeypatch.setattr(gui_mod.TrainWorker, "run", lambda self: None)
+    window.start_training()
+    qapp.processEvents()
+    # The edits were saved first, then the worker started on them.
+    assert seeded.get_project("lfm3-tool", "tool-calls")["settings"]["rank"] == 16
+    assert window._train_worker is not None
+    assert "Starting training" in window.train_log.toPlainText()
+
+
+def test_sample_dataset_without_project_warns_and_claims_nothing(
+    window, monkeypatch, qapp
+):
+    warnings = []
+    monkeypatch.setattr(window, "_warn", warnings.append)
+    assert window._current_profile is None
+    window.use_sample_dataset()
+    assert warnings == ["Pick a project first."]
+    assert "Save is done" not in window.train_log.toPlainText()
+    assert "Dataset set" not in window.train_log.toPlainText()
+
+
+# -- T12: soft tag validation -----------------------------------------
+
+
+def test_create_profile_warns_on_uninstalled_tag(window, seeded, monkeypatch):
+    import stella.gui as gui_mod
+    from PySide6.QtWidgets import QMessageBox
+
+    from stella.gui import NewProfileDialog
+
+    monkeypatch.setattr(gui_mod, "list_models", lambda: ["lfm3:1.7b"])
+    asked = []
+    monkeypatch.setattr(
+        QMessageBox, "question",
+        lambda *a, **k: asked.append(a[2]) or QMessageBox.Yes,
+    )
+    dialog = NewProfileDialog(window)
+    dialog.model_combo.setCurrentText("not-a-real-model:99")
+    window._create_profile_from(dialog)
+    assert len(asked) == 1
+    assert "not installed locally" in asked[0]
+    # Warned, not blocked: the user proceeded and the profile exists.
+    assert seeded.get_profile("not-a-real-model-99")["ollama_tag"] == (
+        "not-a-real-model:99"
+    )
+
+
+def test_create_profile_warns_then_cancel_keeps_nothing(
+    window, seeded, monkeypatch
+):
+    import stella.gui as gui_mod
+    from PySide6.QtWidgets import QMessageBox
+
+    from stella.gui import NewProfileDialog
+
+    monkeypatch.setattr(gui_mod, "list_models", lambda: ["lfm3:1.7b"])
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.No
+    )
+    dialog = NewProfileDialog(window)
+    dialog.model_combo.setCurrentText("not-a-real-model:99")
+    window._create_profile_from(dialog)
+    assert [p["name"] for p in seeded.list_profiles()] == ["lfm3-tool"]
+
+
+def test_create_profile_duplicate_tag_note(window, seeded, monkeypatch):
+    import stella.gui as gui_mod
+    from PySide6.QtWidgets import QMessageBox
+
+    from stella.gui import NewProfileDialog
+
+    monkeypatch.setattr(gui_mod, "list_models", lambda: ["lfm3:1.7b"])
+    asked = []
+    monkeypatch.setattr(
+        QMessageBox, "question",
+        lambda *a, **k: asked.append(a[2]) or QMessageBox.Yes,
+    )
+    dialog = NewProfileDialog(window)
+    dialog.model_combo.setCurrentText("lfm3:1.7b")
+    window._create_profile_from(dialog)
+    assert len(asked) == 1
+    assert "already uses this tag" in asked[0]
+    assert "lfm3-tool" in asked[0]
+    assert "not installed" not in asked[0]
+    assert seeded.get_profile("lfm3-1-7b")["ollama_tag"] == "lfm3:1.7b"
+
+
+def test_create_profile_installed_tag_no_warning(window, seeded, monkeypatch):
+    import stella.gui as gui_mod
+    from PySide6.QtWidgets import QMessageBox
+
+    from stella.gui import NewProfileDialog
+
+    monkeypatch.setattr(
+        gui_mod, "list_models", lambda: ["lfm3:1.7b", "qwen3.5:4b"]
+    )
+
+    def _no_prompt(*a, **k):
+        raise AssertionError("no warning for an installed, unused tag")
+
+    monkeypatch.setattr(QMessageBox, "question", _no_prompt)
+    dialog = NewProfileDialog(window)
+    dialog.model_combo.setCurrentText("qwen3.5:4b")
+    window._create_profile_from(dialog)
+    assert seeded.get_profile("qwen3-5-4b")["ollama_tag"] == "qwen3.5:4b"
+
+
+def test_profile_save_warns_on_uninstalled_tag(window, seeded, monkeypatch, qapp):
+    import stella.gui as gui_mod
+    from PySide6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(gui_mod, "list_models", lambda: ["lfm3:1.7b"])
+    prof_win = window.open_profile_window("lfm3-tool")
+    qapp.processEvents()
+    prof_win.tag_combo.setCurrentText("typo-model:99")
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.No
+    )
+    assert prof_win.save() is False
+    assert seeded.get_profile("lfm3-tool")["ollama_tag"] == "lfm3:1.7b"
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.Yes
+    )
+    assert prof_win.save() is True
+    assert seeded.get_profile("lfm3-tool")["ollama_tag"] == "typo-model:99"
+    prof_win.close()
+
+
+# -- T13: the live training log survives the finish ------------------
+
+
+def test_train_log_survives_finish_refresh(window, seeded):
+    _select_session(window)
+    window._train_log_line("step 1/3 loss 2.1000")
+    window._train_log_line("step 2/3 loss 2.0500")
+    window._on_train_finished(True, "Trained 3 steps.")
+    text = window.train_log.toPlainText()
+    assert "step 1/3 loss 2.1000" in text
+    assert "step 2/3 loss 2.0500" in text
+    assert "Trained 3 steps." in text
+
+
+def test_train_log_jsonl_renders_friendly(window, seeded):
+    import json
+
+    log_path = (
+        seeded.project_dir("lfm3-tool", "tool-calls") / "train_log.jsonl"
+    )
+    records = [
+        {"step": 1, "total_steps": 3, "epoch": 1, "loss": 2.1, "lr": 0.0002},
+        {"step": 2, "total_steps": 3, "epoch": 1, "loss": 2.05, "lr": 0.0002},
+        {"step": 2, "epoch": 1, "val_loss": 1.9},
+        # A legacy record, written before the total was recorded.
+        {"step": 3, "epoch": 1, "loss": 2.0, "lr": 0.0002},
+    ]
+    log_path.write_text(
+        "\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8"
+    )
+    _select_session(window)
+    text = window.train_log.toPlainText()
+    assert "step 1/3 loss 2.1000" in text
+    assert "step 2/3 loss 2.0500" in text
+    assert "epoch 1 validation loss 1.9000" in text
+    assert "step 3 loss 2.0000" in text
+    assert "{" not in text
+    assert "}" not in text
+
+
+def test_friendly_log_line_passthrough():
+    from stella.gui import _friendly_log_line
+
+    assert _friendly_log_line("Starting training...") == "Starting training..."
+    assert _friendly_log_line("not json {") == "not json {"
+    assert (
+        _friendly_log_line('{"step": 1, "loss": 2.5}')
+        == "step 1 loss 2.5000"
+    )
+
+
+# -- T25: re-training a trained project asks first --------------------
+
+
+def _start_training_ready(window, monkeypatch):
+    """Deps present, weights present, worker neutered — start_training
+    reaches worker creation without training anything."""
+    import stella.gui as gui_mod
+    import stella.train as train_mod
+
+    monkeypatch.setattr(train_mod, "training_deps_missing", lambda: [])
+    monkeypatch.setattr(window, "_weights_offer", lambda profile: True)
+    monkeypatch.setattr(gui_mod.TrainWorker, "run", lambda self: None)
+
+
+def test_start_training_on_trained_project_asks_first(
+    window, seeded, monkeypatch, qapp
+):
+    from PySide6.QtWidgets import QMessageBox
+
+    _select_session(window)
+    seeded.update_project("lfm3-tool", "tool-calls", status="trained")
+    asked = []
+    monkeypatch.setattr(
+        QMessageBox, "question",
+        lambda *a, **k: asked.append(a[2]) or QMessageBox.No,
+    )
+    window.start_training()
+    qapp.processEvents()
+    assert len(asked) == 1
+    assert "already finished training" in asked[0]
+    assert "current adapter will be replaced" in asked[0]
+    # "No" stops the start: no worker, nothing trained.
+    assert window._train_worker is None
+
+
+def test_start_training_on_trained_project_yes_forces(
+    window, seeded, monkeypatch, qapp
+):
+    from PySide6.QtWidgets import QMessageBox
+
+    _select_session(window)
+    seeded.update_project("lfm3-tool", "tool-calls", status="trained")
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.Yes
+    )
+    _start_training_ready(window, monkeypatch)
+    window.start_training()
+    qapp.processEvents()
+    assert window._train_worker is not None
+    assert window._train_worker._force is True
+
+
+def test_start_training_on_draft_project_does_not_ask(
+    window, seeded, monkeypatch, qapp
+):
+    from PySide6.QtWidgets import QMessageBox
+
+    _select_session(window)
+    assert seeded.get_project("lfm3-tool", "tool-calls")["status"] != "trained"
+    asked = []
+    monkeypatch.setattr(
+        QMessageBox, "question",
+        lambda *a, **k: asked.append(a[2]) or QMessageBox.No,
+    )
+    _start_training_ready(window, monkeypatch)
+    window.start_training()
+    qapp.processEvents()
+    assert asked == []
+    assert window._train_worker is not None
+    assert window._train_worker._force is False

@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -339,3 +341,205 @@ def test_cli_train_ctrl_c_pauses(tmp_path):
     saved = [d for d in ckpt_dir.iterdir() if d.is_dir()]
     assert saved
     assert (saved[0] / "training_state.json").is_file()
+
+
+# -- T35: the CLI RAM figure says "estimated" ------------------------
+
+
+def test_cli_train_reports_ram_as_estimated(home, monkeypatch, capsys):
+    # The closing line used to present the pre-run estimate as a
+    # measurement ("GB RAM used"). Now it says estimated.
+    import stella.cli as cli_mod
+    import stella.train as train_mod
+
+    monkeypatch.setenv("STELLA_HOME", str(home))
+    monkeypatch.setattr(
+        train_mod, "train_project",
+        lambda *a, **k: {
+            "steps": 3,
+            "final_loss": 5.5,
+            "trainable_params": 12345,
+            "ram_estimate_gb": 4.2,
+        },
+    )
+    run_cli(home, "create-profile", "p1", "--base", "test/tiny-model")
+    run_cli(home, "create-project", "p1", "proj")
+    code = cli_mod.main(["train", "p1", "proj"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "about 4.2 GB RAM (estimated)." in out
+    assert "RAM used" not in out
+
+
+# -- T142: the risky CLI paths ----------------------------------------
+# One test per risky path. Already covered elsewhere, not duplicated
+# here: Ctrl+C pause (test_cli_train_ctrl_c_pauses), file-destination
+# export (test_cli_export_to_file_destination), bad-manifest import
+# (test_cli_import_bad_manifest), nameless manifest
+# (test_cli_profiles_nameless_manifest). --steps rounding (no
+# rounding: exactly N steps) is pinned at the engine level by
+# test_steps_cap_runs_exactly_n_steps.
+
+
+def test_cli_unknown_command_exit_2(home):
+    res = run_cli(home, "frobnicate")
+    assert res.returncode == 2
+    assert "usage:" in res.stderr
+    assert "invalid choice" in res.stderr
+    assert "Traceback" not in res.stderr
+
+
+def test_cli_no_command_exit_2(home):
+    res = run_cli(home)
+    assert res.returncode == 2
+    assert "usage:" in res.stderr
+    assert "Traceback" not in res.stderr
+
+
+@pytest.mark.parametrize("bad", ["0", "-1"])
+def test_cli_steps_zero_or_negative_refused(home, bad):
+    # Argparse refuses before any project lookup: no setup needed.
+    res = run_cli(home, "train", "p1", "proj", "--steps", bad)
+    assert res.returncode == 2
+    assert "--steps must be at least 1" in res.stderr
+    assert "Traceback" not in res.stderr
+
+
+def test_cli_quant_bogus_refused(home, tmp_path):
+    # Validation is first in export_gguf (T27): a bogus quant fails
+    # before the adapter check, the merge, or anything else — no
+    # adapter needed for this test, and nothing is created.
+    run_cli(home, "create-profile", "p1", "--base", "test/tiny-model")
+    run_cli(home, "create-project", "p1", "proj")
+    out = tmp_path / "out"
+    res = run_cli(
+        home, "export-gguf", "p1", "proj", str(out), "--quant", "BOGUS"
+    )
+    assert res.returncode == 1
+    assert "not a quant type" in res.stderr
+    assert "Traceback" not in res.stderr
+    assert not (out / "proj-merged-hf").exists()
+
+
+def test_cli_corrupt_home_lists_survive(home):
+    # A corrupt manifest (T3) is a damaged row in the list, not a
+    # crash — the good rows still print.
+    run_cli(home, "create-profile", "good", "--tag", "x:1b")
+    run_cli(home, "create-project", "good", "proj")
+    pdir = Path(home) / "profiles" / "broken"
+    (pdir / "projects").mkdir(parents=True)
+    (pdir / "profile.json").write_text("{not json", encoding="utf-8")
+    proj_dir = Path(home) / "profiles" / "good" / "projects" / "wrecked"
+    proj_dir.mkdir(parents=True)
+    (proj_dir / "project.json").write_text("{not json", encoding="utf-8")
+    res = run_cli(home, "profiles")
+    assert res.returncode == 0
+    assert "good" in res.stdout
+    assert "broken" in res.stdout
+    assert "(damaged:" in res.stdout
+    assert "Traceback" not in res.stderr
+    res = run_cli(home, "projects", "good")
+    assert res.returncode == 0
+    assert "proj" in res.stdout
+    assert "wrecked" in res.stdout
+    assert "(damaged:" in res.stdout
+    assert "Traceback" not in res.stderr
+
+
+def test_cli_resume_on_trained_announces(home, monkeypatch, capsys):
+    # In-process: the engine emits the extending event (T25) and
+    # the CLI prints it before the steps.
+    import stella.cli as cli_mod
+    import stella.train as train_mod
+
+    monkeypatch.setenv("STELLA_HOME", str(home))
+    seen = {}
+
+    def fake_train(store, profile, project, **kwargs):
+        seen.update(kwargs)
+        on_event = kwargs["on_event"]
+        on_event(
+            {"type": "extending", "trained_steps": 2, "new_total": 9}
+        )
+        on_event({"type": "started", "total_steps": 9, "rank": 2})
+        on_event({"type": "done", "adapter": "/tmp/fake/adapter"})
+        return {
+            "steps": 9,
+            "final_loss": 5.5,
+            "trainable_params": 12345,
+            "ram_estimate_gb": 4.2,
+        }
+
+    monkeypatch.setattr(train_mod, "train_project", fake_train)
+    run_cli(home, "create-profile", "p1", "--base", "test/tiny-model")
+    run_cli(home, "create-project", "p1", "proj")
+    code = cli_mod.main(["train", "p1", "proj", "--resume"])
+    assert code == 0
+    assert seen["resume"] is True
+    assert seen["force"] is False
+    out = capsys.readouterr().out
+    assert "already finished training (2 steps)" in out
+    assert "extends it to 9 total steps" in out
+    # The announcement comes before the "started" line.
+    assert out.index("already finished training") < out.index("Training: 9 steps")
+
+
+def test_cli_train_force_flag_reaches_engine(home, monkeypatch, capsys):
+    import stella.cli as cli_mod
+    import stella.train as train_mod
+
+    monkeypatch.setenv("STELLA_HOME", str(home))
+    seen = {}
+
+    def fake_train(store, profile, project, **kwargs):
+        seen.update(kwargs)
+        return {
+            "steps": 3,
+            "final_loss": 5.5,
+            "trainable_params": 12345,
+            "ram_estimate_gb": 4.2,
+        }
+
+    monkeypatch.setattr(train_mod, "train_project", fake_train)
+    run_cli(home, "create-profile", "p1", "--base", "test/tiny-model")
+    run_cli(home, "create-project", "p1", "proj")
+    code = cli_mod.main(["train", "p1", "proj", "--force"])
+    assert code == 0
+    assert seen["force"] is True
+
+
+def test_cli_export_gguf_prints_converter_warning(home, monkeypatch, capsys):
+    # In-process: the engine calls on_warning before the merge
+    # (T31) and the CLI prints it; --force (T24) reaches the engine.
+    import stella.cli as cli_mod
+    import stella.gguf as gguf_mod
+
+    monkeypatch.setenv("STELLA_HOME", str(home))
+    seen = {}
+
+    def fake_export(store, profile, project, dest, **kwargs):
+        seen.update(kwargs)
+        kwargs["on_warning"]("Close other apps before exporting.")
+        return {
+            "merged_hf": "/tmp/fake/merged",
+            "gguf": "/tmp/fake/model.gguf",
+            "quant": "Q4_K_M",
+            "gguf_bytes": 1234,
+            "modelfile": "/tmp/fake/Modelfile",
+            "ollama_name": "p1-proj",
+            "ollama_create": "ollama create p1-proj -f /tmp/fake/Modelfile",
+        }
+
+    monkeypatch.setattr(gguf_mod, "export_gguf", fake_export)
+    run_cli(home, "create-profile", "p1", "--base", "test/tiny-model")
+    run_cli(home, "create-project", "p1", "proj")
+    code = cli_mod.main(
+        ["export-gguf", "p1", "proj", str(home / "out"), "--force"]
+    )
+    assert code == 0
+    assert seen["force"] is True
+    assert seen["quant"] == "Q4_K_M"
+    out = capsys.readouterr().out
+    assert "Close other apps before exporting." in out
+    # The warning prints before the result lines.
+    assert out.index("Close other apps") < out.index("Merged HF weights")

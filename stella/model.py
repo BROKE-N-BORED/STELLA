@@ -29,7 +29,7 @@ from pathlib import Path
 
 from .autoconfig import compute_settings, measure_pc
 
-STELLA_VERSION = "0.9.0"
+STELLA_VERSION = "0.10.0"
 
 # Slug: lowercase letters, digits, dash, underscore. Must start alnum.
 # No dots, no slashes — a slug can never climb out of its directory.
@@ -314,8 +314,17 @@ class Store:
             if d.is_dir() and manifest.is_file():
                 try:
                     out.append(_read_json(manifest))
-                except StellaError:
-                    continue  # skip a broken manifest, don't crash the list
+                except StellaError as exc:
+                    # A broken manifest is a damaged row, not a skip
+                    # (T3): the folder is still on disk and the UI
+                    # must say so, with the error and the slug.
+                    out.append(
+                        {
+                            "name": d.name,
+                            "_damaged": True,
+                            "_error": str(exc),
+                        }
+                    )
         return out
 
     def get_profile(self, slug: str) -> dict:
@@ -393,8 +402,12 @@ class Store:
         if data.get("display_name") == slug:
             data["display_name"] = new_slug
         data["updated"] = utc_now()
-        # Rename the projects' stored profile pointer too.
+        # Rename the projects' stored profile pointer too. A
+        # damaged project (T3) cannot be read, so its pointer stays
+        # until the manifest is fixed — it must not abort the rename.
         for proj in self.list_projects(slug):
+            if proj.get("_damaged"):
+                continue
             pdata = self.get_project(slug, proj["name"])
             pdata["profile"] = new_slug
             _write_json(
@@ -423,8 +436,16 @@ class Store:
             if d.is_dir() and manifest.is_file():
                 try:
                     out.append(_read_json(manifest))
-                except StellaError:
-                    continue
+                except StellaError as exc:
+                    # A broken manifest is a damaged row, not a skip
+                    # (T3) — see list_profiles.
+                    out.append(
+                        {
+                            "name": d.name,
+                            "_damaged": True,
+                            "_error": str(exc),
+                        }
+                    )
         return out
 
     def get_project(self, profile: str, project: str) -> dict:
