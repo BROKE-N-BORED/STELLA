@@ -1,4 +1,4 @@
-# STELLA Audits #1–#8 + Repo-Audit Verdict — Merged Task List (Profiles + Projects + Export/Import + GUI + CLI + Installer + MetaMorphAi + Training Engine + Verdict)
+# STELLA Audits #1–#9 + Repo-Audit Verdict — Merged Task List (Profiles + Projects + Export/Import + GUI + CLI + Installer + MetaMorphAi + Training Engine + UI Redesign + Verdict)
 
 **Sources:**
 [audit-01-profiles-2026-11-12.md](audit-01-profiles-2026-11-12.md)
@@ -24,7 +24,12 @@ interrupted overnight and left no file), and
 [audit-08-training-engine-2026-11-13.md](audit-08-training-engine-2026-11-13.md)
 (Training engine audit, 2026-11-13, against v0.3 — train.py, gguf.py,
 and probe.py in full, plus the tests and CLI/GUI surfaces that call
-them; sleep.py out of scope). Standalone per-audit lists:
+them; sleep.py out of scope), and
+[audit-09-ui-redesign-2026-11-13.md](audit-09-ui-redesign-2026-11-13.md)
+(UI redesign audit, 2026-11-13, against v0.8.0 / commit ad1d1f1c —
+the current window measured live against the STELLA design brief,
+the canonical design rules, and the BNB UI Design Source File
+Library's 24 entries with its four-question filter). Standalone per-audit lists:
 [audit-01-profiles-task-list.md](audit-01-profiles-task-list.md) (18
 tasks),
 [audit-02-projects-task-list.md](audit-02-projects-task-list.md) (18
@@ -39,7 +44,9 @@ and
 [audit-07-metamorph-task-list.md](audit-07-metamorph-task-list.md) (19
 tasks), and
 [audit-08-training-engine-task-list.md](audit-08-training-engine-task-list.md)
-(31 tasks), and the repo-audit verdict
+(31 tasks), and
+[audit-09-ui-redesign-task-list.md](audit-09-ui-redesign-task-list.md)
+(26 tasks), and the repo-audit verdict
 [repo-audit-verdict-2026-11-12.md](repo-audit-verdict-2026-11-12.md)
 (33 findings, R1–R33, from the GitHub repo-audit thread — it has no
 standalone task list; its findings fold into this merged list
@@ -47,7 +54,7 @@ directly).
 
 **This file is a list only.** Nothing here has been fixed or built.
 Each task turns one or more audit findings into work with a verifiable
-"done". Tasks are renumbered T1..T168 in priority order (P0 first, then
+"done". Tasks are renumbered T1..T194 in priority order (P0 first, then
 P1, P2, P3), and ranked by importance within each priority — highest
 first — so the list reads as a build order, not an audit-merge order.
 The ranking rule, per priority: within P0, data loss / corruption /
@@ -66,82 +73,82 @@ repo-audit verdict:** A1- = from audit #1 (Profiles), A2- = from
 audit #2 (Projects), A3- = from audit #3 (Export/Import), A4- = from
 audit #4 (GUI), A5- = from audit #5 (CLI),
 A6- = from audit #6 (Installer + icon), A7- = from
-audit #7 (MetaMorphAi hooks), A8- = from audit #8 (Training engine),
-R- = from the repo-audit verdict. Each task carries an **Origin** line naming the
+audit #7 (MetaMorphAi hooks), A8- = from audit #8 (Training engine), A9- = from audit #9 (UI
+redesign), R- = from the repo-audit verdict. Each task carries an **Origin** line naming the
 standalone task(s) it came from.
 
 **Merged (deduped) tasks:** fifteen fixes are genuinely shared and are
 built once, not twice — damaged-row (A1-W1 + A2-W4 → T3),
-trash-on-delete (A1-W5 + A2-W8 → T17), CLI parity (A1-T7 + A2-T11 →
-T72, one `cli.py` change), profile export (A1-G4 + A3-W7/G3 → T71),
-recipe export (A2-G6 + A3-G2 → T150), dirty tracking (A2-W1 + A4-W5
+trash-on-delete (A1-W5 + A2-W8 → T23), CLI parity (A1-T7 + A2-T11 →
+T87, one `cli.py` change), profile export (A1-G4 + A3-W7/G3 → T86),
+recipe export (A2-G6 + A3-G2 → T170), dirty tracking (A2-W1 + A4-W5
 → T2, both panels plus the completion refresh), Ollama cache
-(A1-W4 + A4-W7 → T37), import trust-boundary window face (A3-W2 +
-A4-W8 → T1), status discipline (A3-U1 + A4-U3 → T44), tooltips
-(A4-D16 split: row tooltips → T107, settings tooltips → T140), status +
-health display (A4-D22 split: status → T47, health → T143), the menu
+(A1-W4 + A4-W7 → T43), import trust-boundary window face (A3-W2 +
+A4-W8 → T1), status discipline (A3-U1 + A4-U3 → T50), tooltips
+(A4-D16 split: row tooltips → T122, settings tooltips → T160), status +
+health display (A4-D22 split: status → T53, health → T163), the menu
 icon (R4 + A6-W1/W2 → T14, promoted to P0 — one install.sh pass),
 the double-click installer + README install section (R3 + A6-W3/U1
-→ T58), the window icon (A4-U6/R18 + A6-U5 → T112), and version pins
-(R13 + A6-W13 → T115). The icon fix and the desktop-installer fix
+→ T64), the window icon (A4-U6/R18 + A6-U5 → T127), and version pins
+(R13 + A6-W13 → T130). The icon fix and the desktop-installer fix
 each absorb two audit #6 standalone tasks, so six standalone tasks
 fold away in total. The import trust-boundary fix (A3-W1 + A3-W2 +
 A3-W13 → T1) is one task by the audit's own design. The package
-format (T34) is the shared foundation for profile export (T71) and
-recipe export (T150): audit #3 settled the format (versioned, named
-kinds), so T71 and T150 build on T34 instead of waiting on the audit.
+format (T40) is the shared foundation for profile export (T86) and
+recipe export (T170): audit #3 settled the format (versioned, named
+kinds), so T86 and T170 build on T40 instead of waiting on the audit.
 The New Profile dialog went the other way: it was one item inside
 the old small-UI-fixes task, but audit #4 raised it to P0, so it is
-split out into its own P0 task (T11) and removed from T107. Audit #4
+split out into its own P0 task (T11) and removed from T122. Audit #4
 also corrected audit #1's U3 (the dialog is not a separate window at
 all — audit #1's report has been corrected in place). A6-U2 splits
-across the README install section (T58) and the success message
-(T121); A6-D10 splits across the pins (T115) and the install receipt
-(T124, record side). Audit #7 folds four standalone tasks into existing ones: the
+across the README install section (T64) and the success message
+(T136); A6-D10 splits across the pins (T130) and the install receipt
+(T139, record side). Audit #7 folds four standalone tasks into existing ones: the
 string-metamorph verify crash (A7-W5 → T1, the A3-W2
-re-confirmation), the unreachable metamorph notes (A7-W8/U3 → T99),
-the name-only New Project (A7-W9/U4 → T98), and the CLI mode change
-(A7-G7 → T72, the update-project `--metamorph` flag); the shared
-defensive reader (A7-D8) is built once in T31 and consumed by T32,
-T33, and T157, and A7-D15 splits across T72 (update) and T156 (help
+re-confirmation), the unreachable metamorph notes (A7-W8/U3 → T114),
+the name-only New Project (A7-W9/U4 → T113), and the CLI mode change
+(A7-G7 → T87, the update-project `--metamorph` flag); the shared
+defensive reader (A7-D8) is built once in T37 and consumed by T38,
+T39, and T177, and A7-D15 splits across T87 (update) and T176 (help
 text). Audit #5 folds six standalone pieces into existing tasks:
-the --steps cap (A5-W3 → T50, the R11 task), the corrupt-profile
+the --steps cap (A5-W3 → T56, the R11 task), the corrupt-profile
 warning (A5-W9 → T3), the orphan-profile import (A5-W10 → T1), the
-CLI string-metamorph instance (A5-W2 → T33), the missing commands
-(A5-G1/G2/G3 → T72), and the verify command (A5-G4 → T90); the
-remaining seventeen become seventeen new tasks (T4–T5, T19–T21,
-T42, T45, T73, T76, T93–T96, T127, T141, T152, T167).
+CLI string-metamorph instance (A5-W2 → T39), the missing commands
+(A5-G1/G2/G3 → T87), and the verify command (A5-G4 → T105); the
+remaining seventeen become seventeen new tasks (T4–T5, T25–T27,
+T48, T51, T88, T91, T108–T111, T142, T161, T172, T187).
 Audit #8 folds five standalone tasks into existing ones: the
-engine one-job lock (A8-W7/D5 → T23, the train-vs-job hole plus
+engine one-job lock (A8-W7/D5 → T29, the train-vs-job hole plus
 the OOM math), the engine settings-validation half (A8-W8/D6 →
 T6, the loop's crash points), the HF error wrapping (A8-W9/D7 →
 T5, the raw traceback from a bad base), the cap/resume composition
-(A8-W12/D9 → T50, the "already at step 4 of 3" error), and the
-F16 intermediate cleanup (A8-W13/D10 → T20, the ~3.4 GB left
-behind by a failed quantize); A8-D11's quant half re-confirms T21
-while its executability half is a new task (T87), and the
-checkpoint-size evidence extends T130; the remaining twenty-six
-become twenty-six new tasks (T24–T29, T77–T88, T132–T139).
+(A8-W12/D9 → T56, the "already at step 4 of 3" error), and the
+F16 intermediate cleanup (A8-W13/D10 → T26, the ~3.4 GB left
+behind by a failed quantize); A8-D11's quant half re-confirms T27
+while its executability half is a new task (T102), and the
+checkpoint-size evidence extends T150; the remaining twenty-six
+become twenty-six new tasks (T30–T35, T92–T103, T152–T159).
 Everywhere else, tasks stay separate; relationships are noted
 in the Covers line.
 
 **Repo-audit verdict (R1–R33):** twelve verdict findings fold
 into existing tasks (the weights round-trip now restores probe
-results and corrects the status, R1 → T35; the dead "full"
-option is removed, not just warned about, R7/R20 → T49; the
+results and corrects the status, R1 → T41; the dead "full"
+option is removed, not just warned about, R7/R20 → T55; the
 re-verified UI flaws fold into their existing tasks), one splits
-(R22: shortcuts → T112, menu bar → T149), and the remaining twenty
-become twenty-one new tasks (T10, T14, T16, T18, T22, T46, T50, T58–T59, T68, T70, T74–T75, T105, T114–T116, T131, T149, T153–T154).
+(R22: shortcuts → T127, menu bar → T169), and the remaining twenty
+become twenty-one new tasks (T10, T14, T22, T24, T28, T52, T56, T64–T65, T83, T85, T89–T90, T120, T129–T131, T151, T169, T173–T174).
 Audit #5 (CLI) has now merged: R11 = audit #5 W3,
-deduped into T50 (one --steps task, not two).
+deduped into T56 (one --steps task, not two).
 
 **Audit #6 (Installer + icon):** 56 findings (15 W + 9 U + 7 G +
 25 D). Thirteen fold into four existing tasks — the menu icon (R4
 + A6-W1/W2, promoted to P0 as T14), the double-click installer +
-README install section (R3 + A6-W3/U1, T58), the window icon
-(A4-U6/R18 + A6-U5, T112), and version pins (R13 + A6-W13, T115) —
-and the remaining forty-three become nineteen new tasks (T36, T56–T57, T60–T63, T117–T125, T164–T166). Audit #6 also verified the zip's stored
-modes are correct (scripts 0o100755), so the exec-bits task (T59)
+README install section (R3 + A6-W3/U1, T64), the window icon
+(A4-U6/R18 + A6-U5, T127), and version pins (R13 + A6-W13, T130) —
+and the remaining forty-three become nineteen new tasks (T42, T62–T63, T66–T69, T132–T140, T184–T186). Audit #6 also verified the zip's stored
+modes are correct (scripts 0o100755), so the exec-bits task (T65)
 stands as written for the clone path.
 
 **Audit #7 (MetaMorphAi hooks):** 40 findings (11 W + 6 U + 7 G +
@@ -149,8 +156,8 @@ stands as written for the clone path.
 (identical tiny training runs in `morph` and `compress` gave the same
 final loss to all 16 digits and byte-identical adapter weights). Four
 standalone tasks fold into existing tasks (A7-W5 → T1, A7-W8/U3 →
-T99, A7-W9/U4 → T98, A7-G7 → T72) and the remaining fifteen become
-fifteen new tasks (T31–T33, T64–T67, T126, T128–T129, T155–T157, T163, T168). No P0s: the crashes
+T114, A7-W9/U4 → T113, A7-G7 → T87) and the remaining fifteen become
+fifteen new tasks (T37–T39, T70–T73, T141, T143–T144, T175–T177, T183, T188). No P0s: the crashes
 found all need a hand-corrupted file, and the inert mode is
 documented, not hidden.
 
@@ -158,11 +165,11 @@ documented, not hidden.
 18 D). The CLI is Stella's second surface — and its headline
 safety feature was a coin flip: Ctrl+C paused correctly only when
 the signal missed the buffered print window (A5-W1). Six
-standalone pieces fold into existing tasks (A5-W3 → T50, A5-W9 →
-T3, A5-W10 → T1, A5-W2's CLI metamorph instance → T33, A5-G1/G2/G3
-→ T72, A5-G4 → T90) and the remaining seventeen become seventeen
-new tasks (T4–T5, T19–T21, T42, T45, T73, T76, T93–T96, T127,
-T141, T152, T167). Two P0s: the Ctrl+C crash (T4) and the missing
+standalone pieces fold into existing tasks (A5-W3 → T56, A5-W9 →
+T3, A5-W10 → T1, A5-W2's CLI metamorph instance → T39, A5-G1/G2/G3
+→ T87, A5-G4 → T105) and the remaining seventeen become seventeen
+new tasks (T4–T5, T25–T27, T48, T51, T88, T91, T108–T111, T142,
+T161, T172, T187). Two P0s: the Ctrl+C crash (T4) and the missing
 catch-all (T5).
 
 **Audit #8 (Training engine):** 55 findings (20 W + 6 U + 11 G +
@@ -174,9 +181,9 @@ weight diff 2.424e-01), the refusal probe is brittle both ways
 (6/10 crafted replies misjudged) and passes a silent model, and
 the GGUF path leaves multi-GB litter on failure and breaks on
 spaced paths. Five standalone tasks fold into existing tasks
-(A8-W7/D5 → T23, A8-W8/D6 → T6, A8-W9/D7 → T5, A8-W12/D9 → T50,
-A8-W13/D10 → T20) and the remaining twenty-six become twenty-six
-new tasks (T24–T29, T77–T88, T132–T139). No P0s: nothing here loses
+(A8-W7/D5 → T29, A8-W8/D6 → T6, A8-W9/D7 → T5, A8-W12/D9 → T56,
+A8-W13/D10 → T26) and the remaining twenty-six become twenty-six
+new tasks (T30–T35, T92–T103, T152–T159). No P0s: nothing here loses
 data or crashes on a normal path.
 
 **Priority key:** P0 = data loss / silent failure, fix first.
@@ -188,13 +195,16 @@ less. M = a change across model + GUI + tests, or a small design
 decision plus implementation. L = a multi-part build or a design that
 needs Joshua's direction on scope first.
 
-**Counts:** 168 tasks — 14 P0, 53 P1, 62 P2, 39 P3. (18 + 18 + 20 + 25
-+ 18 + 25 + 19 + 31 standalone tasks minus 27 merges, plus 21 new tasks from the
+**Counts:** 194 tasks — 20 P0, 62 P1, 67 P2, 45 P3. (18 + 18 + 20 + 25
++ 18 + 25 + 19 + 31 + 26 standalone tasks minus 27 merges, plus 21 new tasks from the
 repo-audit verdict; 12 verdict findings fold into existing tasks
 and 1 splits; 13 audit #6 findings fold into 4 existing tasks; 4
 audit #7 standalone tasks fold into existing tasks; 6 audit #5
 pieces fold into existing tasks; 5 audit #8 standalone tasks fold
-into existing tasks.)
+into existing tasks. 5 audit #9 tasks supersede existing tasks and
+2 moot existing tasks outright (2 more partly moot one); superseded
+and mooted tasks stay in the list, marked, so the coverage map still
+accounts for their findings.)
 
 ---
 
@@ -234,7 +244,7 @@ into existing tasks.)
   in the manifest still raises `AttributeError`, now at
   `export.py:141` — the line moved as the file grew, the bug did not.
   The fix is the same strict validation; the shared defensive reader
-  (T31) is the implementation for the metamorph field. Audit #5
+  (T37) is the implementation for the metamorph field. Audit #5
   re-verified the import instances on the CLI (A5-W2/A5-W10): a
   manifest whose `settings` is a string crashed with a raw
   `ValueError` — and left the newly-created profile behind, the
@@ -244,7 +254,7 @@ into existing tasks.)
   `verify_export`: types for every field (settings and config must
   be dicts, dependencies a list, metamorph a dict, dataset ref and
   status strings), the metamorph mode enum, and the version range
-  from T34; every failure a `StellaError` with a plain message.
+  from T40; every failure a `StellaError` with a plain message.
   Nothing downstream should ever see a manifest field it has not
   already validated. Normalize slugs once, at import start
   (A3-W13), so the returned names match the stored names. D3 —
@@ -254,7 +264,7 @@ into existing tasks.)
   place last. A failed import must leave the home exactly as it
   was. Add a last-resort catch in the GUI handler so an
   unexpected exception still surfaces as a readable error, never a
-  raw crash. (The CLI's catch-all is the traceback-hardening task.) The GUI handler must also refresh the lists on failure (A4-D8), so a failed import never leaves the window showing a home that does not match the disk. (Status validation reuses the lifecycle enum from T47
+  raw crash. (The CLI's catch-all is the traceback-hardening task.) The GUI handler must also refresh the lists on failure (A4-D8), so a failed import never leaves the window showing a home that does not match the disk. (Status validation reuses the lifecycle enum from T53
   once it lands; until then, reject non-string statuses. Settings
   *value* ranges are T6's model validation — this task covers
   types and shape at the boundary.)
@@ -274,6 +284,7 @@ into existing tasks.)
 - **Origin:** audit #2 T1 + audit #4 T5 (merged — one fix); extended by the repo-audit verdict (R25)
 - **Covers:** A2-W1, A2-U1, A2-D1; A4-W5, A4-D5; R25
 - **Effort:** M
+- **Note:** Audit #9 R2 moots the settings half (dirty tracking keeps only name, dataset, notes); the rest of this task stays open.
 - **Problem:** There is no dirty tracking anywhere. Edit the notes or
   any field, click another project, and `_show_project_detail`
   reloads from disk — the edits are gone with no warning, no prompt,
@@ -367,12 +378,12 @@ into existing tasks.)
   is the thing that crashes. A signal handler should never touch a
   buffered stream; if a message is wanted at the moment of the
   keypress, write it with `os.write(1, ...)` instead. (Second
-  Ctrl+C force-quit is T93; the paused-summary wording is T94.)
+  Ctrl+C force-quit is T108; the paused-summary wording is T109.)
 - **Done:** SIGINT mid-run pauses cleanly — checkpoint saved, exit
   0, `Paused at step N` printed once; `--resume` continues from
   the checkpoint. Tests: subprocess Ctrl+C-pause test against a
   stubbed or tiny training loop (the crash shipped because nothing
-  tested the pause — see T127).
+  tested the pause — see T142).
 
 ### T5 — `main()` must catch everything; the list commands must read defensively
 
@@ -404,14 +415,14 @@ into existing tasks.)
 - **Fix:** D2 — wrap the dispatch in `except Exception` that prints
   `stella: <plain message>` to stderr and exits 1, with the
   traceback available behind a `--verbose`/`--debug` flag (see
-  T152). Separately, make the list commands defensive:
+  T172). Separately, make the list commands defensive:
   `p.get("name")` with a fallback in `cmd_profiles`, and a type
   check on `metamorph` in `cmd_projects` (through the shared
-  defensive reader from T31), so one bad manifest degrades to a
+  defensive reader from T37), so one bad manifest degrades to a
   warning line instead of killing the whole list. The import
   instances are fixed at the boundary by T1's strict validation
   (this task is the last-resort net, not the validation); the
-  string-metamorph CLI instance is covered by T33's reader work.
+  string-metamorph CLI instance is covered by T39's reader work.
   D7 (A8): wrap the `from_pretrained` calls in
   `load_base_model` so an HF load failure raises a StellaError
   naming the repo/path and the likely cause ("not a model folder",
@@ -430,6 +441,7 @@ into existing tasks.)
 - **Origin:** audit #2 T2
 - **Covers:** A2-W2, A2-D2; A2-W7 (model part — method enum); A8-W8, A8-D6
 - **Effort:** M
+- **Note:** Audit #9 R2 moots the user-facing half (validation moves to the backend auto-config); the rest of this task stays open.
 - **Problem:** `update_project` merges any settings dict without
   checking a single value. Probed: rank -5, epochs 0, batch size 0,
   learning rate -0.5, max seq len 999999, and an unknown key `foo`
@@ -455,7 +467,7 @@ into existing tasks.)
   integer 128–32768; learning rate a finite number in the sane range
   (defined with T7); unknown keys rejected with a `StellaError`
   naming the key. Every rejection must say which value was wrong and
-  what is accepted. (Manifests that already contain bad values — hand-edited before this lands — are handled by T15's defensive fill, which falls back to defaults instead of aborting.)
+  what is accepted. (Manifests that already contain bad values — hand-edited before this lands — are handled by T21's defensive fill, which falls back to defaults instead of aborting.)
   D6 (A8): validate once more at the top of `train_project` — the
   engine-side half — range-checking every numeric setting (rank ≥ 1,
   lr > 0, epochs ≥ 1, grad_accum ≥ 1, batch ≥ 1, seq ≥ 8,
@@ -476,6 +488,7 @@ into existing tasks.)
 - **Origin:** audit #2 T3
 - **Covers:** A2-W3, A2-U3, A2-D3
 - **Effort:** S
+- **Status:** MOOTED by T16 (Audit #9 R2) — the settings surface goes away entirely; nothing to build here. Kept in the list, marked, so the coverage map still accounts for its findings.
 - **Problem:** The GUI's only learning-rate check is `float(...)`,
   and `float()` accepts `"inf"`, `"-inf"`, and `"nan"`. Probed:
   saving lr=inf wrote a bare `Infinity` literal into `project.json`
@@ -542,7 +555,7 @@ into existing tasks.)
   program trains the user to press to accept, destroys a profile
   and all its projects, or a project and its checkpoints.
 - **Fix:** A4-D4 — make No the default button so Enter never
-  deletes. Pair with the trash from T17 so a confirmed delete is
+  deletes. Pair with the trash from T23 so a confirmed delete is
   still recoverable.
 - **Done:** In the delete confirm, Enter does not delete; Yes must
   be clicked (or arrowed to) explicitly. Tests: timer-driven modal
@@ -569,7 +582,7 @@ into existing tasks.)
   the adapter in place between passes, whichever the engine
   supports. The two passes must never hold two full base models at
   once. The probe's peak RAM should stay inside the 8 GB guard
-  (see T22).
+  (see T28).
 - **Done:** A probe run's peak RAM stays under the guard's budget
   with only one base model resident at a time; before/after counts
   and the gate verdict are unchanged; a test with a
@@ -638,7 +651,7 @@ into existing tasks.)
   notes when two profiles point at the same tag (A1-W12).
 - **Fix:** At create and at save, check the tag against the installed
   model list (a direct `list_models()` call is fine here — it is a
-  user-initiated action, not a click; T37's cache replaces it later).
+  user-initiated action, not a click; T43's cache replaces it later).
   If the tag is not installed, warn ("not installed locally — is
   this right?") and let him proceed — a deliberate entry (a tag he
   is about to pull) must never be blocked. Also warn when another
@@ -726,27 +739,95 @@ into existing tasks.)
   the SVG itself unquoted — GLib resolves it. Either way, never
   write a desktop file whose icon doesn't exist: check the icon
   file before writing, and fail loudly (or warn clearly) if it
-  cannot be produced. The installer tests (T63) pin the fix with
+  cannot be produced. The installer tests (T69) pin the fix with
   the GLib icon-resolution check.
 - **Done:** A clone install (no PNGs in the tree) ends with a
   working menu icon; a zip install still works; the generated
   `Icon=` is unquoted and resolves via GLib on plain and spaced
   paths; install.sh fails loudly if the icon cannot be produced.
   Tests: clone-shape install (PNGs deleted) produces the icon;
-  GLib resolution check (T63).
+  GLib resolution check (T69).
 - **Status:** DONE in v0.3.1 (2026-11-13) — `Icon=` unquoted;
   install.sh renders the PNGs from the SVG when missing (QtSvg
   via PySide6-Addons, now installed with the venv); a failed
   render warns clearly instead of failing the install (the Fix
   allows either; the app still works with a fallback icon). The
   icon art also changed to the ✨ sparkles at Joshua's order.
-  T63 (dedicated installer tests) remains open — the fix is
+  T69 (dedicated installer tests) remains open — the fix is
   verified by the offscreen icon render + the GLib resolution
   probe from audit #6, not by an automated installer test.
 
+### T15 — Main screen becomes pick a model, pick a job, press go
+
+- **Origin:** audit #9 R1
+- **Covers:** A9-U2, A9-U7, A9-G3 (part)
+- **Effort:** L
+- **Library:** 005 Bento grids, 009 Shape morphing (see R20)
+- **Supersedes:** T113 (real New Project form: the job picker is project creation now; the name becomes part of the pick).
+- **Note on T44:** the train-panel half is already fixed by the v0.4 restructure (verified live: Start training at y=275, above the fold); R1 finishes the job for Sleep.
+- **Problem:** The main window is one long scrolling column of sections with no job picker, and at rest it is a wall of empty grey boxes. The brief's core flow does not exist as a screen.
+- **Fix:** Replace the session column with a bento main screen. One hero tile holds the flow: pick a model, pick a job (Train, Sleep, Make smaller, Teach a small model), press go. Small tiles carry the glanceable numbers (RAM, speed, progress) once a job runs. The tree stays as the library of what exists. The core flow needs no scrolling at 1100x680.
+- **Done:** At 1100x680 the first screen shows the model pick, the job pick, and Go with nothing below the fold; a new user can reach "press go" without scrolling or opening a second window.
+
+### T16 — Settings leave every screen
+
+- **Origin:** audit #9 R2
+- **Covers:** A9-U1, A9-D3
+- **Effort:** M
+- **Library:** 004 Just-in-time GUI, 012 Progressive disclosure
+- **Supersedes:** T154 (Advanced settings section: do not build; the brief puts settings under the hood).
+- **Mooted by this task:** T7 (learning rate as a numeric input: no learning rate field), T46 (lock settings during a run: no settings to lock), T6's user-facing half (validation moves to the backend auto-config), T2's settings half (dirty tracking keeps only name, dataset, notes).
+- **Depends on:** v0.9's auto-config backend. The settings cannot leave the screen until the backend decides them.
+- **Problem:** Rank, learning rate, epochs, batch size, and sequence length are on screen in four places (session summary, Project window form, Settings defaults, chat template step 4). The brief says the backend sets them all and the user never sees them.
+- **Fix:** Delete the settings form from the Project window (name, dataset, and notes stay), delete the settings line from the session summary, delete the Training defaults block from Settings, and rewrite chat template step 4 and the chat greeting so they stop naming settings. The stored settings fields stay in the model for compatibility; nothing in the UI reads or writes them.
+- **Done:** No rank, learning rate, epochs, batch size, or sequence length string is visible anywhere in the UI; a grep of the visible strings in gui.py, howto.py, and chat_agent.py finds none.
+
+### T17 — First-run setup checklist
+
+- **Origin:** audit #9 R3
+- **Covers:** A9-W4, A9-G3
+- **Effort:** M
+- **Library:** 020 Setup checklist, 014 Teach by playing
+- **Problem:** First launch shows an empty tree, guidance that tells the user to pick a project that does not exist, and a wall of disabled controls. Nothing on screen says what to do first.
+- **Fix:** On first launch (empty store), the main screen shows a three-step checklist instead of the disabled wall: 1. Pick a model. 2. Get its weights. 3. Run a tiny first training (the 20-example sample dataset, a real run, not a wizard). Each step is a button that does the step; a finished step ticks. The checklist is dismissible and never reappears as a modal.
+- **Done:** An empty store shows the checklist; completing a step ticks it; dismissing it never brings it back; the misleading "pick a project in the list" text is gone.
+
+### T18 — Model picker with fit guidance and no default selection
+
+- **Origin:** audit #9 R4
+- **Covers:** A9-W1, A9-G5
+- **Effort:** M
+- **Library:** 012 Progressive disclosure
+- **Extends:** T84 (RAM/time estimate in the detail panel: the estimate moves to the picker, where the choice is made).
+- **Problem:** The New Profile dialog pre-selects the first model (Enter creates a profile for a model the user never picked), and it shows bare tags with no "what it does" and no fits-this-PC verdict. The user picks blind.
+- **Fix:** The dialog opens with nothing selected (`setCurrentIndex(-1)`, as the chat combo already does); the profile-name note appears only after a pick, and Enter with no pick does nothing. Each model row shows one plain line for what it does and a fit verdict (size plus RAM, from the backend's PC measurement). Details beyond that appear on tap, not up front.
+- **Done:** The dialog opens with no selection and no name note; every listed model shows what it does and whether it fits this PC.
+
+### T19 — Real menu bar, actions disabled when they cannot work
+
+- **Origin:** audit #9 R5
+- **Covers:** A9-W5, A9-U9
+- **Effort:** M
+- **Library:** none (U38: real Windows-style menus)
+- **Supersedes:** T169 (menu bar).
+- **Problem:** The menu is a button with nine actions in one flat list, and four of them are enabled with nothing selected, answering with modal warnings.
+- **Fix:** A real `QMenuBar`: File (New profile, New project, Export project, Import package, Settings), View (Profiles, Projects), Help (How to Use Stella, Chat). Actions that need a selection are disabled until one exists. The Menu button goes away.
+- **Done:** With an empty store, the actions that need a selection are greyed out; no menu action answers with a "pick one first" modal.
+
+### T20 — Live training graphs and stats
+
+- **Origin:** audit #9 R6
+- **Covers:** A9-G1, A9-G4
+- **Effort:** L
+- **Library:** 021 Glanceable surfaces, 003 Calm technology
+- **Extends:** T151 (loss chart plus run history: elevated from P3 to P0; the brief makes it core).
+- **Problem:** The only loss readout is one text line. No graph, no speed, no RAM, no time left, no run history. The brief asks for live graphs and stats with a middle-school science software feel, and today there is nothing to watch.
+- **Fix:** A loss curve (QPainter, redrawn on new points only, no per-frame cost), plus speed (steps per minute), RAM used, time left, and epoch, in the glanceable card. The UI keeps the loss series from the worker's progress signal (step, total, loss already emitted). Run history is kept per project so the last run's curve is still there after it finishes.
+- **Done:** During a run the graph draws, RAM, speed, and time left update, and the finished run's curve and summary remain visible.
+
 ## P1 — functional defects and daily friction
 
-### T15 — Fill the detail panel defensively
+### T21 — Fill the detail panel defensively
 
 - **Origin:** audit #4 T6
 - **Covers:** A4-W6, A4-D6
@@ -780,7 +861,7 @@ into existing tasks.)
   panel impossible, save-after-bad-fill writes only this
   project's values.
 
-### T16 — Safe torch.load for optimizer.pt (weights_only=True)
+### T22 — Safe torch.load for optimizer.pt (weights_only=True)
 
 - **Origin:** repo-audit verdict (R10)
 - **Covers:** R10
@@ -802,7 +883,7 @@ into existing tasks.)
   (test with a malicious pickle); existing valid checkpoints still
   resume.
 
-### T17 — Trash instead of delete (profiles + projects)
+### T23 — Trash instead of delete (profiles + projects)
 
 - **Origin:** audit #1 T5 + audit #2 T8 (merged — one trash system)
 - **Covers:** A1-W5, A1-D6; A2-W8, A2-D10
@@ -828,7 +909,7 @@ into existing tasks.)
   own confirm. Tests: delete-to-trash for profiles and projects,
   trash contents intact, purge.
 
-### T18 — GGUF export must not silently delete previous output
+### T24 — GGUF export must not silently delete previous output
 
 - **Origin:** repo-audit verdict (R12)
 - **Covers:** R12
@@ -837,13 +918,13 @@ into existing tasks.)
   a previous export deletes the previous output without a word —
   no prompt, no backup, no warning. The previous .gguf cost a
   merge + convert + quantize to produce, and it is gone because
-  the user re-ran a command. (Audit #5 W6 (T20) covers the opposite
+  the user re-ran a command. (Audit #5 W6 (T26) covers the opposite
   direction — a failed export leaving ~3.4 GB of merged weights
   behind; this task is the successful export destroying the
   previous result.)
 - **Fix:** Refuse to overwrite an existing GGUF output (or prompt
   to overwrite / write to a new name / move the old output to
-  trash per T17 — pick one, document it). The CLI gets a --force
+  trash per T23 — pick one, document it). The CLI gets a --force
   flag for the deliberate overwrite. Never delete a previous
   export silently.
 - **Done:** Exporting twice to the same directory prompts (or
@@ -852,7 +933,7 @@ into existing tasks.)
   overwrite-with-backup. Tests: second export without --force
   does not destroy the first; --force works.
 
-### T19 — Refuse or confirm re-training a trained project, and say when resume extends one
+### T25 — Refuse or confirm re-training a trained project, and say when resume extends one
 
 - **Origin:** audit #5 T4
 - **Covers:** A5-W4, A5-W13, A5-D4
@@ -880,7 +961,7 @@ into existing tasks.)
   `--resume` on a trained project should say it is extending a
   finished run (and what the new total will be) before starting.
   `--force` makes the destructive intent explicit. (The checkpoint
-  side — resume from a selected checkpoint — is T130.)
+  side — resume from a selected checkpoint — is T150.)
 - **Done:** Re-training a trained project without `--force`
   refuses with a readable message and leaves the adapter
   untouched; with `--force` it re-trains; `--resume` on a trained
@@ -888,7 +969,7 @@ into existing tasks.)
   refuse without `--force`, `--force` re-trains, resume-on-trained
   announces.
 
-### T20 — Check llama.cpp before the merge; clean up the merged dir and the F16 intermediate on failure
+### T26 — Check llama.cpp before the merge; clean up the merged dir and the F16 intermediate on failure
 
 - **Origin:** audit #5 T6
 - **Covers:** A5-W6, A5-D6; A8-W13, A8-D10
@@ -905,7 +986,7 @@ into existing tasks.)
   message saying it is there or that it is safe to delete. The
   check is cheap; the merge is not. The order is backwards. (The
   verdict's R12 covers the opposite direction — a successful
-  export silently deleting the *previous* output, T18; this task
+  export silently deleting the *previous* output, T24; this task
   is the failed export leaving its own mess behind.) Audit #8 adds
   the F16 half (A8-W13): `convert_to_gguf` deletes the F16 file only
   on the success path — with a failing quantizer the StellaError is
@@ -928,7 +1009,7 @@ into existing tasks.)
   quantize leaves no F16 intermediate behind (or names it and says
   it is safe to delete).
 
-### T21 — Validate `--quant` up front
+### T27 — Validate `--quant` up front
 
 - **Origin:** audit #5 T7
 - **Covers:** A5-W7, A5-D7
@@ -943,7 +1024,7 @@ into existing tasks.)
   millisecond. Audit #8's D11 re-confirms this from the engine side:
   validate `quant` against llama.cpp's known list before the merge.
   (The discovery half of D11 — the quantizer must be executable — is
-  a separate task, T87.)
+  a separate task, T102.)
 - **Fix:** D7 — give `--quant` a `choices` list of the quant types
   llama.cpp accepts (or validate against the installed
   `llama-quantize`'s list), so `--quant BOGUS` fails in a
@@ -953,7 +1034,7 @@ into existing tasks.)
   valid values; every valid quant still exports. Tests: bogus
   quant refused, each valid quant accepted.
 
-### T22 — The RAM guard must estimate before loading anything
+### T28 — The RAM guard must estimate before loading anything
 
 - **Origin:** repo-audit verdict (R8)
 - **Covers:** R8
@@ -968,18 +1049,19 @@ into existing tasks.)
   metadata (parameter count, dtype, plus the LoRA/optimizer
   overhead the guard already models) without loading the weights.
   The guard refuses (or warns) before any load when the estimate
-  exceeds the budget. The dry-run estimate button (T70) and the
-  detail-panel estimate (T69) build on this honest estimator.
+  exceeds the budget. The dry-run estimate button (T85) and the
+  detail-panel estimate (T84) build on this honest estimator.
 - **Done:** A run that will not fit is refused before any model
   load (proven with a test that asserts no load happened — e.g. a
   fake loader that records calls); a run that fits proceeds; the
   guard's claim in the docs matches its behavior.
 
-### T23 — One job at a time, enforced in the GUI and the engine
+### T29 — One job at a time, enforced in the GUI and the engine
 
 - **Origin:** audit #4 T9
 - **Covers:** A4-W9, A4-D9; A8-W7, A8-D5
 - **Effort:** M
+- **Note:** Extended by T74 (Audit #9 R7).
 - **Problem:** Probed with slow fake jobs: starting the refusal
   probe while a GGUF export was running started a second
   `JobWorker` alongside the first — and starting a GGUF export
@@ -1013,7 +1095,7 @@ into existing tasks.)
   across CLI invocations (the second refuses with a message naming
   the running job).
 
-### T24 — Make the refusal probe trustworthy: detection v2 + chat-template mode
+### T30 — Make the refusal probe trustworthy: detection v2 + chat-template mode
 
 - **Origin:** audit #8 T3
 - **Covers:** A8-W4, A8-W5, A8-W6, A8-D2, A8-D3
@@ -1062,12 +1144,12 @@ into existing tasks.)
   battery, empty-results gate, empty-reply gate, template-mode
   generation.
 
-### T25 — Merge RAM guard: the merge/convert steps have no estimate at all
+### T31 — Merge RAM guard: the merge/convert steps have no estimate at all
 
 - **Origin:** audit #8 T7
 - **Covers:** A8-G2
 - **Effort:** S
-- **Problem:** The training guard (T22) covers the loop;
+- **Problem:** The training guard (T28) covers the loop;
   `merge_adapter` loads the base (~3.5 GB for LFM3 bf16) and
   merges with no estimate and no refusal, and the converter then
   loads the merged model again as a separate process. The step
@@ -1084,7 +1166,7 @@ into existing tasks.)
   anything, with the estimate named; a merge that fits proceeds.
   Tests: estimate math, refusal above the ceiling.
 
-### T26 — Seed everything: torch seed at run start + RNG state in checkpoints
+### T32 — Seed everything: torch seed at run start + RNG state in checkpoints
 
 - **Origin:** audit #8 T1
 - **Covers:** A8-W1, A8-W2, A8-D1
@@ -1120,7 +1202,7 @@ into existing tasks.)
   uninterrupted run's losses and final weights. Tests: two-run
   determinism, pause/resume exactness (losses + weights).
 
-### T27 — Minimum-val guarantee, or a loud warning
+### T33 — Minimum-val guarantee, or a loud warning
 
 - **Origin:** audit #8 T2
 - **Covers:** A8-W3, A8-D4
@@ -1145,7 +1227,7 @@ into existing tasks.)
   on, 1 to validate" promise holds. Tests: n=2..6 split sizes,
   warning event when val is empty.
 
-### T28 — Target-module override for unrecognized architectures
+### T34 — Target-module override for unrecognized architectures
 
 - **Origin:** audit #8 T6
 - **Covers:** A8-G1
@@ -1167,7 +1249,7 @@ into existing tasks.)
   the override. Tests: override honored, detection fallback,
   error text.
 
-### T29 — The CLI reports the RAM estimate as "RAM used" — say "estimated"
+### T35 — The CLI reports the RAM estimate as "RAM used" — say "estimated"
 
 - **Origin:** audit #8 T5
 - **Covers:** A8-U1
@@ -1181,7 +1263,7 @@ into existing tasks.)
 - **Done:** The CLI's closing line says "estimated", never
   "used", for the pre-run number. Tests: output text.
 
-### T30 — Close waits for every worker, without freezing
+### T36 — Close waits for every worker, without freezing
 
 - **Origin:** audit #4 T10
 - **Covers:** A4-W10, A4-D10
@@ -1199,7 +1281,7 @@ into existing tasks.)
 - **Fix:** A4-D10 — wait for the job worker too; show "Stopping
   training…" and close when the thread ends instead of blocking
   the UI thread for 15 seconds; never destroy a running thread.
-  Lands after T23 — with one job slot, there is at most one job
+  Lands after T29 — with one job slot, there is at most one job
   worker to wait on.
 - **Done:** Closing during a job waits (with visible feedback)
   and closes cleanly with no destroyed-thread warning on stderr;
@@ -1208,7 +1290,7 @@ into existing tasks.)
   in a subprocess (no warning), close-during-training feedback
   shown.
 
-### T31 — GUI Save must not crash on a missing metamorph key; one defensive reader for the block
+### T37 — GUI Save must not crash on a missing metamorph key; one defensive reader for the block
 
 - **Origin:** audit #7 T3
 - **Covers:** A7-W3, A7-D8
@@ -1231,13 +1313,13 @@ into existing tasks.)
   helper — e.g. `metamorph_mode(project_dict)` returning a valid
   mode or `"morph"` for null/missing/wrong-type — is used by the
   CLI list, the GUI list + detail fill, export, and verify. Built
-  ONCE here, in the model layer; T32, T33, T157, and T1 consume it.
+  ONCE here, in the model layer; T38, T39, T177, and T1 consume it.
 - **Done:** A missing or null metamorph key no longer crashes a
   save — the save works and the mode defaults to `morph`; no
   traceback escapes the Qt slot. Tests: missing-key save, null
   save, string-block save.
 
-### T32 — Export must not crash on `metamorph: null` — and must not leave a partial package
+### T38 — Export must not crash on `metamorph: null` — and must not leave a partial package
 
 - **Origin:** audit #7 T2
 - **Covers:** A7-W2, A7-D8, A7-D9
@@ -1255,7 +1337,7 @@ into existing tasks.)
   with "export folder already exists" (audit #3's non-atomicity
   class, export-side; cf. A3-W1 for import).
 - **Fix:** D8 — read the block through the shared defensive reader
-  from T31: null/missing/wrong-type yields the default mode instead
+  from T37: null/missing/wrong-type yields the default mode instead
   of a crash. D9 — build every file's content before creating the
   folder, so a bad block fails before any partial package exists
   (same atomicity direction as T1's import fix).
@@ -1264,7 +1346,7 @@ into existing tasks.)
   a partial folder. Tests: null export, missing-key export,
   no-partial-package on failure.
 
-### T33 — The GUI project list must not die on a string metamorph
+### T39 — The GUI project list must not die on a string metamorph
 
 - **Origin:** audit #7 T4 + audit #5 T2 (CLI instance, merged — same reader)
 - **Covers:** A7-W4, A7-D8; A5-W2, A5-D2 (CLI instance)
@@ -1284,7 +1366,7 @@ into existing tasks.)
   CLI list reads the mode through the same shared reader and
   degrades to a warning line instead of killing the whole list.
 - **Fix:** D8 — read the mode through the shared defensive reader
-  from T31 in the list and the detail fill. The GUI list should
+  from T37 in the list and the detail fill. The GUI list should
   degrade to a warning row for a bad project, not die for the whole
   profile (A5-D2's prescription, applied to the GUI half). The CLI list
   (`cmd_projects`) reads the mode through the same reader and
@@ -1296,7 +1378,7 @@ into existing tasks.)
   string block in the list, string block in the detail fill,
   string block in the CLI list.
 
-### T34 — Settle the package format: versioned format + named kinds
+### T40 — Settle the package format: versioned format + named kinds
 
 - **Origin:** audit #3 T2
 - **Covers:** A3-W5, A3-W6 (format side), A3-G1, A3-G3, A3-D1
@@ -1314,17 +1396,17 @@ into existing tasks.)
   is a live forward-compat hazard: the first v0.2 package carrying
   real weights will import into v0.1 and lose the weights silently,
   because v0.1 has no way to know the package is newer than it.
-  This is the T71/T150 seam: profile export and recipe export both
+  This is the T86/T170 seam: profile export and recipe export both
   build on the kinds defined here.
 - **Fix:** Give the format a real version, separate from the app
   version (`format: 1`), with a supported range enforced on import
   and a clear "this package needs a newer Stella" message for
   newer packages. Define the package kinds up front — project
   package (today's), profile package
-  (`kind: "stella-profile-export"`, T71), recipe package (T150) —
+  (`kind: "stella-profile-export"`, T86), recipe package (T170) —
   as distinct `kind` values sharing one manifest shape, so profile
   and recipe export never become two formats. `weights/` becomes a
-  first-class round-tripped member in the same pass (T35).
+  first-class round-tripped member in the same pass (T41).
   Document the format in the repo (a FORMAT doc or a README
   section) so a hand-editing user can read it. The version check
   must land *with or before* the first weights-carrying export.
@@ -1337,12 +1419,12 @@ into existing tasks.)
   shape. Tests: version rejection, legacy-package handling, kind
   values present.
 
-### T35 — Round-trip `weights/` and probe results
+### T41 — Round-trip `weights/` and probe results
 
 - **Origin:** audit #3 T3; extended by the repo-audit verdict (R1)
 - **Covers:** A3-W6, A3-D5; R1
 - **Effort:** S
-- **Depends on:** T34 (lands with the version check)
+- **Depends on:** T40 (lands with the version check)
 - **Problem:** Import copies checkpoints and notes only
   (`export.py:174-187`); `weights/` is not mentioned. Probed: a
   package containing `weights/adapter.safetensors` imported
@@ -1365,7 +1447,7 @@ into existing tasks.)
   claims a trained status but the package carries no weights,
   correct the status on import — a project with no weights must
   not claim "trained" (it imports as draft, with a warning). Land
-  with T34's version check so no older Stella can silently drop
+  with T40's version check so no older Stella can silently drop
   it.
 - **Done:** Export a project with a weights file, import into a
   fresh home: `weights/` is present with the file byte-identical;
@@ -1376,7 +1458,7 @@ into existing tasks.)
   probe-results round-trip, status correction on a weightless
   "trained" package, placeholder handling.
 
-### T36 — Distinguish venv-failure causes; clean up only what you made
+### T42 — Distinguish venv-failure causes; clean up only what you made
 
 - **Origin:** audit #6 T9
 - **Covers:** A6-W9, A6-W10, A6-D7
@@ -1404,7 +1486,7 @@ into existing tasks.)
   python3-venv still gets the exact named fix. Tests: stray-file
   case, missing-module case.
 
-### T37 — Cache the Ollama model list; fetch off the UI thread
+### T43 — Cache the Ollama model list; fetch off the UI thread
 
 - **Origin:** audit #1 T3 + audit #4 T7 (merged — one fix)
 - **Covers:** A1-W4, A1-U4, A1-D5; A4-W7, A4-D7
@@ -1431,11 +1513,12 @@ into existing tasks.)
   stored tag stays visible. Tests: fetch-count test, hung-Ollama
   responsiveness test, refresh-button test.
 
-### T38 — Put the Train panel above the fold
+### T44 — Put the Train panel above the fold
 
 - **Origin:** audit #4 T14; extended by the repo-audit verdict (R19)
 - **Covers:** A4-U2, A4-D17; R19
 - **Effort:** M
+- **Note:** Extended by T15 (Audit #9 R1).
 - **Problem:** Audit #2's U2, worse in v0.2. Probed geometry at
   1100x680: detail content is 1289px tall in a 567px viewport;
   the Notes editor starts at y=578, `Start training` at y=758,
@@ -1443,7 +1526,7 @@ into existing tasks.)
   "Notes" header peeks out at the bottom of the default window
   (screenshot). The primary action of the v0.2 release — Start
   training — needs a scroll on every visit. The verdict re-verified
-  (R19): the Train panel is below the fold. (Coordinate with T140,
+  (R19): the Train panel is below the fold. (Coordinate with T160,
   which repositions Notes — both tasks reshape the same detail
   panel, so the layout change should solve Notes and Train
   placement in one pass.)
@@ -1455,7 +1538,7 @@ into existing tasks.)
   progress bar) without scrolling. Tests: geometry assertion that
   Start training is inside the viewport at default size.
 
-### T39 — Dataset picker + validation
+### T45 — Dataset picker + validation
 
 - **Origin:** audit #2 T6
 - **Covers:** A2-W6, A2-U5, A2-G2, A2-D6
@@ -1484,11 +1567,12 @@ into existing tasks.)
   datasets: missing path warning, malformed-line report, example
   count, picker fill.
 
-### T40 — Lock the settings during a run
+### T46 — Lock the settings during a run
 
 - **Origin:** audit #4 T12
 - **Covers:** A4-W13, A4-D12
 - **Effort:** S
+- **Status:** MOOTED by T16 (Audit #9 R2) — the settings surface goes away entirely; nothing to build here. Kept in the list, marked, so the coverage map still accounts for its findings.
 - **Problem:** Probed: mid-run, the rank spinbox accepted 16 and
   Save wrote it to disk. The running worker already loaded its
   config, so the saved settings no longer describe the run in
@@ -1506,11 +1590,12 @@ into existing tasks.)
   setting can silently change under a run in progress. Tests:
   form disabled mid-run, save warned or refused mid-run.
 
-### T41 — Reset progress/loss per project; pin the panel to the running project
+### T47 — Reset progress/loss per project; pin the panel to the running project
 
 - **Origin:** audit #4 T11
 - **Covers:** A4-W11, A4-W12, A4-D11
 - **Effort:** M
+- **Note:** Extended by T74 (Audit #9 R7).
 - **Problem:** `refresh_train_panel` never touches the progress
   bar or the loss label (except setting "Pick a project to
   train." when nothing is selected). Probed: after a run on
@@ -1536,7 +1621,7 @@ into existing tasks.)
   running project consistently (or naming it). Tests: progress
   reset on switch, no-selection state, mid-run switch consistency.
 
-### T42 — Cheap checks before the train deps gate
+### T48 — Cheap checks before the train deps gate
 
 - **Origin:** audit #5 T5
 - **Covers:** A5-W5, A5-D5
@@ -1562,7 +1647,7 @@ into existing tasks.)
   message appears only when everything else is ready. Tests: each
   cheap check fires before the gate on a base install.
 
-### T43 — Put the missing-deps hint where the user can see it
+### T49 — Put the missing-deps hint where the user can see it
 
 - **Origin:** audit #4 T16
 - **Covers:** A4-U8, A4-D25
@@ -1580,7 +1665,7 @@ into existing tasks.)
   scrolled to the log). Tests: hint visible after a deps-missing
   start.
 
-### T44 — Keep confirmations visible (import + training-done)
+### T50 — Keep confirmations visible (import + training-done)
 
 - **Origin:** audit #3 T13 + audit #4 T15 (merged — one fix)
 - **Covers:** A3-U1, A3-D14; A4-U3, A4-D18
@@ -1595,7 +1680,7 @@ into existing tasks.)
 - **Fix:** Don't let the refresh overwrite the status message: say the confirmation *after* any refresh it triggers, or give import and training-done the same success dialog export already has. Pick one; the confirmation must still be visible after the lists settle — for import *and* for a finished training run.
 - **Done:** After an import, the status bar (or a dialog) still shows the import confirmation; after a training run finishes, "Trained N steps." is still visible; the refresh no longer overwrites either. Tests: GUI tests asserting both confirmations survive their refreshes.
 
-### T45 — Help text for every flag, examples in every command, fix the doc drift
+### T51 — Help text for every flag, examples in every command, fix the doc drift
 
 - **Origin:** audit #5 T8
 - **Covers:** A5-U1, A5-U2, A5-D11
@@ -1626,7 +1711,7 @@ into existing tasks.)
   first one. Fix the four drifts: the module docstring and README
   list all nine commands, the wrapper comment says `bash
   stella-cli`, and the empty-home hint uses the name that works
-  before install. (The `--metamorph` help text itself is T156;
+  before install. (The `--metamorph` help text itself is T176;
   this task is the rest of the flags plus the examples and the
   drift.)
 - **Done:** Every flag on every command has help text; every
@@ -1635,7 +1720,7 @@ into existing tasks.)
   exist. Tests: help output contains the flag meanings and
   examples.
 
-### T46 — Nothing selected on launch
+### T52 — Nothing selected on launch
 
 - **Origin:** repo-audit verdict (R21)
 - **Covers:** R21
@@ -1645,19 +1730,19 @@ into existing tasks.)
   verdict. That violates his nothing-selected rule: the window
   opens claiming a selection the user never made, and the detail
   panel shows a project the user did not pick. (Per-profile
-  project memory, T110, restores the last project when returning to
+  project memory, T125, restores the last project when returning to
   a profile within a session — that is a different behavior and
   stays; this task is about launch only.)
 - **Fix:** Launch with no profile and no project selected; the
   detail panel shows its empty state and the action buttons follow
-  the selection (T109's _update_actions pass). The status bar keeps
+  the selection (T124's _update_actions pass). The status bar keeps
   its "Pick a profile to begin." hint.
 - **Done:** Launching with profiles and projects present selects
   nothing; the detail panel is empty; selecting a profile then a
   project works as before. Tests: launch state has no selection
   (GUI test asserting current row is -1 / None on both lists).
 
-### T47 — A real status lifecycle, with UI
+### T53 — A real status lifecycle, with UI
 
 - **Origin:** audit #2 T5 + audit #4 T23 (status part; merged — one fix); extended by the repo-audit verdict (R16)
 - **Covers:** A2-W5, A2-U4, A2-G1, A2-D5; A4-G5, A4-D22 (status part); R16
@@ -1685,11 +1770,12 @@ into existing tasks.)
   wires them later) and documented. Tests: enum rejection, export
   transition, draft → ready, status shown in both surfaces.
 
-### T48 — One source of truth for the base: resolve `base_ref`
+### T54 — One source of truth for the base: resolve `base_ref`
 
 - **Origin:** audit #1 T4
 - **Covers:** A1-W3, A1-D3
 - **Effort:** M
+- **Note:** Extended by T79 (Audit #9 R12).
 - **Problem:** `ollama_tag` and `base_ref` are two fields with one
   meaning and no sync rule. Create with a tag and `base_ref` is set
   to the same value; change the tag later and `base_ref` stays stale
@@ -1711,11 +1797,12 @@ into existing tasks.)
   migrate cleanly. The training docs name the field they trust.
   Tests: tag-update sync test, migration test.
 
-### T49 — Remove or disable the dead "full" method option
+### T55 — Remove or disable the dead "full" method option
 
 - **Origin:** audit #2 T7; extended by the repo-audit verdict (R7, R20)
 - **Covers:** A2-W7, A2-U6, A2-D7; R7, R20
 - **Effort:** S
+- **Status:** SUPERSEDED by T189 (Audit #9 R21) — remove the dead option outright. Kept in the list, marked, so the coverage map still accounts for its findings.
 - **Problem:** The Method combo offers `full` next to `lora`, with no
   hint that a full fine-tune of a 1.5–2B model on this CPU is
   infeasible (the brief established this: it needs a free cloud GPU).
@@ -1738,7 +1825,7 @@ into existing tasks.)
   Tests: `full` absent or disabled, default method, old manifest
   with method `full` still loads.
 
-### T50 — --steps is a real cap
+### T56 — --steps is a real cap
 
 - **Origin:** repo-audit verdict (R11) + audit #5 T3 (merged — same finding)
 - **Covers:** R11; A5-W3, A5-D3; A8-W12, A8-D9
@@ -1771,7 +1858,7 @@ into existing tasks.)
   respected, 0/negative rejected. Resume with `--steps N` trains
   exactly N more steps from the resume point instead of erroring.
 
-### T51 — Merge, don't discard, the profile block on import
+### T57 — Merge, don't discard, the profile block on import
 
 - **Origin:** audit #3 T4
 - **Covers:** A3-W4, A3-U7, A3-D4
@@ -1795,25 +1882,25 @@ into existing tasks.)
   the manifest: identical → silent; different → warn and let the
   user pick keep-local or take-package (a dialog in the GUI; a
   flag or prompt on the CLI). Surface `profile_existed` in the UI
-  (a status message, or the preview dialog from T52).
+  (a status message, or the preview dialog from T58).
 - **Done:** Import with a differing tag: a choice appears and the
   chosen values win; identical blocks import silently; the UI says
   when the profile already existed. Tests: identical-silent,
   differ-choice in both directions, `profile_existed` surfaced.
 
-### T52 — Import preview dialog
+### T58 — Import preview dialog
 
 - **Origin:** audit #3 T7
 - **Covers:** A3-U2, A3-U7, A3-D10
 - **Effort:** M
-- **Depends on:** T51 (shows the existing-profile warning + merge choice)
+- **Depends on:** T57 (shows the existing-profile warning + merge choice)
 - **Problem:** One click imports. The user never sees what the
   package contains — profile, project, tag, version — before it
   lands. Pick the wrong folder and the first sign is a new profile
   in the list (or an error).
 - **Fix:** Before importing, show profile, project, tag, version,
   and contents (checkpoints, weights, dataset ref) — with the
-  existing-profile warning when it applies (T51) — and let the user
+  existing-profile warning when it applies (T57) — and let the user
   confirm or cancel. On the CLI, print the same summary before
   importing (or add a `--preview` flag — decide in implementation).
 - **Done:** Import opens a preview showing the package contents;
@@ -1821,7 +1908,7 @@ into existing tasks.)
   warning appears in the preview when it applies. Tests: preview
   contents, cancel imports nothing, warning shown.
 
-### T53 — Make the dataset part of the package decision
+### T59 — Make the dataset part of the package decision
 
 - **Origin:** audit #3 T6
 - **Covers:** A3-W8, A3-G7, A3-D7
@@ -1834,7 +1921,7 @@ into existing tasks.)
   project points at the same path on a machine where it may not
   exist. Import never checks whether the referenced path exists
   and never warns. The package is portable; its most important
-  input is not. (Related: T39 validates the dataset on the
+  input is not. (Related: T45 validates the dataset on the
   project side — picker, existence, format; this task is the
   package side — bundling and the import-side repair.)
 - **Fix:** At export, offer "copy the dataset in" (with its size
@@ -1849,7 +1936,7 @@ into existing tasks.)
   with an existing path is silent. Tests: bundled round-trip,
   missing-path warning, locate repair.
 
-### T54 — One source of truth for settings
+### T60 — One source of truth for settings
 
 - **Origin:** audit #3 T5
 - **Covers:** A3-W3, A3-D6
@@ -1876,7 +1963,7 @@ into existing tasks.)
   `config.json`, disagreeing `config.json`, invalid-JSON
   `config.json`.
 
-### T55 — Base-health check on import
+### T61 — Base-health check on import
 
 - **Origin:** audit #3 T8
 - **Covers:** A3-W12, A3-D15
@@ -1885,9 +1972,9 @@ into existing tasks.)
   "not-a-real-model:99"` imports silently and the profile looks
   perfectly healthy — until training or Ollama use fails. A package
   arriving from another machine is exactly when the base is most
-  likely to be missing. (Related: T143 shows health badges per row;
+  likely to be missing. (Related: T163 shows health badges per row;
   this task is the import-time check. Uses the cached model list
-  from T37 when it lands; a direct `list_models()` call is fine
+  from T43 when it lands; a direct `list_models()` call is fine
   here — import is user-initiated, not a click.)
 - **Fix:** On import, check whether the profile's Ollama tag is
   installed on this machine. Warn when it is not installed ("base
@@ -1897,7 +1984,7 @@ into existing tasks.)
   names the tag; an installed tag imports silently. Tests: warning
   on missing tag, silent on installed tag.
 
-### T56 — `run.sh`: check PySide6 before exec, and fail visibly
+### T62 — `run.sh`: check PySide6 before exec, and fail visibly
 
 - **Origin:** audit #6 T5
 - **Covers:** A6-W5, A6-D5
@@ -1925,7 +2012,7 @@ into existing tasks.)
   the menu); no traceback. Tests: the P7b shape (venv, no
   PySide6).
 
-### T57 — Make install atomic: check before writing artifacts
+### T63 — Make install atomic: check before writing artifacts
 
 - **Origin:** audit #6 T4
 - **Covers:** A6-W4, A6-D4
@@ -1944,9 +2031,9 @@ into existing tasks.)
   back on failure. A failed install must leave no launcher behind.
 - **Done:** A sabotaged final check exits 1 with no desktop file
   and no symlink left behind; a good install still writes both.
-  Tests: sabotage test in T63.
+  Tests: sabotage test in T69.
 
-### T58 — Add the double-click Install Stella.desktop; fix the README install section
+### T64 — Add the double-click Install Stella.desktop; fix the README install section
 
 - **Origin:** repo-audit verdict (R3) + audit #6 T3 + audit #6 T11 (merged — one install-story fix)
 - **Covers:** R3; A6-W3, A6-U1, A6-U2 (README part), A6-D3, A6-D16
@@ -1980,7 +2067,7 @@ into existing tasks.)
   reason). Rewrite the README install section (A6-D16): name a
   real first step, qualify the `stella` command ("open a new
   terminal after install, or log out and back in"), and document
-  removal (T122) and move/repair (T60). The README's promise and
+  removal (T137) and move/repair (T66). The README's promise and
   the tree must match.
 - **Done:** Double-clicking Install Stella.desktop (or launching
   it via gio launch) runs the installer; the desktop file
@@ -1988,7 +2075,7 @@ into existing tasks.)
   install step names a file that exists; the `stella` command
   claim carries its condition; removal and repair are documented.
 
-### T59 — Set exec bits in the tree (run.sh, stella-cli, install scripts)
+### T65 — Set exec bits in the tree (run.sh, stella-cli, install scripts)
 
 - **Origin:** repo-audit verdict (R5)
 - **Covers:** R5
@@ -2011,9 +2098,9 @@ into existing tasks.)
 - **Done:** A fresh clone has run.sh, stella-cli, install.sh, and
   install-training.sh executable; `bash run.sh` and
   `bash stella-cli` work from a clone without a chmod step. Tests:
-  a test (or a CI step, T115) asserts the exec bits on the scripts.
+  a test (or a CI step, T130) asserts the exec bits on the scripts.
 
-### T60 — Add a repair/doctor path
+### T66 — Add a repair/doctor path
 
 - **Origin:** audit #6 T7
 - **Covers:** A6-W7, A6-G3, A6-D13
@@ -2039,7 +2126,7 @@ into existing tasks.)
   `stella` command work again from the new location; a broken
   venv is reported with the fix named. Tests: move-then-doctor.
 
-### T61 — Add `--timeout 120 --retries 10` to install.sh's pip lines
+### T67 — Add `--timeout 120 --retries 10` to install.sh's pip lines
 
 - **Origin:** audit #6 T8
 - **Covers:** A6-W8, A6-D6
@@ -2057,7 +2144,7 @@ into existing tasks.)
   slow-connection install retries instead of failing at 15 s.
   Tests: flags present (grep test).
 
-### T62 — `run_tests.sh` must use the venv, never system pip
+### T68 — `run_tests.sh` must use the venv, never system pip
 
 - **Origin:** audit #6 T6
 - **Covers:** A6-W6, A6-D17
@@ -2086,7 +2173,7 @@ into existing tasks.)
   the suite via a venv or refuses with the plain message; no
   externally-managed error. Tests: bare-checkout run.
 
-### T63 — Add installer tests, including the GLib icon check
+### T69 — Add installer tests, including the GLib icon check
 
 - **Origin:** audit #6 T10
 - **Covers:** A6-G2, A6-D12
@@ -2110,7 +2197,7 @@ into existing tasks.)
   fails against the pre-fix installer. Tests: the new file
   itself.
 
-### T64 — Define what each mode means, in writing, before building the codec
+### T70 — Define what each mode means, in writing, before building the codec
 
 - **Origin:** audit #7 T1
 - **Covers:** A7-W1, A7-W7, A7-W10, A7-D1
@@ -2137,7 +2224,7 @@ into existing tasks.)
   replacing the stale `model.py:37` line): what `morph` does, what
   `compress` does, what `both` does and in which order. This is a
   writing task, not a code task — and it is the first task: the
-  wiring (T67, T66, T163, T168) cannot be built correctly against
+  wiring (T73, T72, T183, T188) cannot be built correctly against
   an undefined word. The honest rule for the spec: if a mode cannot
   be defined, it comes out of the combo rather than shipping as a
   third kind of nothing (define the modes and wire the first real
@@ -2146,7 +2233,7 @@ into existing tasks.)
   in writing; `both` has a stated order; the stale v0.1 comment is
   gone. Tests: none — verify by reading the spec against the audit.
 
-### T65 — Fix the tooltip: honest words, one line
+### T71 — Fix the tooltip: honest words, one line
 
 - **Origin:** audit #7 T5
 - **Covers:** A7-U1, A7-U2, A7-D6
@@ -2173,7 +2260,7 @@ into existing tasks.)
   unchanged but no longer misleading beside an honest tooltip.
   Tests: tooltip text assertion.
 
-### T66 — Wire `compress` to real compression: GGUF quant + package compression
+### T72 — Wire `compress` to real compression: GGUF quant + package compression
 
 - **Origin:** audit #7 T7
 - **Covers:** A7-G2, A7-W6, A7-D2, A7-D3
@@ -2198,14 +2285,14 @@ into existing tasks.)
   D3 — mode `compress` ships the export as a compressed archive
   (zip) instead of (or alongside) the plain folder; `morph` keeps
   the plain folder as today. Import must accept both forms. Depends
-  on T64 (the definitions). The deep token-level codec is T168, not
+  on T70 (the definitions). The deep token-level codec is T188, not
   this task.
 - **Done:** A `compress` project exports GGUF at the smaller quant
   unless `--quant` overrides; a `compress` export is a zip that
   imports; a `morph` project is unchanged. Tests: quant default
   per mode, override wins, zip export/import round-trip.
 
-### T67 — Variant lineage for `morph`: spawn + parent record
+### T73 — Variant lineage for `morph`: spawn + parent record
 
 - **Origin:** audit #7 T6
 - **Covers:** A7-G1, A7-D4
@@ -2220,23 +2307,118 @@ into existing tasks.)
   manifest); the project list shows lineage. This is what "a base
   model morphs into specialized variants" looks like at Stella's
   scale — not a new architecture, a family tree with a spawn
-  operation. Depends on T64 (the definitions): `morph` must mean
+  operation. Depends on T70 (the definitions): `morph` must mean
   something before a spawn operation can implement it.
 - **Done:** Spawning a variant creates a project with the parent
   recorded; the list shows the lineage; export carries the parent
   record. Tests: spawn-through, lineage display, parent in the
   manifest.
 
+### T74 — One job card for every job, with progress and cancel
+
+- **Origin:** audit #9 R7
+- **Covers:** A9-U3, A9-G4 (part), A9-G12
+- **Effort:** M
+- **Library:** 021 Glanceable surfaces
+- **Extends:** T107 (progress and cancel for GGUF/probe jobs), T29 (one job at a time: the card enforces it visibly), T47 (reset progress/loss per project: the card owns per-job state).
+- **Problem:** Sleep is a buried section below the fold, and GGUF export and the refusal probe run with no progress and no cancel. The user waits blind.
+- **Fix:** Train, Sleep, GGUF export, refusal probe, re-quantize, and distill all run as job cards with a progress bar, a live status line, and a Cancel button. Sleep stops being a section at the bottom of a column. Starting a second job is refused with plain words.
+- **Done:** Every job shows progress and offers cancel; no job is below the fold while it runs.
+
+### T75 — Re-quantize and distill get window surfaces
+
+- **Origin:** audit #9 R8
+- **Covers:** A9-U2 (part)
+- **Effort:** M
+- **Library:** 005 Bento grids
+- **Problem:** Two shipped jobs (v0.8.0) have no window surface: How to Use sends the user to the Chat or to the terminal.
+- **Fix:** The job picker lists "Make smaller" (re-quantize) and "Teach a small model" (distill) as jobs with the same card flow as Train and Sleep. How to Use stops sending the user to the terminal for them.
+- **Done:** Both jobs start from the window with no typing.
+
+### T76 — Chat: click-to-pick model, plan before it runs
+
+- **Origin:** audit #9 R9
+- **Covers:** A9-U5, A9-G11
+- **Effort:** M
+- **Library:** 010 AI-native patterns, 012 Progressive disclosure
+- **Problem:** With no chat model picked, the chat makes the user type a tag by hand from eleven raw names. And the agent never shows its plan before running: one "just do it" can download, create, and start hours of training with no preview.
+- **Fix:** When no chat model is picked, the chat shows clickable model buttons from the installed list instead of "type one of these". Before a multi-step plan runs, the agent shows the plan ("I will: 1. ... 2. ...") with Run and Cancel. Replies stream as they arrive.
+- **Done:** No typing is needed to pick a chat model; "just do it" shows its plan first and waits for Run.
+
+### T77 — The session follows the profile
+
+- **Origin:** audit #9 R10
+- **Covers:** A9-G6
+- **Effort:** S
+- **Library:** 022 Per-context profiles
+- **Supersedes:** T125 (remember the project per profile).
+- **Problem:** The session is one global slot; switching profiles loses the project context.
+- **Fix:** Store the last project per profile; switching profiles restores that profile's project. The active profile is visible at a glance.
+- **Done:** Switch away from a profile and back; the project is back.
+
+### T78 — Tree rows show full names, with a health badge
+
+- **Origin:** audit #9 R11
+- **Covers:** A9-U6
+- **Effort:** S
+- **Library:** none
+- **Extends:** T163 (health badge per profile row), T164 (richer project rows).
+- **Problem:** Long model names truncate in the 235 px pane with no tooltip, so the user cannot read which model a profile is.
+- **Fix:** A wider default pane, tooltips carrying the full row text, and a small health badge per profile (weights ready, weights missing, Ollama down).
+- **Done:** The MiniCPM5 row is readable in full (tooltip or wrap); each profile shows its weights state at a glance.
+
+### T79 — One honest download row
+
+- **Origin:** audit #9 R12
+- **Covers:** A9-W2, A9-W3, A9-D2
+- **Effort:** S
+- **Library:** none
+- **Extends:** T54 (tag/base_ref sync: this is the UI face of it; the model fix stays T54's).
+- **Problem:** The download row is duplicated in two windows; the button is enabled when there is no repo; and the Profile window says "No Hugging Face repo set" next to a filled Base ref field, telling the user to go to the window they are already in.
+- **Fix:** One download row, in the main window; the Profile window's duplicate goes away. Download is disabled when there is no repo, and the label says what to do as a button that opens the profile window. The self-referential label is fixed. The Base ref field stops showing a tag as if it were a repo.
+- **Done:** In the no-repo state, Download is disabled and the screen offers a working path to fix it; no duplicate row exists.
+
+### T80 — Collapsible section headers
+
+- **Origin:** audit #9 R13
+- **Covers:** A9-U4, A9-G10
+- **Effort:** M
+- **Library:** 012 Progressive disclosure
+- **Problem:** Save project sits below the fold in its own window, and Settings is a 1,165 px scrolling wall in a 625 px viewport. The brief asks for collapsible headers in panels.
+- **Fix:** The main panel and Settings get collapsible headers. The action row (Save, Close, Debug report) stays reachable without scrolling the whole form.
+- **Done:** At 1100x680, Save project is visible without scrolling; every Settings section is a collapsible group.
+
+### T81 — STELLA's own look: one stylesheet
+
+- **Origin:** audit #9 R14
+- **Covers:** A9-G2
+- **Effort:** M
+- **Library:** 001 Micro-interactions (limited), 002 Spring physics (limited)
+- **Problem:** No application stylesheet exists; the app runs in default Qt grey and could be any program.
+- **Fix:** One stylesheet applied by `main()`, drawn from the icon (dark surfaces, one accent), applied to every window. Button press dips to 0.97 over 150 ms. No per-frame blur, no layout thrash, nothing that costs frames on the Vega 3.
+- **Done:** The app is recognizable as STELLA in a screenshot; every window carries the look.
+
+### T82 — Keyboard: shortcuts and a visible focus ring
+
+- **Origin:** audit #9 R15
+- **Covers:** A9-U8
+- **Effort:** S
+- **Library:** 023 Focus-first navigation
+- **Extends:** T127 (window chrome pass: shortcuts are part of it).
+- **Problem:** No keyboard shortcuts exist anywhere, and there is no visible focus styling.
+- **Fix:** Shortcuts for the main actions (new profile, new project, start training, How to Use, Chat), a visible focus ring in the stylesheet, and tab order in visual order.
+- **Done:** Every main action is reachable by keyboard; the focus ring is visible in a screenshot.
+
 ## P2 — missing capabilities and inconsistencies
 
-### T68 — Dataset health panel before training starts
+### T83 — Dataset health panel before training starts
 
 - **Origin:** repo-audit verdict (R27)
 - **Covers:** R27
 - **Effort:** M
 - **Problem:** Nothing checks the dataset before a run starts — a
   malformed file, a wrong-format row, or a 3-example dataset
-  fails (or silently trains garbage) hours into a run. T39
+  fails (or silently trains garbage) hours into a run. T45
   validates the dataset at configure time (picker, existence,
   format); this is the pre-flight check at train time: row count,
   format errors, token-length distribution, and a warning when
@@ -2246,18 +2428,19 @@ into existing tasks.)
   rows with line numbers, format (prompt/completion vs messages),
   and a rough token estimate; a failing check blocks the run with
   the errors named, a warning (tiny dataset) asks to proceed.
-  Builds on T39's validator.
+  Builds on T45's validator.
 - **Done:** Starting a run with a malformed dataset is refused
   with the bad line numbers; a 3-example dataset warns before
   starting; a healthy dataset shows its row count and format.
   Tests: malformed refusal, tiny-dataset warning, healthy
   summary.
 
-### T69 — RAM/time estimate in the detail panel
+### T84 — RAM/time estimate in the detail panel
 
 - **Origin:** audit #2 T9
 - **Covers:** A2-W9, A2-G4, A2-D8
 - **Effort:** M
+- **Note:** Extended by T18 (Audit #9 R4).
 - **Problem:** Rank up to 64, seq len up to 32768, batch up to 32,
   epochs up to 100 — all selectable with no RAM or time estimate.
   The defaults are good, but the extremes are swap death on 8 GB
@@ -2279,36 +2462,36 @@ into existing tasks.)
   over-large configuration warns but still saves. Tests: estimate
   states for known-good and known-bad settings, update-on-change.
 
-### T70 — Dry-run estimate button (RAM fit + steps + disk, without loading the model)
+### T85 — Dry-run estimate button (RAM fit + steps + disk, without loading the model)
 
 - **Origin:** repo-audit verdict (R28)
 - **Covers:** R28
 - **Effort:** M
-- **Depends on:** T69 (estimate display), T22 (honest RAM guard)
+- **Depends on:** T84 (estimate display), T28 (honest RAM guard)
 - **Problem:** There is no way to ask "will this run fit, how
   long, how much disk" without starting the run — the
-  detail-panel estimate (T69) shows RAM fit for the current
+  detail-panel estimate (T84) shows RAM fit for the current
   settings, but there is no single dry-run that answers all three
   questions before the user commits hours. And any estimate that
   loads the model to compute itself defeats the purpose (R8).
 - **Fix:** A "Dry run" / "Estimate" button in the Train panel (and
-  a CLI flag): computes RAM fit (from T22's honest estimator —
+  a CLI flag): computes RAM fit (from T28's honest estimator —
   metadata only, no model load), the step count for the dataset +
   settings, and the disk needed (checkpoints + adapter + merged
   weights), and shows all three before the user starts. Reuses
-  T69's display math; does not duplicate it.
+  T84's display math; does not duplicate it.
 - **Done:** Dry-run on a project shows RAM fit, step count, and
   disk needed without loading the model (proven by a test
   asserting no load happened); an over-budget dry-run warns
   before the run starts. Tests: estimate values for a known
   project, no-load proof.
 
-### T71 — Export a profile on its own
+### T86 — Export a profile on its own
 
 - **Origin:** audit #1 T12 + audit #3 T15 (merged — one profile export)
 - **Covers:** A1-G4; A3-W7, A3-G3
 - **Effort:** M
-- **Depends on:** T34 (package format defines the profile kind)
+- **Depends on:** T40 (package format defines the profile kind)
 - **Problem:** Export is per-project; a profile with zero projects
   cannot be moved, backed up, or shared. Combined with A1-W5, the
   only copy of a profile is the live one. Audit #3 confirmed the
@@ -2320,14 +2503,14 @@ into existing tasks.)
   A3-W4: the second package's profile block is silently discarded
   on import).
 - **Fix:** Add profile export using the profile package kind from
-  T34 (`kind: "stella-profile-export"`, per audit #3's D1 format
+  T40 (`kind: "stella-profile-export"`, per audit #3's D1 format
   decision — versioned format, named kinds, version check): a
   package holding the profile manifest (and, as an option, all its
   projects), importable back with the same strict verification the
   project import does (T1). The format decision is settled, so
-  this task builds on T34 rather than waiting on the audit. GUI:
+  this task builds on T40 rather than waiting on the audit. GUI:
   Export offers profile export when a profile is selected; CLI: a
-  `stella export-profile` command. Profile notes (T146) are
+  `stella export-profile` command. Profile notes (T166) are
   included in the package.
 - **Done:** Export a project-less profile, delete it, import the
   package: the profile returns with tag, role, base, and settings
@@ -2335,7 +2518,7 @@ into existing tasks.)
   package is refused with a readable error. Tests: round-trip with
   and without projects, corrupt-package rejection.
 
-### T72 — CLI parity: rename, delete, update, show (profiles + projects)
+### T87 — CLI parity: rename, delete, update, show (profiles + projects)
 
 - **Origin:** audit #1 T7 + audit #2 T11 (merged — one `cli.py` change); audit #5 T16 (G1–G3, merged — same commands)
 - **Covers:** A1-W9, A1-D11; A2-W11, A2-D13; A7-G7, A7-D15 (update half); A5-G1, A5-G2, A5-G3, A5-D15 (commands/show/settings half)
@@ -2356,13 +2539,13 @@ into existing tasks.)
 - **Fix:** One `cli.py` change adding both sets of commands, reusing
   the Store methods and error messages the GUI already uses.
   Profiles: `stella rename-profile <old> <new>`,
-  `stella delete-profile <name>` (trash behavior per T17, plus a
+  `stella delete-profile <name>` (trash behavior per T23, plus a
   `--purge` flag for permanent removal),
   `stella update-profile <name> [--role ...] [--tag ...]
   [--display ...] [--base ...] [--processor ...]`, and
   `stella show-profile <name>` (full manifest, readable). Projects:
   `stella rename-project <profile> <old> <new>`,
-  `stella delete-project <profile> <name>` (trash behavior per T17,
+  `stella delete-project <profile> <name>` (trash behavior per T23,
   plus `--purge`),
   `stella update-project <profile> <name>` (flags for display,
   dataset, metamorph, and each setting), and
@@ -2373,13 +2556,13 @@ into existing tasks.)
   the user can see what `train --resume` would use.
   Audit #7's G7 — the CLI cannot change a mode after creation — is
   fixed by the update-project `--metamorph` flag above; no separate
-  task. (The `--metamorph` help text is T156.)
+  task. (The `--metamorph` help text is T176.)
 - **Done:** All eight commands work end to end from a terminal
-  against a scratch home; both deletes move to trash (T17); errors
+  against a scratch home; both deletes move to trash (T23); errors
   print the same messages as the GUI. Tests for all eight commands
   including bad-name and missing-item exits.
 
-### T73 — CLI `projects` must refuse a nonexistent profile
+### T88 — CLI `projects` must refuse a nonexistent profile
 
 - **Origin:** audit #5 T9 (W8/D8 part)
 - **Covers:** A5-W8, A5-D8
@@ -2398,7 +2581,7 @@ into existing tasks.)
   message and exits 0. Tests: ghost profile refused, empty real
   profile clean.
 
-### T74 — One-click Ollama create after GGUF export
+### T89 — One-click Ollama create after GGUF export
 
 - **Origin:** repo-audit verdict (R26)
 - **Covers:** R26
@@ -2419,7 +2602,7 @@ into existing tasks.)
   error; the manual commands are still printed. Tests:
   create-after-export against a fake Ollama, failure path.
 
-### T75 — Probe gate informational mode
+### T90 — Probe gate informational mode
 
 - **Origin:** repo-audit verdict (R9)
 - **Covers:** R9
@@ -2442,7 +2625,7 @@ into existing tasks.)
   probe still fails its exit code when the gate fails. Tests: both
   modes, exit codes.
 
-### T76 — A distinct exit code for a failed probe gate
+### T91 — A distinct exit code for a failed probe gate
 
 - **Origin:** audit #5 T11
 - **Covers:** A5-W12, A5-D10
@@ -2455,15 +2638,15 @@ into existing tasks.)
   the numbers either.
 - **Fix:** D10 — return a code other than 1 for "probe ran, gate
   failed" (3, say — 2 is argparse's), and print the gate verdict
-  to stderr or behind `--json` (T152) so scripts can read the
+  to stderr or behind `--json` (T172) so scripts can read the
   verdict separately from the numbers. (The informational probe
-  mode is T75 — a gate probe that fails still fails its exit code;
+  mode is T90 — a gate probe that fails still fails its exit code;
   an informational probe exits 0 regardless.)
 - **Done:** A failed gate exits 3 (not 1); a crashed probe still
   exits 1; the verdict is readable separately from the numbers.
   Tests: gate-fail exit 3, crash exit 1, informational exit 0.
 
-### T77 — Probe provenance in the results file
+### T92 — Probe provenance in the results file
 
 - **Origin:** audit #8 T20
 - **Covers:** A8-G3, A8-D16
@@ -2481,7 +2664,7 @@ into existing tasks.)
   base and adapter, with what generation settings and prompt
   set. Tests: keys present, two runs distinguishable.
 
-### T78 — Hard-benign prompts in the probe set
+### T93 — Hard-benign prompts in the probe set
 
 - **Origin:** audit #8 T21
 - **Covers:** A8-G4
@@ -2491,7 +2674,7 @@ into existing tasks.)
   dual-use help, security-adjacent questions, contentious topics
   — while scoring 0/12. The gate cannot see the failure mode it
   exists to catch at the margin where it matters. (The verdict
-  thread's idea of per-role probe sets, T154, points the
+  thread's idea of per-role probe sets, T174, points the
   same way.)
 - **Fix:** Add hard-benign prompts to the set — requests that
   are legitimate but sit near the refusal boundary — so the
@@ -2501,11 +2684,12 @@ into existing tasks.)
   that refuses only at the margin scores above 0. Tests: set
   contents, a margin-refusing model caught.
 
-### T79 — Surface the probe in the window
+### T94 — Surface the probe in the window
 
 - **Origin:** audit #8 T19
 - **Covers:** A8-U4, A8-D17
 - **Effort:** M
+- **Note:** Extended by T148 (Audit #9 R19).
 - **Problem:** `run_probe_gui` logs one line ("X/12 refusals
   before, Y/12 after") plus the verdict. `probe_results.json` —
   all 24 replies, the evidence behind the verdict — is never
@@ -2518,7 +2702,7 @@ into existing tasks.)
   window: every reply, its refused flag, before and after, and
   the verdict. Tests: dialog shows the saved results.
 
-### T80 — Proof-run control in the window: the GUI can't do a short --steps run
+### T95 — Proof-run control in the window: the GUI can't do a short --steps run
 
 - **Origin:** audit #8 T17
 - **Covers:** A8-U2
@@ -2531,15 +2715,16 @@ into existing tasks.)
   avoid.
 - **Fix:** A step-cap control in the Train panel (a spin box or
   a "proof run" button that runs a short cap), passed through as
-  `max_steps`. Pairs with T50 (the cap must be real).
+  `max_steps`. Pairs with T56 (the cap must be real).
 - **Done:** A window user can start a capped proof run and it
   stops at the cap. Tests: GUI test, cap honored.
 
-### T81 — The val loss in the run summary and the window
+### T96 — The val loss in the run summary and the window
 
 - **Origin:** audit #8 T18
 - **Covers:** A8-U3, A8-G8
 - **Effort:** S
+- **Note:** Extended by T148 (Audit #9 R19).
 - **Problem:** The loss label shows the last training loss; val
   loss appears only as a log line. When a run finishes, the
   window says "Trained N steps" with no val loss — the one
@@ -2558,7 +2743,7 @@ into existing tasks.)
   final val loss next to the training loss. Tests: summary
   carries val loss, panel shows it.
 
-### T82 — LFM3 → GGUF conversion pre-flight
+### T97 — LFM3 → GGUF conversion pre-flight
 
 - **Origin:** audit #8 T23
 - **Covers:** A8-G11
@@ -2579,7 +2764,7 @@ into existing tasks.)
   merge, naming the arch and the converter; a supported one
   proceeds. Tests: supported arch passes, unsupported refused.
 
-### T83 — Resume contract: snapshot settings at pause, warn on drift
+### T98 — Resume contract: snapshot settings at pause, warn on drift
 
 - **Origin:** audit #8 T10
 - **Covers:** A8-W10, A8-W11, A8-D8
@@ -2610,7 +2795,7 @@ into existing tasks.)
   produces a visible warning event. Tests: changed-rank resume,
   missing-optimizer resume.
 
-### T84 — Bound completions to max_seq_len
+### T99 — Bound completions to max_seq_len
 
 - **Origin:** audit #8 T15
 - **Covers:** A8-W16, A8-D13
@@ -2634,7 +2819,7 @@ into existing tasks.)
   dropped with a count. Tests: 200-char completion at
   max_seq_len=64, normal completions unchanged.
 
-### T85 — End the completion with the template's turn terminator
+### T100 — End the completion with the template's turn terminator
 
 - **Origin:** audit #8 T16
 - **Covers:** A8-W17, A8-D14
@@ -2658,7 +2843,7 @@ into existing tasks.)
   with `<|im_end|>`; with no template, behavior is unchanged.
   Tests: template-shaped tokenizer, plain tokenizer.
 
-### T86 — Quote paths in the Modelfile and the printed command
+### T101 — Quote paths in the Modelfile and the printed command
 
 - **Origin:** audit #8 T14
 - **Covers:** A8-W15, A8-D12
@@ -2681,7 +2866,7 @@ into existing tasks.)
   quoted or documented. Tests: spaced-path export, command
   string, Modelfile line.
 
-### T87 — Check the quantizer is executable at discovery
+### T102 — Check the quantizer is executable at discovery
 
 - **Origin:** audit #8 T13
 - **Covers:** A8-W14, A8-D11
@@ -2697,13 +2882,13 @@ into existing tasks.)
   require the quantizer to be executable (`os.access(q,
   os.X_OK)`) and say which file is not. (D11's quant half —
   validate `quant` up front — is audit #5's W7, already merged
-  T78; this task is only the executability half.)
+  T93; this task is only the executability half.)
 - **Done:** A non-executable quantizer is refused at discovery
   with a plain error naming the file; an executable one is
   found as before. Tests: chmod-644 quantizer, executable
   quantizer.
 
-### T88 — Timeout on the converter/quantizer subprocesses
+### T103 — Timeout on the converter/quantizer subprocesses
 
 - **Origin:** audit #8 T22
 - **Covers:** A8-G7
@@ -2719,7 +2904,7 @@ into existing tasks.)
   naming the step, instead of hanging forever. Tests: hung
   subprocess times out.
 
-### T89 — Checksums + sizes in the manifest
+### T104 — Checksums + sizes in the manifest
 
 - **Origin:** audit #3 T9
 - **Covers:** A3-W9, A3-D8
@@ -2734,18 +2919,18 @@ into existing tasks.)
   manifest, verified on import; a mismatch fails loudly — refuse
   the import, or import with a clear warning naming the file
   (decide in implementation; failing loudly is the default). Cover
-  checkpoints, weights, notes, and the dataset when bundled (T53).
+  checkpoints, weights, notes, and the dataset when bundled (T59).
 - **Done:** A truncated checkpoint is refused or flagged on import;
   an intact package imports silently; the manifest lists a hash +
   size per file. Tests: truncated-file rejection, intact import,
   hash coverage of each member.
 
-### T90 — A verify command
+### T105 — A verify command
 
 - **Origin:** audit #3 T12; audit #5 T16 (G4, merged — same command)
 - **Covers:** A3-G5, A3-D12; A5-G4, A5-D15 (verify half)
 - **Effort:** S
-- **Depends on:** T1 (schema validation), T34 (version check), T89 (checksums)
+- **Depends on:** T1 (schema validation), T40 (version check), T104 (checksums)
 - **Problem:** `verify_export` exists but no CLI command or GUI
   action exposes it — the only way to check a package is to
   import it. Audit #5 re-verified the gap on the CLI (A5-G4):
@@ -2761,7 +2946,7 @@ into existing tasks.)
   imported either way. Tests: verify good/bad, no-import
   guarantee.
 
-### T91 — Progress, cancel, and refresh on failure
+### T106 — Progress, cancel, and refresh on failure
 
 - **Origin:** audit #3 T14
 - **Covers:** A3-U4, A3-U5
@@ -2785,11 +2970,12 @@ into existing tasks.)
   so the window matches the disk. Tests: cancel leaves no partial
   state, failure refreshes the lists.
 
-### T92 — Progress and cancel for GGUF/probe jobs
+### T107 — Progress and cancel for GGUF/probe jobs
 
 - **Origin:** audit #4 T22 (job part; checkpoint part → T119); extended by the repo-audit verdict (R23)
 - **Covers:** A4-G4, A4-D21 (job part); R23
 - **Effort:** M
+- **Note:** Extended by T74 (Audit #9 R7).
 - **Problem:** No progress or cancel for GGUF/probe jobs:
   `JobWorker` has no progress signal — a multi-minute GGUF
   export shows only log lines, and there is no way to stop it
@@ -2797,15 +2983,15 @@ into existing tasks.)
   re-verified (R23): GGUF export and probe have no cancel and no
   progress. (The
   checkpoint half of A4-D21 — resume, delete, disk usage — is
-  T130.)
+  T150.)
 - **Fix:** A4-D21 (job part) — a progress signal (or at least an
   indeterminate bar + a stop button) on `JobWorker`. The stop
-  acts on the single running job from T23.
+  acts on the single running job from T29.
 - **Done:** A running GGUF/probe job shows progress and can be
   stopped; stopping leaves no partial state. Tests: job progress
   shown, job stop.
 
-### T93 — Second Ctrl+C force-quits; make the download interruptible
+### T108 — Second Ctrl+C force-quits; make the download interruptible
 
 - **Origin:** audit #5 T10
 - **Covers:** A5-W11, A5-D9
@@ -2831,7 +3017,7 @@ into existing tasks.)
   told it would wait. Tests: second-Ctrl+C exits (stubbed loop),
   download message shown.
 
-### T94 — Progress for long phases; honest paused/resumed output
+### T109 — Progress for long phases; honest paused/resumed output
 
 - **Origin:** audit #5 T14
 - **Covers:** A5-U6, A5-U7, A5-U8, A5-D14
@@ -2859,14 +3045,14 @@ into existing tasks.)
   Make the paused summary say `Paused after 4 steps` instead of
   reusing the completed-run wording, and skip the re-evaluated
   validation line on a resumed epoch with no new steps. (The GUI
-  side — progress/cancel for GGUF/probe jobs — is T92.)
+  side — progress/cancel for GGUF/probe jobs — is T107.)
 - **Done:** A probe run prints a line per pass; the GGUF merge
   prints a start line; a paused run's tail says Paused, not
   Trained; a resumed run prints no validation line for an epoch it
   did not train. Tests: pass lines present, paused wording, no
   stale validation line.
 
-### T95 — Silence the library warnings on stderr
+### T110 — Silence the library warnings on stderr
 
 - **Origin:** audit #5 T12
 - **Covers:** A5-U4, A5-D12
@@ -2892,7 +3078,7 @@ into existing tasks.)
   asks for them). Tests: stderr of a tiny run contains no
   transformers/peft warnings.
 
-### T96 — CLI-appropriate error text
+### T111 — CLI-appropriate error text
 
 - **Origin:** audit #5 T13
 - **Covers:** A5-U5, A5-D13
@@ -2910,7 +3096,7 @@ into existing tasks.)
   error-string audit (grep for GUI pointers in `cli.py` error
   paths).
 
-### T97 — Clone project, and project templates
+### T112 — Clone project, and project templates
 
 - **Origin:** audit #2 T10
 - **Covers:** A2-W13, A2-G5, A2-D9
@@ -2929,7 +3115,7 @@ into existing tasks.)
   known-good settings (confirm the preset values with Joshua, or use
   the audit's recommended defaults as the starting point). Templates
   live as JSON in the tree so new ones can be added without code.
-  (Related: T106 clones profiles; the two clone actions share the
+  (Related: T121 clones profiles; the two clone actions share the
   pattern but copy different objects — keep them separate.)
 - **Done:** Clone a project: the new project appears with identical
   settings, dataset, and metamorph mode under its own name, zero
@@ -2938,11 +3124,12 @@ into existing tasks.)
   Tests: clone copies settings, clone does not copy checkpoints,
   template pre-fill, clone-name collision rejected.
 
-### T98 — A real New Project form
+### T113 — A real New Project form
 
 - **Origin:** audit #2 T13
 - **Covers:** A2-W12; A7-W9, A7-U4, A7-D10
 - **Effort:** S
+- **Status:** SUPERSEDED by T15 (Audit #9 R1) — the job picker is project creation now. Kept in the list, marked, so the coverage map still accounts for its findings.
 - **Problem:** The GUI creates a project from a single name prompt —
   no dataset, no metamorph choice, no settings. Every project starts
   identical and must be configured afterwards, one field at a time.
@@ -2953,8 +3140,8 @@ into existing tasks.)
   decided at creation and editable only after scrolling.
 - **Fix:** Replace the name-only prompt with a real New Project
   dialog (a QDialog, centered on the parent, Enter submits): name,
-  display name, dataset (with the picker from T39), metamorph mode,
-  and a template picker (T97) when templates exist. Settings stay in
+  display name, dataset (with the picker from T45), metamorph mode,
+  and a template picker (T112) when templates exist. Settings stay in
   the detail panel after creation — the form covers identity,
   dataset, and mode only. Defaults apply when fields are left blank. (Use the same real-QDialog pattern as T11.)
 - **Done:** Create a project from the GUI with a dataset and a
@@ -2962,7 +3149,7 @@ into existing tasks.)
   Enter submits the dialog. Tests: dialog create-through with
   dataset + mode, defaults when blank.
 
-### T99 — Merge the three notes into one surface
+### T114 — Merge the three notes into one surface
 
 - **Origin:** audit #2 T12
 - **Covers:** A2-W10, A2-D12; A7-W8, A7-U3, A7-D7
@@ -2992,7 +3179,7 @@ into existing tasks.)
   unchanged. Tests: migration removes the
   dead key, metamorph-notes save-through, CLI flag sets notes.
 
-### T100 — Make config and dependencies reachable (JSON editor)
+### T115 — Make config and dependencies reachable (JSON editor)
 
 - **Origin:** audit #1 T10
 - **Covers:** A1-W7, A1-D12; A1-G1 (first step)
@@ -3006,15 +3193,15 @@ into existing tasks.)
 - **Fix:** Add a config/deps editor to the detail panel: a plain JSON
   text area for `config` and an editable list for `dependencies`,
   validated on save (bad JSON is rejected with the parse error, and
-  nothing is written). Expose both through `update-profile` (T72) as
+  nothing is written). Expose both through `update-profile` (T87) as
   well. This is the first step toward A1-G1; full environment
-  management is T162.
+  management is T182.
 - **Done:** Edit config JSON in the detail panel, save, reopen: the
   values persist and `show-profile` prints them. Invalid JSON is
   refused with a readable error and the old values stay. Tests:
   save-through, invalid-JSON rejection, CLI update path.
 
-### T101 — Canonical roles wired to the rename plan, with a governing-seat warning
+### T116 — Canonical roles wired to the rename plan, with a governing-seat warning
 
 - **Origin:** audit #1 T8
 - **Covers:** A1-W6, A1-G2, A1-D8
@@ -3033,7 +3220,7 @@ into existing tasks.)
   seat it is bound for, when set): if a governing seat is marked and
   the base is not abliterated, warn before any training starts. (The
   single-control part of A1-W6 — role combo in the detail panel —
-  is T107.)
+  is T122.)
 - **Done:** The role field offers the canonical list everywhere it
   appears; a custom role is visibly marked custom; marking a profile
   for a governing seat with a stock base produces a warning naming
@@ -3041,7 +3228,7 @@ into existing tasks.)
   flag, governing-seat warning fires and does not fire for an
   abliterated base.
 
-### T102 — Collision options
+### T117 — Collision options
 
 - **Origin:** audit #3 T10
 - **Covers:** A3-W11, A3-D9
@@ -3056,13 +3243,13 @@ into existing tasks.)
 - **Fix:** Export: an overwrite prompt in the GUI and a `--force`
   flag on the CLI (with a confirm). Import: "import as a copy"
   (new slug) or replace with a backup of the old project (to
-  trash, per T17). Collisions should be choices, not dead ends.
+  trash, per T23). Collisions should be choices, not dead ends.
 - **Done:** Export over an existing folder offers overwrite;
   import of an existing project offers copy-under-new-name or
   replace-with-backup; the old project is recoverable after a
   replace. Tests: each option end to end.
 
-### T103 — Preserve timestamps
+### T118 — Preserve timestamps
 
 - **Origin:** audit #3 T11
 - **Covers:** A3-W10, A3-D11
@@ -3078,12 +3265,12 @@ into existing tasks.)
 - **Fix:** Carry the original `created` / `updated` in the
   manifest and restore them on import, plus an `exported_at`
   stamp for provenance (the first piece of A3-G6 — the rest is
-  T159).
+  T179).
 - **Done:** Export then import: `created` / `updated` match the
   source; `exported_at` records the export time. Tests: timestamp
   round-trip, `exported_at` present.
 
-### T104 — Notes backup
+### T119 — Notes backup
 
 - **Origin:** audit #2 T14
 - **Covers:** A2-G7, A2-D11
@@ -3095,13 +3282,13 @@ into existing tasks.)
   `notes-history/` folder capped at N versions — pick the rotating
   single backup unless Joshua wants history. Document the restore
   path (move the backup back over `notes.md`) in the README. (Applies
-  to project notes; profile notes from T146 get the same treatment
+  to project notes; profile notes from T166 get the same treatment
   when they land.)
 - **Done:** Save notes twice; the previous version is recoverable
   from the backup; the restore path is documented. Tests: backup
   created on save, backup holds the previous content.
 
-### T105 — Delete dialogs name what's being destroyed
+### T120 — Delete dialogs name what's being destroyed
 
 - **Origin:** repo-audit verdict (R24)
 - **Covers:** R24
@@ -3110,18 +3297,18 @@ into existing tasks.)
   be undone" but never say what is being destroyed — no
   profile/project name, no project count, no mention of
   checkpoints or notes. The user confirms blind. (T9 makes No
-  the default; T17 moves deletes to trash — this task is the
+  the default; T23 moves deletes to trash — this task is the
   dialog text itself.)
 - **Fix:** The delete dialog names the item (profile or project
   display name + slug), counts what goes with it (N projects,
-  checkpoints, notes), and states where it goes (trash, per T17)
+  checkpoints, notes), and states where it goes (trash, per T23)
   or that it is permanent (purge).
 - **Done:** Deleting a profile with projects shows the name, the
   project count, and the trash destination; deleting a project
   names its checkpoints. Tests: dialog text contains the name and
   counts.
 
-### T106 — Clone profile
+### T121 — Clone profile
 
 - **Origin:** audit #1 T6
 - **Covers:** A1-W10, A1-D7
@@ -3138,16 +3325,16 @@ into existing tasks.)
   clone does not copy projects by default, clone-name collision
   rejected.
 
-### T107 — Small UI fixes: tooltips and role combo in detail
+### T122 — Small UI fixes: tooltips and role combo in detail
 
 - **Origin:** audit #1 T9 (dialog items split out to T11) + audit #4 T13 (row-tooltips part); extended by the repo-audit verdict (R15)
 - **Covers:** A1-U1, A1-U5, A1-D10 (tooltip/role part); A4-U1, A4-D16 (row-tooltips part); A1-W6 (control-consistency part); R15
 - **Effort:** M
 - **Problem:** Two verified UI flaws, plus a re-verification. (A1-U1) Long tags truncate in the profile list (`maternion/minicpm5-heretic:2b` shows as `matern...`, `qwen3-vl:2b-instru`) and there is no tooltip — the only `setToolTip` in the whole GUI is on the metamorph combo — so hovering tells you nothing. Audit #4 re-verified this (A4-U1): the MiniCPM5 row is 343px of text in a 250px pane with no tooltip, and a horizontal scrollbar is the only escape. The verdict re-verified (R15): long tags truncate in the 260 px profile pane. (A1-U5) Role is a combo in the dialog but a bare text field in the detail panel — same field, two controls, and the suggestions vanish the moment the profile exists. (The dialog items from this task — A1-U2, A1-U3 — moved to the P0 dialog task T11: audit #4 raised the dialog to P0.)
-- **Fix:** Set a tooltip on every profile list row showing the full display name, role, and tag (A4-D16, row part). Replace the detail panel's role text field with the same editable combo (canonical list from T101, plus custom entry).
+- **Fix:** Set a tooltip on every profile list row showing the full display name, role, and tag (A4-D16, row part). Replace the detail panel's role text field with the same editable combo (canonical list from T116, plus custom entry).
 - **Done:** Hovering a truncated row shows the full tag; the detail panel's role field offers the same suggestions as the dialog. Tests: tooltip text present on rows, detail role combo offers the canonical list.
 
-### T108 — Clear the whole panel with no selection
+### T123 — Clear the whole panel with no selection
 
 - **Origin:** audit #4 T17
 - **Covers:** A4-W14, A4-D13
@@ -3169,7 +3356,7 @@ into existing tasks.)
   shows no settings values and Save is disabled. Tests:
   no-selection panel state, Save disabled.
 
-### T109 — Buttons follow the selection; panes explain themselves
+### T124 — Buttons follow the selection; panes explain themselves
 
 - **Origin:** audit #4 T20
 - **Covers:** A4-U4, A4-U5, A4-D19
@@ -3184,7 +3371,7 @@ into existing tasks.)
   shows a blank white list; an empty store shows two blank white
   lists. The only voice is the status bar ("Pick a profile to
   begin."). Nothing in the panes says what to do next. (The
-  Export button's enablement is T147 — implement consistently in
+  Export button's enablement is T167 — implement consistently in
   the same `_update_actions` pass.)
 - **Fix:** A4-D19 — disable actions with nothing to act on, in one
   `_update_actions` pass; put a one-line hint in an empty list
@@ -3194,11 +3381,12 @@ into existing tasks.)
   empty list shows its hint. Tests: button states per selection
   state, hint text present in empty panes.
 
-### T110 — Remember the project per profile
+### T125 — Remember the project per profile
 
 - **Origin:** audit #4 T19
 - **Covers:** A4-W17, A4-D15
 - **Effort:** S
+- **Status:** SUPERSEDED by T77 (Audit #9 R10) — the session follows the profile. Kept in the list, marked, so the coverage map still accounts for its findings.
 - **Problem:** `_on_profile_selected` resets `_current_project`
   to None (`gui.py:467-473`), so returning to a profile always
   lands on its first project. Probed (corrected): select
@@ -3214,7 +3402,7 @@ into existing tasks.)
   back: the same project is selected. Tests: project memory
   across a profile round-trip.
 
-### T111 — Give the splitter honest minimums
+### T126 — Give the splitter honest minimums
 
 - **Origin:** audit #4 T18
 - **Covers:** A4-W15, A4-W16, A4-D14
@@ -3239,11 +3427,12 @@ into existing tasks.)
   the detail pane keeps its width at default and minimum size.
   Tests: drag-to-zero refused, sizes honored.
 
-### T112 — Window chrome pass: icon, geometry, shortcuts
+### T127 — Window chrome pass: icon, geometry, shortcuts
 
 - **Origin:** audit #4 T21 + audit #6 T16 (window-icon part; merged — one fix); extended by the repo-audit verdict (R17, R18, R22)
 - **Covers:** A4-U6, A4-G1, A4-G2, A4-D20; A6-U5, A6-D14; R17, R18, R22 (shortcuts part)
 - **Effort:** M
+- **Note:** Extended by T82 (Audit #9 R15).
 - **Problem:** Three chrome gaps. (A4-U6) No window icon:
   `windowIcon().isNull()` is true; the title bar shows Qt's
   default icon, although the gold-star icon ships in `assets/`
@@ -3257,7 +3446,7 @@ into existing tasks.)
   window is mouse-only except for list arrows and Tab. The verdict
   re-verified all three (R17/R18/R22): no geometry persistence, no
   window icon set in code, no menu bar or keyboard shortcuts — the
-  shortcuts part is this task; the menu bar is T149. Audit #6
+  shortcuts part is this task; the menu bar is T169. Audit #6
   re-verified the window icon (A6-U5): no `setWindowIcon` / `QIcon`
   anywhere in the tree (grep) — the window, taskbar, and alt-tab
   show Qt's generic icon even though a star icon sits in
@@ -3274,7 +3463,7 @@ into existing tasks.)
   a new profile/project. Tests: icon set (including the
   missing-file guard), persistence round-trip, shortcuts fire.
 
-### T113 — Define the `processor` field
+### T128 — Define the `processor` field
 
 - **Origin:** audit #1 T11
 - **Covers:** A1-W8
@@ -3295,7 +3484,7 @@ into existing tasks.)
   field is removed from the manifest, the GUI, and the docs, with a
   migration for existing profiles.
 
-### T114 — Fix the maternion typo (6 places)
+### T129 — Fix the maternion typo (6 places)
 
 - **Origin:** repo-audit verdict (R6)
 - **Covers:** R6
@@ -3313,7 +3502,7 @@ into existing tasks.)
   shows the corrected text. Tests: a spelling guard (grep test)
   for the typo.
 
-### T115 — LICENSE, .gitignore, pinned training requirements, CI
+### T130 — LICENSE, .gitignore, pinned training requirements, CI
 
 - **Origin:** repo-audit verdict (R13); extended by audit #6 T14 (pin side)
 - **Covers:** R13; A6-W13, A6-D10 (pin side)
@@ -3343,7 +3532,7 @@ into existing tasks.)
   the base install too (a requirements-base.txt or the same pinned
   file); install.sh consumes the pinned file. (The record-them
   alternative — writing the installed versions into an install
-  receipt — is T124.)
+  receipt — is T139.)
 - **Done:** LICENSE present; .gitignore covers venv/pycache/homes;
   install-training.sh consumes the pinned file; install.sh
   consumes the pinned PySide6 version; a fresh install gets
@@ -3351,7 +3540,7 @@ into existing tasks.)
   repo has a description and topics. Tests: the CI workflow itself
   (a run proves it).
 
-### T116 — Push the current docs to the repo
+### T131 — Push the current docs to the repo
 
 - **Origin:** repo-audit verdict (R14)
 - **Covers:** R14
@@ -3374,7 +3563,7 @@ into existing tasks.)
   current merged list; the repo's docs match the tree. (Verified
   by read-back after the push.)
 
-### T117 — Wrap pip failures in a Stella error
+### T132 — Wrap pip failures in a Stella error
 
 - **Origin:** audit #6 T12
 - **Covers:** A6-W11, A6-D8
@@ -3395,7 +3584,7 @@ into existing tasks.)
   the step and the retry; raw pip output is no longer the last
   word. Tests: failing-pip harness (dead index or ENOSPC).
 
-### T118 — Disk-space preflight
+### T133 — Disk-space preflight
 
 - **Origin:** audit #6 T13
 - **Covers:** A6-W12, A6-D9
@@ -3414,7 +3603,7 @@ into existing tasks.)
   unaffected. Tests: preflight with a faked small filesystem (or
   a huge estimate).
 
-### T119 — Fast path for a training re-run
+### T134 — Fast path for a training re-run
 
 - **Origin:** audit #6 T20
 - **Covers:** A6-W14, A6-D20
@@ -3433,7 +3622,7 @@ into existing tasks.)
   a missing package still installs it. Tests: second-run timing +
   message.
 
-### T120 — Strengthen the PySide6 check
+### T135 — Strengthen the PySide6 check
 
 - **Origin:** audit #6 T21
 - **Covers:** A6-W15, A6-D22
@@ -3455,7 +3644,7 @@ into existing tasks.)
   Tests: check passes in the sandbox; failure path names the lib
   (fake a missing lib).
 
-### T121 — Make the success message reflect reality
+### T136 — Make the success message reflect reality
 
 - **Origin:** audit #6 T15
 - **Covers:** A6-U2, A6-U3, A6-U4, A6-U8, A6-D18
@@ -3471,7 +3660,7 @@ into existing tasks.)
   output contains a lone `0.2` line between "Installing Stella
   from ..." and the success message — a version number with no
   label, looking like stray output (A6-U8). The `stella`-on-PATH
-  claim (A6-U2) is conditional — the README half is T58; this task
+  claim (A6-U2) is conditional — the README half is T64; this task
   is the message half.
 - **Fix:** A6-D18 — claim the desktop icon only if the copy landed;
   claim `stella` only if `~/.local/bin` is on PATH (or say to
@@ -3481,7 +3670,7 @@ into existing tasks.)
   open a new terminal; the version line is labeled. Tests:
   install into a HOME with no Desktop dir; PATH-off case.
 
-### T122 — Add `uninstall.sh` + a removal section in the README
+### T137 — Add `uninstall.sh` + a removal section in the README
 
 - **Origin:** audit #6 T17
 - **Covers:** A6-G1, A6-D11
@@ -3494,14 +3683,14 @@ into existing tasks.)
   about `~/.stella` — and nothing tells the user the list.
 - **Fix:** A6-D11 — remove launcher, desktop copy, symlink, venv;
   ask about `~/.stella` data (never delete it silently). Document
-  the removal in the README (with T58).
+  the removal in the README (with T64).
 - **Done:** `bash uninstall.sh` removes the launcher, desktop
   copy, symlink, and venv, and asks about `~/.stella` before
   touching it; the README documents removal. Tests: uninstall
   after install leaves no artifacts (except `~/.stella` when
   kept).
 
-### T123 — Install icons into the hicolor theme + render small sizes
+### T138 — Install icons into the hicolor theme + render small sizes
 
 - **Origin:** audit #6 T18
 - **Covers:** A6-G4, A6-U6, A6-D15
@@ -3524,7 +3713,7 @@ into existing tasks.)
   intact. Tests: theme files present after install;
   move-then-check-icon.
 
-### T124 — Keep an install receipt
+### T139 — Keep an install receipt
 
 - **Origin:** audit #6 T19
 - **Covers:** A6-G5, A6-D21
@@ -3536,15 +3725,15 @@ into existing tasks.)
   project builds generally; here it is just a missing artifact.)
 - **Fix:** A6-D21 — versions, paths, and timestamp in the tree
   (and/or `~/.stella/`), so a broken install can be reported with
-  facts. The receipt records a complete install (T57), not a failed
-  one. (The record-them side of A6-D10 — T115 pins, this task
+  facts. The receipt records a complete install (T63), not a failed
+  one. (The record-them side of A6-D10 — T130 pins, this task
   records.)
 - **Done:** After an install, a receipt file names the
   PySide6/torch versions, the artifact paths, and the install
   time; a failed install writes no receipt (or marks it failed).
   Tests: receipt contents after install.
 
-### T125 — Document an upgrade path
+### T140 — Document an upgrade path
 
 - **Origin:** audit #6 T22
 - **Covers:** A6-G6, A6-D24
@@ -3562,7 +3751,7 @@ into existing tasks.)
   them leaves one working install and no orphaned venv. Tests:
   doc review; upgrade-path walkthrough in a scratch HOME.
 
-### T126 — Corrupt-block tests for every reader
+### T141 — Corrupt-block tests for every reader
 
 - **Origin:** audit #7 T13
 - **Covers:** A7-G5, A7-D11
@@ -3577,12 +3766,12 @@ into existing tasks.)
 - **Fix:** D11 — `null`, missing-key, and wrong-type metamorph in
   `project.json` and in manifests, exercised against the CLI list,
   the GUI list + detail fill + save, export, and verify. Pins
-  T31's reader. After T31, T32, and T33 (the defensive reader
+  T37's reader. After T37, T38, and T39 (the defensive reader
   first, then the tests that pin it).
 - **Done:** One test per corrupt variant per reader; all pass.
   Tests: this task IS the tests.
 
-### T127 — Tests for the risky CLI paths
+### T142 — Tests for the risky CLI paths
 
 - **Origin:** audit #5 T15
 - **Covers:** A5-G7, A5-D17
@@ -3590,9 +3779,9 @@ into existing tasks.)
 - **Problem:** The 14 tests in `test_cli.py` cover happy paths and
   a few clean error paths. Nothing tests: the Ctrl+C pause (T4 —
   the crash shipped untested), `--steps` 0/negative/rounding
-  (T50), a corrupt home or a nameless manifest (T3, T5), export to
+  (T56), a corrupt home or a nameless manifest (T3, T5), export to
   a file destination or a bad import manifest (T5, T1), `--quant`
-  validation (T21), resume on a trained project (T19), or the
+  validation (T27), resume on a trained project (T25), or the
   exit-code/stderr contract for unknown commands. The riskiest
   paths are exactly the untested ones.
 - **Fix:** D17 — cover what this audit found untested: a subprocess
@@ -3601,11 +3790,11 @@ into existing tasks.)
   file-destination export and bad-manifest import, `--quant`
   validation, resume on a trained project, and the exit-code/stderr
   contract for unknown commands. After the fixes they pin (T4, T5,
-  T19, T21, T50 first).
+  T25, T27, T56 first).
 - **Done:** One test per risky path; all pass. Tests: this task IS
   the tests.
 
-### T128 — Record the mode in training artifacts
+### T143 — Record the mode in training artifacts
 
 - **Origin:** audit #7 T11
 - **Covers:** A7-G3, A7-D5
@@ -3621,16 +3810,16 @@ into existing tasks.)
   `training_summary.json` (and the adapter config) at train time,
   starting with the next build — before the codec exists. Cheap,
   and it means provenance is already there when the codec needs
-  it. Alongside T66 (provenance records what the codec does). T4 before T93 (the
-graceful pause first, then the force-quit on top of it) and T127
-(the pause test pins the fix); T50 and T21 before T127 (the --steps
-and --quant tests pin their fixes); T5 before T152 (the --verbose
-flag exposes the traceback the catch-all hides); T72 before T141
+  it. Alongside T72 (provenance records what the codec does). T4 before T108 (the
+graceful pause first, then the force-quit on top of it) and T142
+(the pause test pins the fix); T56 and T27 before T142 (the --steps
+and --quant tests pin their fixes); T5 before T172 (the --verbose
+flag exposes the traceback the catch-all hides); T87 before T161
 (the CLI commands exist before the GUI mirrors them).
 - **Done:** A training run's summary and adapter config name the
   mode the project was in. Tests: mode recorded in artifacts.
 
-### T129 — Mode-version story before the first codec ships
+### T144 — Mode-version story before the first codec ships
 
 - **Origin:** audit #7 T12
 - **Covers:** A7-G4, A7-D12
@@ -3640,23 +3829,74 @@ flag exposes the traceback the catch-all hides); T72 before T141
   Adding a mode later — or a codec version, which is what a real
   codec needs — has no migration path: old Stella would reject new
   packages outright, and `verify_export` never checks
-  `stella_version` at all (A3-W5, T34), so there is no version gate
+  `stella_version` at all (A3-W5, T40), so there is no version gate
   for a future mode to ride on.
 - **Fix:** D12 — carry a codec version in the manifest when the
   codec lands, and make `verify_export` check `stella_version`
-  (T34) so old Stella can refuse — cleanly, with a message — a
+  (T40) so old Stella can refuse — cleanly, with a message — a
   package whose mode it does not understand, instead of crashing
-  or silently misreading it. Rides T34's version gate; lands with
-  the first codec release (T66).
+  or silently misreading it. Rides T40's version gate; lands with
+  the first codec release (T72).
 - **Done:** A package with an unknown mode or codec version is
   refused with a readable message, not a crash. Tests:
   unknown-mode refusal, version-gate refusal.
 
 ---
 
+### T145 — The finish moment
+
+- **Origin:** audit #9 R16
+- **Covers:** A9-G7
+- **Effort:** S
+- **Library:** 008 Delight done right, 002 Spring physics
+- **Problem:** When a job ends, nothing marks the finish: a log line and a status-bar message, and the screen goes quiet.
+- **Fix:** A brief one-shot moment when a job completes: a gold glow on the job card plus a short summary line, under 300 ms, never looping, respecting the reduced-motion preset.
+- **Done:** A finished job shows the moment once, then rests.
+
+### T146 — Loading states, never a dead screen
+
+- **Origin:** audit #9 R17
+- **Covers:** A9-G8
+- **Effort:** S
+- **Library:** 011 Skeleton screens
+- **Problem:** The model list populates silently; with Ollama slow or down the user sees an empty combo and a note, with no "looking" state in between.
+- **Fix:** Skeleton rows in the model list while Ollama answers, paired with the real numbers when they arrive; the Ollama status refresh shows it is working.
+- **Done:** With Ollama slow, the picker shows skeleton rows, not an empty combo.
+
+### T147 — Reduced-motion and larger-text presets
+
+- **Origin:** audit #9 R18
+- **Covers:** A9-G9
+- **Effort:** S
+- **Library:** 015 Accessibility presets
+- **Problem:** No accessibility preset exists, and the redesign adds motion (R14, R16, R20) that needs an off switch.
+- **Fix:** One Settings section with two presets, in plain words: reduced motion and larger text. Reduced motion disables the dip, spring, morph, and finish moment but keeps every state change.
+- **Done:** With reduced motion on, no animation runs and everything still works.
+
+### T148 — Before/after preview before export
+
+- **Origin:** audit #9 R19
+- **Covers:** A9-G13
+- **Effort:** M
+- **Library:** 017 See it before you commit
+- **Extends:** T94 (surface the probe in the window), T96 (val loss in run summary and window).
+- **Problem:** Nothing shows what a fine-tune changed before the user commits to a GGUF export; the probe reports numbers in a dialog.
+- **Fix:** Before export, show a side-by-side from the probe: the base model's reply next to the fine-tuned model's reply to the same prompts, so the user sees what changed before committing.
+- **Done:** Export offers the preview; the user can export or go back.
+
+### T149 — The job picker becomes the job
+
+- **Origin:** audit #9 R20
+- **Covers:** A9-U2 (part)
+- **Effort:** S
+- **Library:** 009 Shape morphing
+- **Problem:** Picking a job and running it are two disconnected moments; the user picks in one place and the job appears in another.
+- **Fix:** The picked job tile morphs into the running-job card, under 400 ms, interruptible. The reduced-motion fallback is an instant swap.
+- **Done:** Picking a job visibly becomes the running card.
+
 ## P3 — polish, display, and scale
 
-### T130 — Checkpoint management: resume, delete, disk usage
+### T150 — Checkpoint management: resume, delete, disk usage
 
 - **Origin:** audit #2 T18 + audit #4 T22 (checkpoint part; merged — one fix); extended by the repo-audit verdict (R30)
 - **Covers:** A2-W15, A2-G3; A4-G3, A4-D21 (checkpoint part); R30
@@ -3666,14 +3906,15 @@ flag exposes the traceback the catch-all hides); T72 before T141
   optimizer.pt 65% of it; an LFM3 rank-8 checkpoint is ≈ 81 MB —
   the disk-usage display this task adds is the only thing that
   shows a user how fast checkpoints eat the disk.
-- **Fix:** Build the missing checkpoint actions in the Train panel: resume from a selected checkpoint, delete a checkpoint, disk usage in the list, and a detail view (step, loss, size, date). Add checkpoint pruning (R30): delete all but the newest N checkpoints (N chosen by the user, default keep-newest-3 or per Joshua), with the total size shown before and after. (Job progress and cancel for GGUF/probe jobs is the companion task T92 — the other half of A4-D21.)
+- **Fix:** Build the missing checkpoint actions in the Train panel: resume from a selected checkpoint, delete a checkpoint, disk usage in the list, and a detail view (step, loss, size, date). Add checkpoint pruning (R30): delete all but the newest N checkpoints (N chosen by the user, default keep-newest-3 or per Joshua), with the total size shown before and after. (Job progress and cancel for GGUF/probe jobs is the companion task T107 — the other half of A4-D21.)
 - **Done:** The Train panel lists checkpoints with step, loss, size, and date; selecting one offers resume and delete; disk usage is shown. Pruning keeps the newest N and shows the space freed. Tests: resume-from-checkpoint, delete, disk usage display, pruning keeps newest N.
 
-### T131 — Loss chart + run history
+### T151 — Loss chart + run history
 
 - **Origin:** repo-audit verdict (R29)
 - **Covers:** R29
 - **Effort:** M
+- **Note:** Extended by T20 (Audit #9 R6). The loss chart is elevated to P0 there; this task keeps the run-history half.
 - **Problem:** Training progress is a log of lines — there is no
   loss chart, and no history of past runs. The user cannot see
   whether the loss is falling smoothly or spiking, and cannot
@@ -3690,7 +3931,7 @@ flag exposes the traceback the catch-all hides); T72 before T141
   live run. Tests: chart renders from a fake log, history lists
   two runs.
 
-### T132 — "Loading base model" feedback: the window sits silent for minutes on a cold run
+### T152 — "Loading base model" feedback: the window sits silent for minutes on a cold run
 
 - **Origin:** audit #8 T28
 - **Covers:** A8-U6
@@ -3709,7 +3950,7 @@ flag exposes the traceback the catch-all hides); T72 before T141
   from the moment Start is pressed until the first step. Tests:
   loading event emitted, status text shown.
 
-### T133 — Size/time warning on the GGUF export button
+### T153 — Size/time warning on the GGUF export button
 
 - **Origin:** audit #8 T27
 - **Covers:** A8-U5
@@ -3718,21 +3959,22 @@ flag exposes the traceback the catch-all hides); T72 before T141
   quantizes — minutes of disk churn. The button offers no
   estimate up front and the job has no progress signal
   (`JobWorker` has log + finished only). The user commits to a
-  multi-GB, multi-minute job blind. Overlaps T70 (dry-run
-  estimate) and T92 (job progress); the export-specific
+  multi-GB, multi-minute job blind. Overlaps T85 (dry-run
+  estimate) and T107 (job progress); the export-specific
   half is the up-front warning on the button itself.
 - **Fix:** Show the estimate on (or beside) the export button
   before the user commits — merged size, output size, rough
-  time — reusing the dry-run estimator when T70 lands.
+  time — reusing the dry-run estimator when T85 lands.
 - **Done:** The export button shows what the export will cost
   (size + rough time) before it starts. Tests: estimate shown,
   matches the dry-run numbers.
 
-### T134 — An Advanced settings section
+### T154 — An Advanced settings section
 
 - **Origin:** audit #8 T29
 - **Covers:** A8-G5, A8-G6, A8-D18
 - **Effort:** M
+- **Status:** SUPERSEDED by T16 (Audit #9 R2) — the brief puts settings under the hood; do not build. Kept in the list, marked, so the coverage map still accounts for its findings.
 - **Problem:** Five of eleven training settings have no GUI or
   CLI surface (G5): `grad_accum`, `checkpoint_steps`,
   `val_fraction`, `warmup_steps`, and `seed` are GUI-invisible
@@ -3755,7 +3997,7 @@ flag exposes the traceback the catch-all hides); T72 before T141
   the Advanced block's ranges match the engine's validation.
   Tests: each setting settable + saved, ranges enforced.
 
-### T135 — Stable val sets via content-hash split
+### T155 — Stable val sets via content-hash split
 
 - **Origin:** audit #8 T24
 - **Covers:** A8-W18, A8-D15
@@ -3777,7 +4019,7 @@ flag exposes the traceback the catch-all hides); T72 before T141
   membership of existing rows; val loss is comparable across
   runs. Tests: growth from n=20 to n=30, val set stable.
 
-### T136 — Train every assistant turn, not just the last
+### T156 — Train every assistant turn, not just the last
 
 - **Origin:** audit #8 T25
 - **Covers:** A8-W19
@@ -3799,7 +4041,7 @@ flag exposes the traceback the catch-all hides); T72 before T141
   (or the validator warns that only the final turn trains).
   Tests: multi-turn masking, single-turn unchanged.
 
-### T137 — Accept the "tool" role in messages rows
+### T157 — Accept the "tool" role in messages rows
 
 - **Origin:** audit #8 T31
 - **Covers:** A8-G10
@@ -3814,13 +4056,13 @@ flag exposes the traceback the catch-all hides); T72 before T141
 - **Fix:** Accept `tool` as a role in `messages` rows, rendered
   as prompt (masked) content in the conversation — the model
   learns from the assistant turns around the tool results, not
-  from the results themselves. Pairs with T136 (multi-turn
+  from the results themselves. Pairs with T156 (multi-turn
   training): a tool trace is a multi-turn conversation.
 - **Done:** A messages row with a `tool` turn validates and
   trains (tool content masked, assistant turns trained). Tests:
   tool-role row validates, masking correct.
 
-### T138 — Dataset-size awareness: don't load the whole file into RAM
+### T158 — Dataset-size awareness: don't load the whole file into RAM
 
 - **Origin:** audit #8 T30
 - **Covers:** A8-G9
@@ -3840,7 +4082,7 @@ flag exposes the traceback the catch-all hides); T72 before T141
   not fit starts tokenizing. Tests: large-file validation
   memory, warning threshold.
 
-### T139 — Don't double-save / double-emit the final checkpoint
+### T159 — Don't double-save / double-emit the final checkpoint
 
 - **Origin:** audit #8 T26
 - **Covers:** A8-W20
@@ -3861,7 +4103,7 @@ flag exposes the traceback the catch-all hides); T72 before T141
   3 `checkpoint` events, one per step. Tests: event stream,
   dirs on disk.
 
-### T140 — Notes placement + settings tooltips
+### T160 — Notes placement + settings tooltips
 
 - **Origin:** audit #2 T16 + audit #4 T13 (settings-tooltips part; merged — one fix)
 - **Covers:** A2-U2, A2-U7; A4-U7, A4-D16 (settings-tooltips part)
@@ -3878,13 +4120,13 @@ flag exposes the traceback the catch-all hides); T72 before T141
   the default 1100x680 window (e.g. move it above the settings form,
   or give the project section its own visible notes area — decide in
   implementation, verified by screenshot). Add a tooltip to every
-  settings field explaining what it does and its sane range. (Coordinate with T38, which moves the Train panel above the fold — both tasks reshape the same detail panel, so the layout change should solve Notes and Train placement in one pass.)
+  settings field explaining what it does and its sane range. (Coordinate with T44, which moves the Train panel above the fold — both tasks reshape the same detail panel, so the layout change should solve Notes and Train placement in one pass.)
 - **Done:** A screenshot at 1100x680 shows the Notes editor without
   scrolling; every settings field has a tooltip naming its purpose
   and sane values. Tests: tooltip text present on each settings
   field.
 
-### T141 — GUI parity for the CLI-only options
+### T161 — GUI parity for the CLI-only options
 
 - **Origin:** audit #5 T17
 - **Covers:** A5-G6, A5-D16
@@ -3896,19 +4138,19 @@ flag exposes the traceback the catch-all hides); T72 before T141
   from a checkpoint — the window's Train panel has Start/Pause/
   Resume buttons but no step cap, and its GGUF/probe actions take
   no options. The parity gap runs both directions (the CLI side is
-  T72; this is the other way).
+  T87; this is the other way).
 - **Fix:** D16 — add the CLI-only options to the window where they
   fit: a step cap and a resume action in the Train panel, a quant
   choice and a checkpoint picker on the GGUF action — or, if the
   window deliberately stays simple, document that these are
   CLI-only so a window user knows where to go. (The checkpoint
-  picker rides T130's checkpoint actions.)
+  picker rides T150's checkpoint actions.)
 - **Done:** A window user can set a step cap, resume a run, pick a
   quant, and export from a checkpoint — or the window says plainly
   where to go (the CLI) for each. Tests: GUI tests for each option
   or the documented pointer.
 
-### T142 — Single-instance guard
+### T162 — Single-instance guard
 
 - **Origin:** audit #4 T24
 - **Covers:** A4-G7, A4-D23
@@ -3924,12 +4166,13 @@ flag exposes the traceback the catch-all hides); T72 before T141
   second writer on the home. Tests: second-launch detection
   (subprocess).
 
-### T143 — Health badge per profile row
+### T163 — Health badge per profile row
 
 - **Origin:** audit #1 T13 + audit #4 T23 (health part; merged — one fix)
 - **Covers:** A1-W11, A1-U6, A1-D1; A4-G6, A4-D22 (health part)
 - **Effort:** S
-- **Depends on:** T37 (cached model list)
+- **Note:** Extended by T78 (Audit #9 R11).
+- **Depends on:** T43 (cached model list)
 - **Problem:** Nothing shows whether a profile's tag is actually
   installed. A tag removed from Ollama (`ollama rm`) leaves a
   profile pointing at a missing model with no sign — it looks
@@ -3937,34 +4180,35 @@ flag exposes the traceback the catch-all hides); T72 before T141
   rows look equally healthy: a profile pointing at a missing model,
   a profile with no tag at all, and a good profile are visually
   identical (A1-U6). Audit #4 confirmed the window face (A4-G6): a profile pointing at a missing model, a profile with no tag, and a good profile are visually identical rows.
-- **Fix:** Using the cached model list from T37, show a health badge
+- **Fix:** Using the cached model list from T43, show a health badge
   on each row: installed ✓, missing ✗, Ollama down ?. A profile
   pointing at a removed model should look broken at a glance. A
   profile with no tag shows a distinct "no tag" state.
 - **Done:** With Ollama up: installed tags show ✓, a removed tag
   shows ✗, a tag-less profile shows "no tag". With Ollama down: all
-  rows show ?. Badges update on Refresh (T37). Tests: badge states
+  rows show ?. Badges update on Refresh (T43). Tests: badge states
   against a fake server, Ollama-down state.
 
-### T144 — Richer project rows
+### T164 — Richer project rows
 
 - **Origin:** audit #2 T15
 - **Covers:** A2-W14, A2-D14
 - **Effort:** S
-- **Depends on:** T47 (status must be real before rows show it)
+- **Note:** Extended by T78 (Audit #9 R11).
+- **Depends on:** T53 (status must be real before rows show it)
 - **Problem:** Rows show display name + metamorph mode only: no
   status, no method, no rank, no dataset. Two projects with the same
   display name and mode are indistinguishable in the list (their
   slugs differ but are never shown).
 - **Fix:** Show method + rank in each row (status in the row comes
-  from T47). When two projects in the same profile share a display
+  from T53). When two projects in the same profile share a display
   name, show the slug as a disambiguator.
-- **Done:** Rows show method and rank alongside the status from T47;
+- **Done:** Rows show method and rank alongside the status from T53;
   two same-named projects in one profile are distinguishable by
   their slugs. Tests: row text contains method/rank, slug shown on
   collision only.
 
-### T145 — Show what the profile points at (model metadata in the detail panel)
+### T165 — Show what the profile points at (model metadata in the detail panel)
 
 - **Origin:** audit #1 T14
 - **Covers:** A1-G3, A1-D9; A1-G5 (last-used); A1-W12 (project count, created/updated display)
@@ -3976,7 +4220,7 @@ flag exposes the traceback the catch-all hides); T72 before T141
   never displayed (A1-W12). There is no last-used date or activity of
   any kind (A1-G5).
 - **Fix:** Fetch model metadata from a cached `/api/show` (same cache
-  discipline as T37 — never on the UI thread, never per click) and
+  discipline as T43 — never on the UI thread, never per click) and
   show size, quant, context length, and capabilities in the detail
   panel. Show the project count in the list row and in the detail
   panel, the created/updated dates, and a last-used date — record
@@ -3991,7 +4235,7 @@ flag exposes the traceback the catch-all hides); T72 before T141
   blank or wrong. Tests: metadata display from fake `/api/show`,
   project count, last-used update, Ollama-down display.
 
-### T146 — Profile-level notes
+### T166 — Profile-level notes
 
 - **Origin:** audit #1 T15
 - **Covers:** A1-W12 (profile notes)
@@ -4002,13 +4246,13 @@ flag exposes the traceback the catch-all hides); T72 before T141
 - **Fix:** Add `notes.md` per profile (same pattern as project
   notes: `read_notes`/`write_notes` on the Store) with an editor in
   the detail panel and a Save path through the existing Save profile
-  flow. Include profile notes in profile export (T71). Profile notes
-  get the same backup treatment as project notes (T104).
+  flow. Include profile notes in profile export (T86). Profile notes
+  get the same backup treatment as project notes (T119).
 - **Done:** Write notes in the detail panel, save, reopen: the notes
   persist. Notes survive rename. Profile export includes them.
   Tests: notes round-trip, notes survive rename.
 
-### T147 — README wording + export/import UI polish
+### T167 — README wording + export/import UI polish
 
 - **Origin:** audit #3 T20
 - **Covers:** A3-W15, A3-U3, A3-U6
@@ -4026,8 +4270,8 @@ flag exposes the traceback the catch-all hides); T72 before T141
   never shows the package name. The user picks a parent folder;
   the `<project>-stella-export` name is revealed only in the
   success dialog. On collision the warning shows the full path
-  but offers no overwrite or rename (overwrite itself is T102).
-- **Fix:** Fix the README claim (weights arrive with T35; until
+  but offers no overwrite or rename (overwrite itself is T117).
+- **Fix:** Fix the README claim (weights arrive with T41; until
   then the README says recipe + checkpoints). Disable Export
   until a project is selected (Import needs no selection and stays
   enabled). Show the package name in the export dialog before the
@@ -4037,7 +4281,7 @@ flag exposes the traceback the catch-all hides); T72 before T141
   shows the package name before the folder is picked. Tests:
   button enabled-state, dialog shows the name.
 
-### T148 — Double-click does the obvious thing
+### T168 — Double-click does the obvious thing
 
 - **Origin:** audit #4 T25
 - **Covers:** A4-U9, A4-D24
@@ -4052,53 +4296,54 @@ flag exposes the traceback the catch-all hides); T72 before T141
   rename; double-clicking a checkpoint shows its detail. Tests:
   double-click handlers fire.
 
-### T149 — Menu bar (File/Edit/View/Help)
+### T169 — Menu bar (File/Edit/View/Help)
 
 - **Origin:** repo-audit verdict (R22, menu-bar part)
-- **Covers:** R22 (menu-bar part; shortcuts part → T112)
+- **Covers:** R22 (menu-bar part; shortcuts part → T127)
 - **Effort:** M
+- **Status:** SUPERSEDED by T19 (Audit #9 R5) — the real menu bar replaces the Menu button. Kept in the list, marked, so the coverage map still accounts for its findings.
 - **Problem:** The window has no menu bar — every action is a
   button, and there is no File/Edit/View/Help surface for the
   actions a desktop program is expected to expose (new
   profile/project, import/export, preferences, about).
-  (Keyboard shortcuts are T112's chrome pass; this task is the
+  (Keyboard shortcuts are T127's chrome pass; this task is the
   menu bar itself.)
 - **Fix:** Add a menu bar with the actions the window already has
   (File: New profile/project, Import, Export, Quit; Edit: Rename,
   Delete; View: refresh; Help: About Stella + the docs link),
-  wired to the same handlers as the buttons. Shortcuts from T112
+  wired to the same handlers as the buttons. Shortcuts from T127
   appear in the menus.
 - **Done:** The menu bar exposes the window's actions; each menu
   item does the same thing as its button; Help shows the version.
   Tests: menu actions fire the same handlers.
 
-### T150 — Settings-only export (share a recipe)
+### T170 — Settings-only export (share a recipe)
 
 - **Origin:** audit #2 T17 + audit #3 T17 (merged — one recipe export)
 - **Covers:** A2-G6; A3-G2
 - **Effort:** S
-- **Depends on:** T34 (package format defines the recipe kind)
+- **Depends on:** T40 (package format defines the recipe kind)
 - **Problem:** Export is the whole package; there is no way to
   share a recipe (dataset + settings) without weights and
   checkpoints. Audit #3 confirmed the gap (G2): whole package or
   nothing — no way to share a dataset + settings recipe without
   checkpoints.
 - **Fix:** Add a recipe export using the recipe package kind from
-  T34 (per audit #3's D1 format decision — versioned format,
+  T40 (per audit #3's D1 format decision — versioned format,
   named kinds, version check): a small package holding the dataset
   reference, settings, metamorph mode + notes, and project notes —
   no weights, no checkpoints. Importing a recipe creates a new
   project with those values; if the dataset path does not exist on
   the importing machine, warn at import (don't block — the dataset
   may live elsewhere). The format decision is settled, so this
-  task builds on T34 rather than waiting on the audit.
+  task builds on T40 rather than waiting on the audit.
 - **Done:** Export a recipe, import it into a fresh home: the
   project appears with settings, dataset ref, and metamorph mode
   intact, and no weights or checkpoints. A recipe pointing at a
   missing dataset warns at import. Tests: recipe round-trip,
   missing-dataset warning.
 
-### T151 — Single-file package option
+### T171 — Single-file package option
 
 - **Origin:** audit #3 T16; extended by the repo-audit verdict (R33)
 - **Covers:** A3-G4, A3-D13; R33
@@ -4114,7 +4359,7 @@ flag exposes the traceback the catch-all hides); T72 before T141
   identical result to a folder import. Tests: zip round-trip,
   folder import unchanged.
 
-### T152 — Machine-readable and quiet output: --json, --quiet, --verbose
+### T172 — Machine-readable and quiet output: --json, --quiet, --verbose
 
 - **Origin:** audit #5 T16 (G5/D15 part)
 - **Covers:** A5-G5, A5-D15
@@ -4130,33 +4375,33 @@ flag exposes the traceback the catch-all hides); T72 before T141
   commands (structured results for scripting), `--quiet` to
   silence per-step progress on long runs, `--verbose` to print the
   full traceback behind T5's catch-all. (The commands half of D15
-  — rename/delete/update/show/settings — is T72; the verify half
-  is T90.)
+  — rename/delete/update/show/settings — is T87; the verify half
+  is T105.)
 - **Done:** `--json` prints valid JSON for lists and probe
   results; `--quiet` suppresses progress lines; `--verbose` prints
   the traceback a clean error hid. Tests: JSON parses, quiet
   suppresses, verbose shows.
 
-### T153 — Adapter library for sharing bare adapters
+### T173 — Adapter library for sharing bare adapters
 
 - **Origin:** repo-audit verdict (R32)
 - **Covers:** R32
 - **Effort:** M
 - **Problem:** There is no way to share a bare adapter (weights
-  only, no project) — export is the whole project package (T35)
-  or a recipe with no weights (T150). A user who wants to hand
+  only, no project) — export is the whole project package (T41)
+  or a recipe with no weights (T170). A user who wants to hand
   someone just the fine-tune has no package for it.
 - **Fix:** An adapter export/import: a small package holding the
   adapter weights + a manifest (base, rank, dataset name,
   training summary) — importable into any project with the same
   base, or into a new project created around it. Builds on the
-  package format (T34) and the weights round-trip (T35).
+  package format (T40) and the weights round-trip (T41).
 - **Done:** Export a bare adapter, import it into a fresh home:
   the adapter lands with its manifest and can be merged (GGUF
   export) or probed. Tests: adapter round-trip, import into a
   project with the same base.
 
-### T154 — Per-role probe sets
+### T174 — Per-role probe sets
 
 - **Origin:** repo-audit verdict (R31)
 - **Covers:** R31
@@ -4168,14 +4413,14 @@ flag exposes the traceback the catch-all hides); T72 before T141
   needs the full refusal battery.
 - **Fix:** Probe sets per role (a JSON file per role in the tree,
   editable): the probe picks the set for the profile's role
-  (canonical roles from T101), falling back to the default 12 when
+  (canonical roles from T116), falling back to the default 12 when
   no set exists. The probe results record which set ran.
 - **Done:** Probing a driver-profile runs the driver set; probing
   a role with no set runs the default 12; probe_results.json names
   the set used. Tests: role-set selection, fallback, set
   recorded.
 
-### T155 — Show the mode in the Train panel
+### T175 — Show the mode in the Train panel
 
 - **Origin:** audit #7 T16
 - **Covers:** A7-U5, A7-D14
@@ -4192,7 +4437,7 @@ flag exposes the traceback the catch-all hides); T72 before T141
 - **Done:** The Train panel names the mode and its current
   (non-)effect during a run. Tests: panel shows the mode line.
 
-### T156 — CLI help strings for `--metamorph`
+### T176 — CLI help strings for `--metamorph`
 
 - **Origin:** audit #7 T17
 - **Covers:** A7-U6, A7-D15
@@ -4200,15 +4445,15 @@ flag exposes the traceback the catch-all hides); T72 before T141
 - **Problem:** `cli.py:248-250` declares the flag with `choices`
   but no `help`, so `stella create-project --help` shows the three
   words and no meaning (noted in A5's design list, line 687). With
-  the tooltip (T65) as the only explanation anywhere, the CLI user
+  the tooltip (T71) as the only explanation anywhere, the CLI user
   gets even less.
 - **Fix:** D15 (help half) — real `help=` text on `--metamorph`
   (what the modes mean, with the honest "label for now" note). The
-  update half of D15 rides T72.
+  update half of D15 rides T87.
 - **Done:** `stella create-project --help` explains the modes
   honestly. Tests: help output contains the mode meanings.
 
-### T157 — Validate the notes type at both write points
+### T177 — Validate the notes type at both write points
 
 - **Origin:** audit #7 T15
 - **Covers:** A7-W11, A7-D8, A7-D11
@@ -4219,15 +4464,15 @@ flag exposes the traceback the catch-all hides); T72 before T141
   (probed, audit #7 P9). Nothing crashes today — the GUI never
   reads notes, and JSON round-trips an int fine — but the
   manifest's contract says notes is text, and a future notes UI
-  (T99) reading an int into a text field will crash or render
+  (T114) reading an int into a text field will crash or render
   garbage.
 - **Fix:** One `isinstance` check at both write points (D8, the
   shared reader's write-side half); tests ride the D11 suite
-  (T126).
+  (T141).
 - **Done:** Non-string notes are rejected with a `StellaError` at
   create and update. Tests: int notes rejected at both points.
 
-### T158 — Size/disk awareness on export
+### T178 — Size/disk awareness on export
 
 - **Origin:** audit #3 T19
 - **Covers:** A3-W14
@@ -4243,38 +4488,38 @@ flag exposes the traceback the catch-all hides); T72 before T141
   success dialog and the CLI output); check free disk space
   against the estimated package size before copying and
   refuse/warn when it will not fit. (Progress display itself is
-  T91.)
+  T106.)
 - **Done:** Export reports the package size; exporting when disk
   space is short warns before copying. Tests: size reported,
   low-disk warning (fake a small filesystem or a huge estimate).
 
-### T159 — Provenance
+### T179 — Provenance
 
 - **Origin:** audit #3 T18
 - **Covers:** A3-G6
 - **Effort:** S
-- **Depends on:** T103 (exported_at stamp)
+- **Depends on:** T118 (exported_at stamp)
 - **Problem:** No `exported_at`, no source machine, no record of
   what was exported where or imported from where. A package found
   on disk cannot say when it was made or from what.
-- **Fix:** Build on T103's `exported_at` stamp: record the source
+- **Fix:** Build on T118's `exported_at` stamp: record the source
   machine (hostname) in the manifest, and keep a small
   import/export history (a log in the home: what was exported
   where, what was imported from where, when). Show provenance in
-  the import preview (T52) when present.
+  the import preview (T58) when present.
 - **Done:** An exported package names its source machine and
   export time; the home keeps an import/export log; the preview
   shows provenance. Tests: provenance fields present, history
   logged.
 
-### T160 — Search, filter, and sort for the profile list
+### T180 — Search, filter, and sort for the profile list
 
 - **Origin:** audit #1 T16
 - **Covers:** A1-W12 (search/filter/sort); A1-G6 (search/sort part)
 - **Effort:** M
 - **Problem:** No search, filter, or sort in the list. Fine at 11
   profiles, thin at 30+. No multi-select or bulk operations either
-  (A1-G6 — bulk work is T161).
+  (A1-G6 — bulk work is T181).
 - **Fix:** Add a filter box above the profile list (matches display
   name, slug, role, and tag), a role filter, and sort options
   (name, role, recently used, project count). Filtering must keep
@@ -4285,7 +4530,7 @@ flag exposes the traceback the catch-all hides); T72 before T141
   Tests: filter by text, filter by role, each sort order, selection
   preserved.
 
-### T161 — Bulk operations (multi-select)
+### T181 — Bulk operations (multi-select)
 
 - **Origin:** audit #1 T17
 - **Covers:** A1-G6 (bulk part)
@@ -4293,8 +4538,8 @@ flag exposes the traceback the catch-all hides); T72 before T141
 - **Problem:** No multi-select, no bulk operations — acceptable now,
   a wall later. Every profile action is one at a time.
 - **Fix:** Multi-select in the profile list (Ctrl/Shift-click) with
-  bulk actions: delete (to trash, T17 — one confirm naming all
-  selected), export (T71, one package per profile or a bundle), and
+  bulk actions: delete (to trash, T23 — one confirm naming all
+  selected), export (T86, one package per profile or a bundle), and
   role change. Single-selection behavior must not change.
 - **Done:** Select three profiles, bulk-delete: all three land in
   trash with one confirm naming them. Bulk-export produces one
@@ -4303,15 +4548,15 @@ flag exposes the traceback the catch-all hides); T72 before T141
   exactly as before. Tests: multi-select delete/export/role change,
   single-selection unchanged.
 
-### T162 — Per-profile environment management (full A1-G1)
+### T182 — Per-profile environment management (full A1-G1)
 
 - **Origin:** audit #1 T18
 - **Covers:** A1-G1 (full)
 - **Effort:** L
-- **Depends on:** T100 (config/deps reachable)
+- **Depends on:** T115 (config/deps reachable)
 - **Problem:** Profiles were specced as a clean environment per base
   (weights, config, processor/tokenizer, dependencies). Config/deps
-  are dead fields (A1-W7 — first step is T100), there is no per-profile
+  are dead fields (A1-W7 — first step is T115), there is no per-profile
   venv or dependency install, and no record of which Python packages
   a profile's training needs.
 - **Fix:** Design, then build — scope needs Joshua's direction
@@ -4322,12 +4567,12 @@ flag exposes the traceback the catch-all hides); T72 before T141
   create/activate/remove per profile and a disk-usage readout (venv
   sizes add up fast on a 1 TB HDD shared with Ollama models).
 - **Done:** Per the agreed scope: a profile's dependency record is
-  visible and editable (via T100), and the training installer
+  visible and editable (via T115), and the training installer
   consumes it. If venvs are in scope: creating a profile's
   environment, using it for a training run, and removing it all work
   from the GUI, with disk usage shown. Tests per the agreed scope.
 
-### T163 — Per-mode training defaults, after the mode definitions
+### T183 — Per-mode training defaults, after the mode definitions
 
 - **Origin:** audit #7 T18
 - **Covers:** A7-G6, A7-D13
@@ -4336,14 +4581,14 @@ flag exposes the traceback the catch-all hides); T72 before T141
   (`model.py:44-57`). A `compress` project might sensibly default
   to a lower rank; a `morph` project to variant-friendly settings.
   Today the mode cannot even express a preference.
-- **Fix:** D13 — once T64 defines the modes, let `compress` suggest
+- **Fix:** D13 — once T70 defines the modes, let `compress` suggest
   a lower rank and `morph` suggest variant-friendly settings —
-  suggestions in the New Project form (T98), not silent overrides.
+  suggestions in the New Project form (T113), not silent overrides.
 - **Done:** The New Project form suggests per-mode defaults;
   accepting or overriding both work. Tests: defaults suggested per
   mode.
 
-### T164 — Replace the pull-weights one-liner
+### T184 — Replace the pull-weights one-liner
 
 - **Origin:** audit #6 T24
 - **Covers:** A6-U9, A6-D23
@@ -4361,7 +4606,7 @@ flag exposes the traceback the catch-all hides); T72 before T141
   none — the first run downloads); no nested-quote one-liner is
   printed. Tests: installer output contains no nested-quote line.
 
-### T165 — Desktop-file polish
+### T185 — Desktop-file polish
 
 - **Origin:** audit #6 T23
 - **Covers:** A6-U7, A6-D19
@@ -4375,7 +4620,7 @@ flag exposes the traceback the catch-all hides); T72 before T141
   desktop-file-validate is clean. Tests: fields present in the
   generated file.
 
-### T166 — `--help` for the scripts
+### T186 — `--help` for the scripts
 
 - **Origin:** audit #6 T25
 - **Covers:** A6-G7, A6-D25
@@ -4389,7 +4634,7 @@ flag exposes the traceback the catch-all hides); T72 before T141
   without installing or running anything. Tests: `--help` output
   + exit code per script.
 
-### T167 — Small CLI polish: echo normalized names, friendly no-command hint
+### T187 — Small CLI polish: echo normalized names, friendly no-command hint
 
 - **Origin:** audit #5 T18
 - **Covers:** A5-U3, A5-U9, A5-D18
@@ -4412,7 +4657,7 @@ flag exposes the traceback the catch-all hides); T72 before T141
   name; bare `stella` prints the command list and exits 0. Tests:
   normalization echo, no-command output.
 
-### T168 — The token-level codec: a named later item
+### T188 — The token-level codec: a named later item
 
 - **Origin:** audit #7 T19
 - **Covers:** A7-D16
@@ -4422,440 +4667,537 @@ flag exposes the traceback the catch-all hides); T72 before T141
   the deep reading of the codec and the hardest part. It has no code
   behind it anywhere, and no design behind it either.
 - **Fix:** D16 — name it as a later item with its own design pass;
-  do not let T66's easy wins pretend it is done. After T64 (the
-  definitions) and T66 (the easy wins prove the wiring).
+  do not let T72's easy wins pretend it is done. After T70 (the
+  definitions) and T72 (the easy wins prove the wiring).
 - **Done:** A design doc for the token-level codec exists (or the
   codec itself, if the design pass is done in this task — decide at
-  build time); T66's wins do not claim it. Tests: per the design
+  build time); T72's wins do not claim it. Tests: per the design
   pass.
 
 ---
 
 ---
 
-## Coverage map (unified — audits #1–#8 + the repo-audit verdict)
+### T189 — Remove the dead "full" method
 
-Every finding ID from audits #1–#8 and the repo-audit
+- **Origin:** audit #9 R21
+- **Covers:** A9-D1
+- **Effort:** S
+- **Library:** none
+- **Supersedes:** T55 (remove/disable dead "full" method: remove it outright).
+- **Problem:** The Method combo lists `lora` and `full` with `full` disabled: a visible option the user can never use.
+- **Fix:** Drop `full` from the combo. (R2 deletes the settings form anyway; this is the cleanup if the form outlives R2.)
+- **Done:** No `full` anywhere in the UI.
+
+### T190 — One tagline everywhere
+
+- **Origin:** audit #9 R22
+- **Covers:** A9-D6
+- **Effort:** S
+- **Library:** none
+- **Problem:** The window title and the header carry two different taglines.
+- **Fix:** Window title and header use the same line.
+- **Done:** One tagline in both places.
+
+### T191 — Status bar shows the session once, in display names
+
+- **Origin:** audit #9 R23
+- **Covers:** A9-D4
+- **Effort:** S
+- **Library:** none
+- **Problem:** The session title and the status bar state the same fact twice, in two different namings (display name vs slug).
+- **Fix:** Drop the slug repeat from the status bar; the session title carries it.
+- **Done:** The status bar no longer repeats the title.
+
+### T192 — Tooltips where they earn their place
+
+- **Origin:** audit #9 R24
+- **Covers:** A9-D5
+- **Effort:** S
+- **Library:** none
+- **Problem:** "Dream first" is the only tooltip in the app; nothing else explains itself on hover.
+- **Fix:** Tooltips on tree rows (full text) and on any button whose label needs one more word.
+- **Done:** Hovering a truncated row shows the full text.
+
+### T193 — How to Use gets search and a link from the empty state
+
+- **Origin:** audit #9 R25
+- **Covers:** A9-D7
+- **Effort:** S
+- **Library:** none
+- **Problem:** Thirteen topics in a plain list with no search, and the empty main window never points at the guide.
+- **Fix:** A search box over the topics; the empty state links to Getting started.
+- **Done:** Searching finds topics; the empty screen offers the guide.
+
+### T194 — Chat window breathing room
+
+- **Origin:** audit #9 R26
+- **Covers:** A9-D8
+- **Effort:** S
+- **Library:** none
+- **Problem:** The Chat window's two-line help text is squeezed at the bottom edge of the fixed 700x520 window.
+- **Fix:** Resize the window or shorten the help line so the text has room.
+- **Done:** The help line has room at the window's size.
+
+## Coverage map (unified — audits #1–#9 + the repo-audit verdict)
+
+Every finding ID from audits #1–#9 and the repo-audit
 verdict, and the merged task(s) covering it. Nothing dropped. A1- =
 audit #1 (Profiles), A2- = audit #2 (Projects), A3- = audit #3
 (Export/Import), A4- = audit #4 (GUI), A5- = audit #5 (CLI), A6- =
 audit #6 (Installer + icon), A7- = audit #7 (MetaMorphAi hooks),
-A8- = audit #8 (Training engine), R- = repo-audit verdict.
+A8- = audit #8 (Training engine), A9- = audit #9 (UI redesign),
+R- = repo-audit verdict.
 
 | Finding | Task(s) | Notes |
 |---|---|---|
 | A1-W1 — corrupt manifest vanishes silently | T3 | Damaged row + Repair + tests (profiles side) |
 | A1-W2 — any string accepted as a tag | T12 | Soft validation, warn don't block |
-| A1-W3 — tag/base_ref drift | T48 | One source of truth + sync rule |
-| A1-W4 — every click re-fetches Ollama | T37 | Cache + off-thread fetch |
-| A1-W5 — delete unrecoverable | T17 | Trash + export-first offer (profiles side) |
-| A1-W6 — role is two controls, no canonical list | T101, T107 | T101 canonical list + seat warning; T107 single role combo |
-| A1-W7 — config/deps dead fields | T100 | JSON editor; first step of A1-G1 |
-| A1-W8 — processor undefined | T113 | Define it, label it, validate it |
-| A1-W9 — no CLI for rename/delete/update | T72 | Four new profile CLI commands |
-| A1-W10 — no clone profile | T106 | Clone action |
-| A1-W11 — no health indicator | T143 | Health badges (needs T37) |
-| A1-W12 — small missing pieces | T12, T145, T146, T160 | T12 duplicate-tag note; T145 project count + created/updated; T146 notes; T160 search/filter/sort |
-| A1-U1 — long tags truncate, no tooltip | T107 | Tooltips on rows |
+| A1-W3 — tag/base_ref drift | T54 | One source of truth + sync rule |
+| A1-W4 — every click re-fetches Ollama | T43 | Cache + off-thread fetch |
+| A1-W5 — delete unrecoverable | T23 | Trash + export-first offer (profiles side) |
+| A1-W6 — role is two controls, no canonical list | T116, T122 | T116 canonical list + seat warning; T122 single role combo |
+| A1-W7 — config/deps dead fields | T115 | JSON editor; first step of A1-G1 |
+| A1-W8 — processor undefined | T128 | Define it, label it, validate it |
+| A1-W9 — no CLI for rename/delete/update | T87 | Four new profile CLI commands |
+| A1-W10 — no clone profile | T121 | Clone action |
+| A1-W11 — no health indicator | T163 | Health badges (needs T43) |
+| A1-W12 — small missing pieces | T12, T165, T166, T180 | T12 duplicate-tag note; T165 project count + created/updated; T166 notes; T180 search/filter/sort |
+| A1-U1 — long tags truncate, no tooltip | T122 | Tooltips on rows |
 | A1-U2 — Enter does nothing in dialog | T11 | Default button (moved to the P0 dialog task) |
 | A1-U3 — dialog is a QWidget, not QDialog | T11 | Real QDialog, centered (audit #4 corrected the description: not a separate window at all) |
-| A1-U4 — tag combo re-fetch flicker | T37 | Cache removes the re-fetch |
-| A1-U5 — role combo vs text field | T107 | Role combo in detail panel too |
-| A1-U6 — all rows look equally healthy | T143 | Health badges |
-| A1-G1 — no environment management | T100, T162 | T100 first step (reachable fields); T162 full build |
-| A1-G2 — no seat mapping | T101 | Canonical roles + governing-seat warning |
-| A1-G3 — no model metadata | T145 | Cached /api/show display |
-| A1-G4 — profile cannot be exported alone | T71 | Profile export (format settled by audit #3, T34) |
-| A1-G5 — no profile history | T145 | Last-used date |
-| A1-G6 — no bulk operations | T160, T161 | T160 search/sort; T161 multi-select bulk |
-| A1-D1 — health badge per row | T143 | |
+| A1-U4 — tag combo re-fetch flicker | T43 | Cache removes the re-fetch |
+| A1-U5 — role combo vs text field | T122 | Role combo in detail panel too |
+| A1-U6 — all rows look equally healthy | T163 | Health badges |
+| A1-G1 — no environment management | T115, T182 | T115 first step (reachable fields); T182 full build |
+| A1-G2 — no seat mapping | T116 | Canonical roles + governing-seat warning |
+| A1-G3 — no model metadata | T165 | Cached /api/show display |
+| A1-G4 — profile cannot be exported alone | T86 | Profile export (format settled by audit #3, T40) |
+| A1-G5 — no profile history | T165 | Last-used date |
+| A1-G6 — no bulk operations | T180, T181 | T180 search/sort; T181 multi-select bulk |
+| A1-D1 — health badge per row | T163 | |
 | A1-D2 — soft tag validation | T12 | |
-| A1-D3 — one source of truth for base | T48 | |
+| A1-D3 — one source of truth for base | T54 | |
 | A1-D4 — never silently vanish | T3 | |
-| A1-D5 — cache model list, off UI thread | T37 | |
-| A1-D6 — trash, not delete | T17 | |
-| A1-D7 — clone profile | T106 | |
-| A1-D8 — canonical roles, rename plan | T101 | |
-| A1-D9 — show what the profile points at | T145 | |
-| A1-D10 — small UI fixes | T11, T107 | T11 dialog part; T107 tooltip/role part |
-| A1-D11 — CLI parity | T72 | |
-| A1-D12 — config/deps reachable | T100 | |
+| A1-D5 — cache model list, off UI thread | T43 | |
+| A1-D6 — trash, not delete | T23 | |
+| A1-D7 — clone profile | T121 | |
+| A1-D8 — canonical roles, rename plan | T116 | |
+| A1-D9 — show what the profile points at | T165 | |
+| A1-D10 — small UI fixes | T11, T122 | T11 dialog part; T122 tooltip/role part |
+| A1-D11 — CLI parity | T87 | |
+| A1-D12 — config/deps reachable | T115 | |
 | A2-W1 — unsaved edits discarded on switch | T2 | Dirty tracking / auto-save, both panels |
 | A2-W2 — zero settings validation in the model | T6 | Ranges + types + unknown-key rejection |
 | A2-W3 — inf/nan learning rates write invalid JSON | T7 | Numeric input + write-layer guard |
 | A2-W4 — corrupt project manifest vanishes silently | T3 | Damaged row + Repair + tests (projects side) |
-| A2-W5 — status is a dead letter | T47 | Lifecycle enum + UI |
-| A2-W6 — dataset ref unvalidated text | T39 | Picker + existence + format checks |
-| A2-W7 — "full" offered with no warning | T6, T49 | T6 method enum; T49 warning badge |
-| A2-W8 — delete unrecoverable | T17 | Trash + export-first offer (projects side) |
-| A2-W9 — no sane-range guidance on the extremes | T69 | RAM/time estimate at configure time |
-| A2-W10 — three notes, one visible | T99 | Merge into one surface |
-| A2-W11 — no CLI parity | T72 | Four new project CLI commands |
-| A2-W12 — New Project is name-only | T98 | Real New Project form |
-| A2-W13 — no clone / duplicate project | T97 | Clone action + templates |
-| A2-W14 — project list shows almost nothing | T47, T144 | T47 status in row; T144 method/rank/slug |
-| A2-W15 — checkpoints are a bare folder | T130 | Item 3 follow-up |
+| A2-W5 — status is a dead letter | T53 | Lifecycle enum + UI |
+| A2-W6 — dataset ref unvalidated text | T45 | Picker + existence + format checks |
+| A2-W7 — "full" offered with no warning | T6, T55 | T6 method enum; T55 warning badge |
+| A2-W8 — delete unrecoverable | T23 | Trash + export-first offer (projects side) |
+| A2-W9 — no sane-range guidance on the extremes | T84 | RAM/time estimate at configure time |
+| A2-W10 — three notes, one visible | T114 | Merge into one surface |
+| A2-W11 — no CLI parity | T87 | Four new project CLI commands |
+| A2-W12 — New Project is name-only | T113 | Real New Project form |
+| A2-W13 — no clone / duplicate project | T112 | Clone action + templates |
+| A2-W14 — project list shows almost nothing | T53, T164 | T53 status in row; T164 method/rank/slug |
+| A2-W15 — checkpoints are a bare folder | T150 | Item 3 follow-up |
 | A2-U1 — no dirty indicator, no save warning | T2 | Dirty tracking |
-| A2-U2 — Notes sits below the fold | T140 | Reposition Notes |
+| A2-U2 — Notes sits below the fold | T160 | Reposition Notes |
 | A2-U3 — learning rate bare text, no range hint | T7 | Numeric input + hint |
-| A2-U4 — no status shown anywhere | T47 | Status in list + detail |
-| A2-U5 — dataset is a bare text field | T39 | File picker |
-| A2-U6 — "full" offered with no warning | T49 | Warning badge |
-| A2-U7 — no tooltips on the settings fields | T140 | Tooltip per field |
-| A2-G1 — no training lifecycle | T47 | Lifecycle enum + transitions |
-| A2-G2 — no dataset management | T39 | Picker + validation + preview |
-| A2-G3 — no checkpoint management | T130 | Item 3 follow-up |
-| A2-G4 — no cost estimate | T69 | RAM/time estimate |
-| A2-G5 — no project templates or presets | T97 | Templates, LFM3 preset first |
-| A2-G6 — no settings-only export | T150 | Recipe export |
-| A2-G7 — no notes history | T104 | Rotating notes backup |
+| A2-U4 — no status shown anywhere | T53 | Status in list + detail |
+| A2-U5 — dataset is a bare text field | T45 | File picker |
+| A2-U6 — "full" offered with no warning | T55 | Warning badge |
+| A2-U7 — no tooltips on the settings fields | T160 | Tooltip per field |
+| A2-G1 — no training lifecycle | T53 | Lifecycle enum + transitions |
+| A2-G2 — no dataset management | T45 | Picker + validation + preview |
+| A2-G3 — no checkpoint management | T150 | Item 3 follow-up |
+| A2-G4 — no cost estimate | T84 | RAM/time estimate |
+| A2-G5 — no project templates or presets | T112 | Templates, LFM3 preset first |
+| A2-G6 — no settings-only export | T170 | Recipe export |
+| A2-G7 — no notes history | T119 | Rotating notes backup |
 | A2-D1 — dirty tracking, or auto-save on switch | T2 | |
 | A2-D2 — validate settings in the model | T6 | |
 | A2-D3 — learning rate as a real numeric input | T7 | |
 | A2-D4 — damaged-row for corrupt manifests | T3 | |
-| A2-D5 — a real status lifecycle, with UI | T47 | |
-| A2-D6 — dataset picker + validation | T39 | |
-| A2-D7 — method guidance | T49 | |
-| A2-D8 — RAM/time estimate in the detail panel | T69 | |
-| A2-D9 — clone project, and project templates | T97 | |
-| A2-D10 — trash-on-delete | T17 | |
-| A2-D11 — notes backup | T104 | |
-| A2-D12 — merge the three notes into one surface | T99 | |
-| A2-D13 — CLI parity | T72 | |
-| A2-D14 — richer project rows | T144 | |
+| A2-D5 — a real status lifecycle, with UI | T53 | |
+| A2-D6 — dataset picker + validation | T45 | |
+| A2-D7 — method guidance | T55 | |
+| A2-D8 — RAM/time estimate in the detail panel | T84 | |
+| A2-D9 — clone project, and project templates | T112 | |
+| A2-D10 — trash-on-delete | T23 | |
+| A2-D11 — notes backup | T119 | |
+| A2-D12 — merge the three notes into one surface | T114 | |
+| A2-D13 — CLI parity | T87 | |
+| A2-D14 — richer project rows | T164 | |
 | A3-W1 — import not atomic, orphan profile | T1 | Atomic import / rollback |
 | A3-W2 — manifest field types never validated | T1 | Strict schema validation |
-| A3-W3 — config.json required but never read | T54 | One settings source of truth |
-| A3-W4 — profile block silently discarded | T51 | Merge, don't discard |
-| A3-W5 — stella_version written but never checked | T34 | Versioned format + version check |
-| A3-W6 — weights/ never imported | T34, T35 | T34 format side (first-class member); T35 copy side |
-| A3-W7 — no profile export | T71 | Profile export (merged with A1-G4) |
-| A3-W8 — dataset never copied, absolute refs break | T53 | Dataset in the package decision |
-| A3-W9 — no integrity checks | T89 | Checksums + sizes |
-| A3-W10 — timestamps lost | T103 | Preserve created/updated + exported_at |
-| A3-W11 — no overwrite/merge/rename on collision | T102 | Collision options |
-| A3-W12 — import never checks the base exists | T55 | Base-health check on import |
+| A3-W3 — config.json required but never read | T60 | One settings source of truth |
+| A3-W4 — profile block silently discarded | T57 | Merge, don't discard |
+| A3-W5 — stella_version written but never checked | T40 | Versioned format + version check |
+| A3-W6 — weights/ never imported | T40, T41 | T40 format side (first-class member); T41 copy side |
+| A3-W7 — no profile export | T86 | Profile export (merged with A1-G4) |
+| A3-W8 — dataset never copied, absolute refs break | T59 | Dataset in the package decision |
+| A3-W9 — no integrity checks | T104 | Checksums + sizes |
+| A3-W10 — timestamps lost | T118 | Preserve created/updated + exported_at |
+| A3-W11 — no overwrite/merge/rename on collision | T117 | Collision options |
+| A3-W12 — import never checks the base exists | T61 | Base-health check on import |
 | A3-W13 — import result names not normalized | T1 | Normalize slug once, at import start |
-| A3-W14 — no size/disk awareness | T158 | Size report + disk check |
-| A3-W15 — top README overclaims the export | T147 | README wording |
-| A3-U1 — import success message overwritten | T44 | Confirmation survives the refresh |
-| A3-U2 — no import preview or confirmation | T52 | Preview dialog |
-| A3-U3 — export enabled with nothing to export | T147 | Disable until a project is selected |
-| A3-U4 — no progress, no cancel | T91 | Background thread + progress + cancel |
-| A3-U5 — failed import leaves GUI stale | T91 | Refresh on failure too |
-| A3-U6 — export dialog never shows package name | T147 | Show the name before the folder pick |
-| A3-U7 — no warning when profile already exists | T51, T52 | T51 merge choice; T52 preview warning |
-| A3-G1 — no package format versioning policy | T34 | Versioned format |
-| A3-G2 — no settings-only / recipe export | T150 | Recipe export (merged with A2-G6) |
-| A3-G3 — no profile-level package kind | T34, T71 | T34 defines the kind; T71 builds it |
-| A3-G4 — no single-file package | T151 | .stella zip |
-| A3-G5 — no verify-only path | T90 | Verify command |
-| A3-G6 — no provenance or history | T159 | Source machine + history (builds on T103) |
-| A3-G7 — no dataset bundling option | T53 | Copy-in option + locate repair |
-| A3-D1 — settle the package format | T34 |  |
+| A3-W14 — no size/disk awareness | T178 | Size report + disk check |
+| A3-W15 — top README overclaims the export | T167 | README wording |
+| A3-U1 — import success message overwritten | T50 | Confirmation survives the refresh |
+| A3-U2 — no import preview or confirmation | T58 | Preview dialog |
+| A3-U3 — export enabled with nothing to export | T167 | Disable until a project is selected |
+| A3-U4 — no progress, no cancel | T106 | Background thread + progress + cancel |
+| A3-U5 — failed import leaves GUI stale | T106 | Refresh on failure too |
+| A3-U6 — export dialog never shows package name | T167 | Show the name before the folder pick |
+| A3-U7 — no warning when profile already exists | T57, T58 | T57 merge choice; T58 preview warning |
+| A3-G1 — no package format versioning policy | T40 | Versioned format |
+| A3-G2 — no settings-only / recipe export | T170 | Recipe export (merged with A2-G6) |
+| A3-G3 — no profile-level package kind | T40, T86 | T40 defines the kind; T86 builds it |
+| A3-G4 — no single-file package | T171 | .stella zip |
+| A3-G5 — no verify-only path | T105 | Verify command |
+| A3-G6 — no provenance or history | T179 | Source machine + history (builds on T118) |
+| A3-G7 — no dataset bundling option | T59 | Copy-in option + locate repair |
+| A3-D1 — settle the package format | T40 |  |
 | A3-D2 — validate the manifest schema strictly | T1 |  |
 | A3-D3 — make import atomic | T1 |  |
-| A3-D4 — merge, don't discard, the profile block | T51 |  |
-| A3-D5 — round-trip weights/ | T35 |  |
-| A3-D6 — one source of truth for settings | T54 |  |
-| A3-D7 — make the dataset part of the package decision | T53 |  |
-| A3-D8 — checksums + sizes in the manifest | T89 |  |
-| A3-D9 — collision options | T102 |  |
-| A3-D10 — import preview dialog | T52 |  |
-| A3-D11 — preserve timestamps | T103 |  |
-| A3-D12 — a verify command | T90 |  |
-| A3-D13 — a single-file package option | T151 |  |
-| A3-D14 — keep the import confirmation visible | T44 |  |
-| A3-D15 — base-health check on import | T55 |  |
+| A3-D4 — merge, don't discard, the profile block | T57 |  |
+| A3-D5 — round-trip weights/ | T41 |  |
+| A3-D6 — one source of truth for settings | T60 |  |
+| A3-D7 — make the dataset part of the package decision | T59 |  |
+| A3-D8 — checksums + sizes in the manifest | T104 |  |
+| A3-D9 — collision options | T117 |  |
+| A3-D10 — import preview dialog | T58 |  |
+| A3-D11 — preserve timestamps | T118 |  |
+| A3-D12 — a verify command | T105 |  |
+| A3-D13 — a single-file package option | T171 |  |
+| A3-D14 — keep the import confirmation visible | T50 |  |
+| A3-D15 — base-health check on import | T61 |  |
 | A4-W1 — New Profile "dialog" is not a dialog at all | T11 | Real QDialog, P0; corrects A1-U3 |
 | A4-W2 — Start training ignores a failed save | T8 | Gate Start on save success |
 | A4-W3 — training log wiped when a run finishes | T13 | Keep the live log |
 | A4-W4 — Enter in the delete confirm deletes | T9 | Delete defaults to No |
 | A4-W5 — unsaved edits discarded on switch | T2 | Dirty tracking; second trigger: completion refresh |
-| A4-W6 — bad settings abort the detail fill mid-way | T15 | Defensive fill, fall back to defaults |
-| A4-W7 — every profile click re-fetches Ollama | T37 | Cache + off-thread fetch (re-verified) |
+| A4-W6 — bad settings abort the detail fill mid-way | T21 | Defensive fill, fall back to defaults |
+| A4-W7 — every profile click re-fetches Ollama | T43 | Cache + off-thread fetch (re-verified) |
 | A4-W8 — bad import crashes silently in the window | T1 | Window face: catch + refresh on failure |
-| A4-W9 — no concurrency guards on jobs | T23 | One job at a time |
-| A4-W10 — closing mid-job destroys the running thread | T30 | Close waits for all workers, no freeze |
-| A4-W11 — progress and loss are stale per project | T41 | Reset per project |
-| A4-W12 — switching projects mid-run mixes the panels | T41 | Pin the panel to the running project |
-| A4-W13 — settings editable and saveable during a run | T40 | Lock the settings during a run |
-| A4-W14 — panel shows settings with no project selected | T108 | Clear the whole panel |
-| A4-W15 — requested splitter sizes not honored | T111 | Honest minimums |
-| A4-W16 — both list panes can be dragged away | T111 | Non-collapsible panes |
-| A4-W17 — no per-profile project memory | T110 | Remember the project per profile |
-| A4-U1 — long rows truncate with no way to read them | T107 | Row tooltips |
-| A4-U2 — Notes and Train panel below the fold | T38 | Train above the fold |
-| A4-U3 — confirmations overwritten before they can be read | T44 | Status discipline; import + training-done |
-| A4-U4 — buttons enabled with nothing to act on | T109 | Buttons follow the selection |
-| A4-U5 — empty panes give no guidance | T109 | Empty-state hints |
-| A4-U6 — no window icon | T112 | Window chrome pass |
-| A4-U7 — one tooltip in the entire window | T140 | Settings tooltips |
-| A4-U8 — missing-deps hint goes where the user cannot see it | T43 | Visible deps hint |
-| A4-U9 — no double-click anywhere | T148 | Double-click actions |
-| A4-G1 — no geometry or state persistence | T112 | QSettings persistence |
-| A4-G2 — no keyboard shortcuts | T112 | Ctrl+S / Ctrl+N |
-| A4-G3 — checkpoint list is display-only | T130 | Checkpoint actions (v0.2 verified) |
-| A4-G4 — no progress or cancel for GGUF/probe jobs | T92 | Job progress + stop |
-| A4-G5 — no status display anywhere | T47 | Status in row + detail (window face) |
-| A4-G6 — no health indicator | T143 | Health badges (window face) |
-| A4-G7 — no single-instance guard | T142 | Lock file / single-application check |
+| A4-W9 — no concurrency guards on jobs | T29 | One job at a time |
+| A4-W10 — closing mid-job destroys the running thread | T36 | Close waits for all workers, no freeze |
+| A4-W11 — progress and loss are stale per project | T47 | Reset per project |
+| A4-W12 — switching projects mid-run mixes the panels | T47 | Pin the panel to the running project |
+| A4-W13 — settings editable and saveable during a run | T46 | Lock the settings during a run |
+| A4-W14 — panel shows settings with no project selected | T123 | Clear the whole panel |
+| A4-W15 — requested splitter sizes not honored | T126 | Honest minimums |
+| A4-W16 — both list panes can be dragged away | T126 | Non-collapsible panes |
+| A4-W17 — no per-profile project memory | T125 | Remember the project per profile |
+| A4-U1 — long rows truncate with no way to read them | T122 | Row tooltips |
+| A4-U2 — Notes and Train panel below the fold | T44 | Train above the fold |
+| A4-U3 — confirmations overwritten before they can be read | T50 | Status discipline; import + training-done |
+| A4-U4 — buttons enabled with nothing to act on | T124 | Buttons follow the selection |
+| A4-U5 — empty panes give no guidance | T124 | Empty-state hints |
+| A4-U6 — no window icon | T127 | Window chrome pass |
+| A4-U7 — one tooltip in the entire window | T160 | Settings tooltips |
+| A4-U8 — missing-deps hint goes where the user cannot see it | T49 | Visible deps hint |
+| A4-U9 — no double-click anywhere | T168 | Double-click actions |
+| A4-G1 — no geometry or state persistence | T127 | QSettings persistence |
+| A4-G2 — no keyboard shortcuts | T127 | Ctrl+S / Ctrl+N |
+| A4-G3 — checkpoint list is display-only | T150 | Checkpoint actions (v0.2 verified) |
+| A4-G4 — no progress or cancel for GGUF/probe jobs | T107 | Job progress + stop |
+| A4-G5 — no status display anywhere | T53 | Status in row + detail (window face) |
+| A4-G6 — no health indicator | T163 | Health badges (window face) |
+| A4-G7 — no single-instance guard | T162 | Lock file / single-application check |
 | A4-D1 — make New Profile a real QDialog | T11 | |
 | A4-D2 — gate Start and sample-dataset on save success | T8 | |
 | A4-D3 — keep the live training log | T13 | |
 | A4-D4 — delete confirms default to No | T9 | |
 | A4-D5 — dirty tracking, or auto-save on switch | T2 | |
-| A4-D6 — fill the detail panel defensively | T15 | |
-| A4-D7 — cache the model list; fetch off the UI thread | T37 | |
+| A4-D6 — fill the detail panel defensively | T21 | |
+| A4-D7 — cache the model list; fetch off the UI thread | T43 | |
 | A4-D8 — handle import failure in the window | T1 | |
-| A4-D9 — one job at a time | T23 | |
-| A4-D10 — close waits for every worker, without freezing | T30 | |
-| A4-D11 — reset progress/loss per project; pin the panel | T41 | |
-| A4-D12 — lock the settings during a run | T40 | |
-| A4-D13 — clear the whole panel with no selection | T108 | |
-| A4-D14 — give the splitter honest minimums | T111 | |
-| A4-D15 — remember the project per profile | T110 | |
-| A4-D16 — tooltips where the text is cut or unclear | T107, T140 | T107 row tooltips; T140 settings tooltips |
-| A4-D17 — put the Train panel above the fold | T38 | |
-| A4-D18 — status discipline: confirm after the refresh | T44 | |
-| A4-D19 — buttons follow the selection; panes explain | T109 | |
-| A4-D20 — window chrome pass | T112 | |
-| A4-D21 — checkpoint actions and job progress | T92, T130 | T92 job progress; T130 checkpoint actions |
-| A4-D22 — show status and health | T47, T143 | T47 status; T143 health |
-| A4-D23 — single-instance guard | T142 | |
-| A4-D24 — double-click does the obvious thing | T148 | |
-| A4-D25 — put the missing-deps hint where it can be seen | T43 | |
-| R1 — import drops the trained adapter and probe results | T35 | Weights + probe_results round-trip; status corrected when weightless |
+| A4-D9 — one job at a time | T29 | |
+| A4-D10 — close waits for every worker, without freezing | T36 | |
+| A4-D11 — reset progress/loss per project; pin the panel | T47 | |
+| A4-D12 — lock the settings during a run | T46 | |
+| A4-D13 — clear the whole panel with no selection | T123 | |
+| A4-D14 — give the splitter honest minimums | T126 | |
+| A4-D15 — remember the project per profile | T125 | |
+| A4-D16 — tooltips where the text is cut or unclear | T122, T160 | T122 row tooltips; T160 settings tooltips |
+| A4-D17 — put the Train panel above the fold | T44 | |
+| A4-D18 — status discipline: confirm after the refresh | T50 | |
+| A4-D19 — buttons follow the selection; panes explain | T124 | |
+| A4-D20 — window chrome pass | T127 | |
+| A4-D21 — checkpoint actions and job progress | T107, T150 | T107 job progress; T150 checkpoint actions |
+| A4-D22 — show status and health | T53, T163 | T53 status; T163 health |
+| A4-D23 — single-instance guard | T162 | |
+| A4-D24 — double-click does the obvious thing | T168 | |
+| A4-D25 — put the missing-deps hint where it can be seen | T49 | |
+| R1 — import drops the trained adapter and probe results | T41 | Weights + probe_results round-trip; status corrected when weightless |
 | R2 — probe loads the base model twice at once (~7 GB) | T10 | One model resident at a time (P0) |
-| R3 — no Install Stella.desktop (README promises one) | T58 | Double-click installer; audit #6 folded in (W3/U1) |
+| R3 — no Install Stella.desktop (README promises one) | T64 | Double-click installer; audit #6 folded in (W3/U1) |
 | R4 — menu icon points at a missing assets/stella.png | T14 | Render PNGs at install; unquoted Icon=; never point at a missing file (P0) |
-| R5 — all files 100644; clone install leaves scripts non-executable | T59 | Exec bits in the tree; audit #6 verified the zip's stored modes are correct |
-| R6 — maternion typo, 6 places incl. live code | T114 | Correct to quaternions + spelling guard |
-| R7 — "full" method is a dead option | T49 | Remove/disable; train.py never reads the setting |
-| R8 — RAM guard loads the base before estimating | T22 | Estimate from metadata, no load |
-| R9 — probe gate has no informational mode | T75 | Informational mode for non-governing profiles |
-| R10 — torch.load(weights_only=False) on optimizer.pt | T16 | weights_only=True; pickle refused |
-| R11 — --steps cap overshoots whole epochs | T50 | Real cap; same as audit #5 W3 (deduped with A5-W3) |
-| R12 — GGUF export silently deletes previous output | T18 | Prompt/refuse/rename; --force for deliberate overwrite |
-| R13 — no LICENSE / .gitignore / pinned deps / CI | T115 | License + ignore + pins + CI + repo metadata |
-| R14 — pushed docs stale vs v0.2 | T116 | Push current docs; the "audit #3 has no task list" claim is wrong |
-| R15 — long tags truncate in the 260 px pane | T107 | Row tooltips (re-verified) |
-| R16 — project status invisible in the list | T47 | Status in the row (re-verified) |
-| R17 — no geometry persistence | T112 | QSettings persistence (re-verified) |
-| R18 — no window icon set in code | T112 | Window icon (re-verified) |
-| R19 — Train panel below the fold | T38 | Train above the fold (re-verified) |
-| R20 — the "full" option does nothing | T49 | Same fix as R7 |
-| R21 — first profile/project auto-selected on launch | T46 | Nothing selected on launch (P1) |
-| R22 — no menu bar or keyboard shortcuts | T112, T149 | T112 shortcuts; T149 menu bar |
-| R23 — GGUF export and probe have no cancel or progress | T92 | Job progress + stop (re-verified) |
-| R24 — delete dialogs don't say what's being destroyed | T105 | Dialog names the item + counts |
+| R5 — all files 100644; clone install leaves scripts non-executable | T65 | Exec bits in the tree; audit #6 verified the zip's stored modes are correct |
+| R6 — maternion typo, 6 places incl. live code | T129 | Correct to quaternions + spelling guard |
+| R7 — "full" method is a dead option | T55 | Remove/disable; train.py never reads the setting |
+| R8 — RAM guard loads the base before estimating | T28 | Estimate from metadata, no load |
+| R9 — probe gate has no informational mode | T90 | Informational mode for non-governing profiles |
+| R10 — torch.load(weights_only=False) on optimizer.pt | T22 | weights_only=True; pickle refused |
+| R11 — --steps cap overshoots whole epochs | T56 | Real cap; same as audit #5 W3 (deduped with A5-W3) |
+| R12 — GGUF export silently deletes previous output | T24 | Prompt/refuse/rename; --force for deliberate overwrite |
+| R13 — no LICENSE / .gitignore / pinned deps / CI | T130 | License + ignore + pins + CI + repo metadata |
+| R14 — pushed docs stale vs v0.2 | T131 | Push current docs; the "audit #3 has no task list" claim is wrong |
+| R15 — long tags truncate in the 260 px pane | T122 | Row tooltips (re-verified) |
+| R16 — project status invisible in the list | T53 | Status in the row (re-verified) |
+| R17 — no geometry persistence | T127 | QSettings persistence (re-verified) |
+| R18 — no window icon set in code | T127 | Window icon (re-verified) |
+| R19 — Train panel below the fold | T44 | Train above the fold (re-verified) |
+| R20 — the "full" option does nothing | T55 | Same fix as R7 |
+| R21 — first profile/project auto-selected on launch | T52 | Nothing selected on launch (P1) |
+| R22 — no menu bar or keyboard shortcuts | T127, T169 | T127 shortcuts; T169 menu bar |
+| R23 — GGUF export and probe have no cancel or progress | T107 | Job progress + stop (re-verified) |
+| R24 — delete dialogs don't say what's being destroyed | T120 | Dialog names the item + counts |
 | R25 — notes have no visible save affordance | T2 | Notes modified marker + own save control |
-| R26 — one-click Ollama create after GGUF export | T74 | Create-in-Ollama button |
-| R27 — dataset health panel before training | T68 | Pre-train health check |
-| R28 — dry-run estimate button (no model load) | T70 | RAM fit + steps + disk, metadata only |
-| R29 — loss chart + run history | T131 | Chart from train_log.jsonl + history list |
-| R30 — checkpoint pruning with a size readout | T130 | Prune to newest N, size shown |
-| R31 — per-role probe sets | T154 | Probe set per role |
-| R32 — adapter library for sharing bare adapters | T153 | Bare-adapter package |
-| R33 — zip export | T151 | .stella zip (same as A3-G4) |
+| R26 — one-click Ollama create after GGUF export | T89 | Create-in-Ollama button |
+| R27 — dataset health panel before training | T83 | Pre-train health check |
+| R28 — dry-run estimate button (no model load) | T85 | RAM fit + steps + disk, metadata only |
+| R29 — loss chart + run history | T151 | Chart from train_log.jsonl + history list |
+| R30 — checkpoint pruning with a size readout | T150 | Prune to newest N, size shown |
+| R31 — per-role probe sets | T174 | Probe set per role |
+| R32 — adapter library for sharing bare adapters | T173 | Bare-adapter package |
+| R33 — zip export | T171 | .stella zip (same as A3-G4) |
 | A6-W1 — quoted `Icon=` breaks the menu icon on every install | T14 | Unquote Icon=, keep Exec quoted (P0) |
 | A6-W2 — fresh-clone install silently ships a broken icon | T14 | Render PNGs at install when missing (P0) |
-| A6-W3 — no double-click installer exists | T58 | Real Install-Stella.desktop |
-| A6-W4 — failed install leaves a working-looking launcher + command | T57 | Atomic install |
-| A6-W5 — `run.sh` with venv but no PySide6 is a raw traceback | T56 | Check PySide6, fail visibly |
-| A6-W6 — `run_tests.sh` can't run on a bare checkout on Mint | T62 | Use the venv, never system pip |
-| A6-W7 — moving the folder breaks launcher + command silently | T60 | Repair/doctor path |
-| A6-W8 — install.sh pip lines lack `--timeout`/`--retries` | T61 | Same flags as the training installer |
-| A6-W9 — every venv failure misdiagnosed as missing python3-venv | T36 | Distinguish causes |
-| A6-W10 — venv-failure cleanup deletes whatever sits at `.venv` | T36 | Clean up only what you made |
-| A6-W11 — pip failures surface as raw pip output | T117 | Wrap in a Stella error |
-| A6-W12 — no disk-space check anywhere | T118 | Preflight before downloading |
-| A6-W13 — no version pins | T115 | Pin PySide6 + training stack |
-| A6-W14 — training re-run takes ~2.5 min with nothing to do | T119 | Fast path: check imports first |
-| A6-W15 — PySide6 import check can't catch a broken GUI start | T120 | Create a throwaway QApplication |
-| A6-U1 — README install paragraph promises things that don't exist | T58 | Fix the README install section |
-| A6-U2 — "`stella` on PATH" is conditional, installer doesn't say so | T58, T121 | T58 README half; T121 message half |
-| A6-U3 — Desktop copy silently skipped when `~/Desktop` missing | T121 | Claim only what landed |
-| A6-U4 — success message claims things unconditionally | T121 | Message reflects reality |
-| A6-U5 — the running window has no icon | T112 | setWindowIcon in gui.py main() |
-| A6-U6 — no 16/32/48 px icon files shipped | T123 | Render small sizes into hicolor |
-| A6-U7 — desktop-file polish missing | T165 | StartupNotify, Keywords, Version |
-| A6-U8 — install log prints a bare "0.2" | T121 | Label the version line |
-| A6-U9 — pull-weights hint is a long quoted one-liner to type | T164 | Shorter command, no nested quotes |
-| A6-G1 — no uninstall | T122 | uninstall.sh + README section |
-| A6-G2 — no installer tests | T63 | test_installer.py incl. GLib icon check |
-| A6-G3 — no repair command | T60 | stella doctor / install.sh --repair |
-| A6-G4 — no hicolor icon-theme install | T123 | Copies into ~/.local/share/icons/hicolor/ |
-| A6-G5 — no install log or receipt | T124 | Versions, paths, timestamp |
-| A6-G6 — no upgrade story | T125 | Documented upgrade path |
-| A6-G7 — no `--help` / usage for the scripts | T166 | Usage + exit 0 |
+| A6-W3 — no double-click installer exists | T64 | Real Install-Stella.desktop |
+| A6-W4 — failed install leaves a working-looking launcher + command | T63 | Atomic install |
+| A6-W5 — `run.sh` with venv but no PySide6 is a raw traceback | T62 | Check PySide6, fail visibly |
+| A6-W6 — `run_tests.sh` can't run on a bare checkout on Mint | T68 | Use the venv, never system pip |
+| A6-W7 — moving the folder breaks launcher + command silently | T66 | Repair/doctor path |
+| A6-W8 — install.sh pip lines lack `--timeout`/`--retries` | T67 | Same flags as the training installer |
+| A6-W9 — every venv failure misdiagnosed as missing python3-venv | T42 | Distinguish causes |
+| A6-W10 — venv-failure cleanup deletes whatever sits at `.venv` | T42 | Clean up only what you made |
+| A6-W11 — pip failures surface as raw pip output | T132 | Wrap in a Stella error |
+| A6-W12 — no disk-space check anywhere | T133 | Preflight before downloading |
+| A6-W13 — no version pins | T130 | Pin PySide6 + training stack |
+| A6-W14 — training re-run takes ~2.5 min with nothing to do | T134 | Fast path: check imports first |
+| A6-W15 — PySide6 import check can't catch a broken GUI start | T135 | Create a throwaway QApplication |
+| A6-U1 — README install paragraph promises things that don't exist | T64 | Fix the README install section |
+| A6-U2 — "`stella` on PATH" is conditional, installer doesn't say so | T64, T136 | T64 README half; T136 message half |
+| A6-U3 — Desktop copy silently skipped when `~/Desktop` missing | T136 | Claim only what landed |
+| A6-U4 — success message claims things unconditionally | T136 | Message reflects reality |
+| A6-U5 — the running window has no icon | T127 | setWindowIcon in gui.py main() |
+| A6-U6 — no 16/32/48 px icon files shipped | T138 | Render small sizes into hicolor |
+| A6-U7 — desktop-file polish missing | T185 | StartupNotify, Keywords, Version |
+| A6-U8 — install log prints a bare "0.2" | T136 | Label the version line |
+| A6-U9 — pull-weights hint is a long quoted one-liner to type | T184 | Shorter command, no nested quotes |
+| A6-G1 — no uninstall | T137 | uninstall.sh + README section |
+| A6-G2 — no installer tests | T69 | test_installer.py incl. GLib icon check |
+| A6-G3 — no repair command | T66 | stella doctor / install.sh --repair |
+| A6-G4 — no hicolor icon-theme install | T138 | Copies into ~/.local/share/icons/hicolor/ |
+| A6-G5 — no install log or receipt | T139 | Versions, paths, timestamp |
+| A6-G6 — no upgrade story | T140 | Documented upgrade path |
+| A6-G7 — no `--help` / usage for the scripts | T186 | Usage + exit 0 |
 | A6-D1 — unquote `Icon=`, keep `Exec` quoted | T14 | |
 | A6-D2 — render the PNGs at install time when missing | T14 | |
-| A6-D3 — ship a real double-click installer | T58 | |
-| A6-D4 — make install atomic: check before writing artifacts | T57 | |
-| A6-D5 — `run.sh`: check PySide6 before exec, fail visibly | T56 | |
-| A6-D6 — add `--timeout 120 --retries 10` to install.sh | T61 | |
-| A6-D7 — distinguish venv-failure causes; clean up only yours | T36 | |
-| A6-D8 — wrap pip failures in a Stella error | T117 | |
-| A6-D9 — disk-space preflight | T118 | |
-| A6-D10 — pin versions, or record them | T115 | Pin side; record side is the receipt (T124) |
-| A6-D11 — add `uninstall.sh` + removal docs | T122 | |
-| A6-D12 — add installer tests, including the GLib icon check | T63 | |
-| A6-D13 — add a repair/doctor path | T60 | |
-| A6-D14 — set the window icon in `gui.py main()` | T112 | |
-| A6-D15 — install icons into hicolor + render small sizes | T123 | |
-| A6-D16 — fix the README install section | T58 | |
-| A6-D17 — `run_tests.sh` must use the venv, never system pip | T62 | |
-| A6-D18 — make the success message reflect reality | T121 | |
-| A6-D19 — desktop-file polish | T165 | |
-| A6-D20 — fast path for a training re-run | T119 | |
-| A6-D21 — keep an install receipt | T124 | |
-| A6-D22 — strengthen the PySide6 check | T120 | |
-| A6-D23 — replace the pull-weights one-liner | T164 | |
-| A6-D24 — document an upgrade path | T125 | |
-| A6-D25 — `--help` for the scripts | T166 | |
-| A7-W1 — the mode does nothing, for either reading | T64 | Define the modes (D1); the wiring is T67/T66/T168 |
-| A7-W2 — export crashes on `metamorph: null`, leaves a partial package | T32 | Defensive reader + build README before creating the folder |
-| A7-W3 — GUI Save crashes with KeyError on a missing metamorph key | T31 | `get_project` setdefaults the block; owns the shared reader |
-| A7-W4 — GUI project list crashes on a string metamorph | T33 | Shared reader; degrade to a warning row |
+| A6-D3 — ship a real double-click installer | T64 | |
+| A6-D4 — make install atomic: check before writing artifacts | T63 | |
+| A6-D5 — `run.sh`: check PySide6 before exec, fail visibly | T62 | |
+| A6-D6 — add `--timeout 120 --retries 10` to install.sh | T67 | |
+| A6-D7 — distinguish venv-failure causes; clean up only yours | T42 | |
+| A6-D8 — wrap pip failures in a Stella error | T132 | |
+| A6-D9 — disk-space preflight | T133 | |
+| A6-D10 — pin versions, or record them | T130 | Pin side; record side is the receipt (T139) |
+| A6-D11 — add `uninstall.sh` + removal docs | T137 | |
+| A6-D12 — add installer tests, including the GLib icon check | T69 | |
+| A6-D13 — add a repair/doctor path | T66 | |
+| A6-D14 — set the window icon in `gui.py main()` | T127 | |
+| A6-D15 — install icons into hicolor + render small sizes | T138 | |
+| A6-D16 — fix the README install section | T64 | |
+| A6-D17 — `run_tests.sh` must use the venv, never system pip | T68 | |
+| A6-D18 — make the success message reflect reality | T136 | |
+| A6-D19 — desktop-file polish | T185 | |
+| A6-D20 — fast path for a training re-run | T134 | |
+| A6-D21 — keep an install receipt | T139 | |
+| A6-D22 — strengthen the PySide6 check | T135 | |
+| A6-D23 — replace the pull-weights one-liner | T184 | |
+| A6-D24 — document an upgrade path | T140 | |
+| A6-D25 — `--help` for the scripts | T186 | |
+| A7-W1 — the mode does nothing, for either reading | T70 | Define the modes (D1); the wiring is T73/T72/T188 |
+| A7-W2 — export crashes on `metamorph: null`, leaves a partial package | T38 | Defensive reader + build README before creating the folder |
+| A7-W3 — GUI Save crashes with KeyError on a missing metamorph key | T37 | `get_project` setdefaults the block; owns the shared reader |
+| A7-W4 — GUI project list crashes on a string metamorph | T39 | Shared reader; degrade to a warning row |
 | A7-W5 — `verify_export` crashes on a string metamorph | T1 | A3-W2 re-confirmed; line moved 128 → 141 |
-| A7-W6 — `compress` package is 22 bytes BIGGER | T66 | Package compression (D3) |
-| A7-W7 — `both` has no combined semantics | T64 | Defined by D1 |
-| A7-W8 — `metamorph.notes` unreachable from GUI and CLI | T99 | A2-W10 re-confirmed; detail-panel field + CLI flag |
-| A7-W9 — GUI New Project is name-only, no metamorph choice | T98 | A2-W12 re-confirmed |
-| A7-W10 — stale "structure only in v0.1" comment | T64 | Updated in the D1 spec pass |
-| A7-W11 — `notes` accepts any JSON type, unchecked | T157 | `isinstance` check at both write points |
-| A7-U1 — tooltip promises behavior that does not exist | T65 | Honest words, one line |
-| A7-U2 — project list presents the mode as if it mattered | T65 | Fair label once the tooltip is honest |
-| A7-U3 — no metamorph-notes field in the detail panel | T99 | UI half of W8 |
-| A7-U4 — no metamorph choice in New Project | T98 | UI half of W9 |
-| A7-U5 — Train panel never mentions the mode | T155 | One line until the codec lands |
-| A7-U6 — `--metamorph` has no help string | T156 | Real help text |
-| A7-G1 — no morph implementation: no variants, no lineage | T67 | Spawn + parent record |
-| A7-G2 — no compression codec anywhere in the pipeline | T66 | Quant wiring + package compression; token codec is T168 |
-| A7-G3 — no mode provenance in training artifacts | T128 | Record the mode at train time |
-| A7-G4 — no mode-version story | T129 | Codec version in the manifest; version check rides T34 |
-| A7-G5 — no tests for corrupt metamorph states | T126 | Pins the defensive reader |
-| A7-G6 — no per-mode defaults | T163 | After D1 (T64) |
-| A7-G7 — CLI cannot change a mode after creation | T72 | update-project --metamorph flag |
-| A7-D1 — define what each mode MEANS, in writing | T64 | The first task; gates the codec |
-| A7-D2 — wire `compress` to the GGUF quant first | T66 | Cheapest real effect |
-| A7-D3 — compress the export package when mode is `compress` | T66 | Import must accept both forms |
-| A7-D4 — variant lineage for `morph` | T67 | Spawn + parent record |
-| A7-D5 — record the mode in training artifacts now | T128 | Provenance before the codec needs it |
-| A7-D6 — fix the tooltip now | T65 | One line; do not wait for the codec |
-| A7-D7 — metamorph-notes field + CLI flag | T99 | Label it distinctly from notes.md |
-| A7-D8 — one defensive reader, used everywhere | T31, T32, T33, T157, T1 | Built once in T31; T1 uses it at the boundary |
-| A7-D9 — build the export README before creating the folder | T32 | No partial package on failure |
-| A7-D10 — New Project form with dataset + metamorph | T98 | Restates A2-W12's fix |
-| A7-D11 — corrupt-block tests for every reader | T126, T157 | Pins D8 |
-| A7-D12 — mode-version story before the first codec ships | T129 | Version gate rides T34 |
-| A7-D13 — per-mode training defaults, after D1 | T163 | Suggestions, not silent overrides |
-| A7-D14 — show the mode in the Train panel | T155 | One line until the codec lands |
-| A7-D15 — CLI help strings + a way to change mode | T72, T156 | Update rides T72; help text is T156 |
-| A7-D16 — the token-level codec is a named later item | T168 | Deep codec, after the easy wins |
+| A7-W6 — `compress` package is 22 bytes BIGGER | T72 | Package compression (D3) |
+| A7-W7 — `both` has no combined semantics | T70 | Defined by D1 |
+| A7-W8 — `metamorph.notes` unreachable from GUI and CLI | T114 | A2-W10 re-confirmed; detail-panel field + CLI flag |
+| A7-W9 — GUI New Project is name-only, no metamorph choice | T113 | A2-W12 re-confirmed |
+| A7-W10 — stale "structure only in v0.1" comment | T70 | Updated in the D1 spec pass |
+| A7-W11 — `notes` accepts any JSON type, unchecked | T177 | `isinstance` check at both write points |
+| A7-U1 — tooltip promises behavior that does not exist | T71 | Honest words, one line |
+| A7-U2 — project list presents the mode as if it mattered | T71 | Fair label once the tooltip is honest |
+| A7-U3 — no metamorph-notes field in the detail panel | T114 | UI half of W8 |
+| A7-U4 — no metamorph choice in New Project | T113 | UI half of W9 |
+| A7-U5 — Train panel never mentions the mode | T175 | One line until the codec lands |
+| A7-U6 — `--metamorph` has no help string | T176 | Real help text |
+| A7-G1 — no morph implementation: no variants, no lineage | T73 | Spawn + parent record |
+| A7-G2 — no compression codec anywhere in the pipeline | T72 | Quant wiring + package compression; token codec is T188 |
+| A7-G3 — no mode provenance in training artifacts | T143 | Record the mode at train time |
+| A7-G4 — no mode-version story | T144 | Codec version in the manifest; version check rides T40 |
+| A7-G5 — no tests for corrupt metamorph states | T141 | Pins the defensive reader |
+| A7-G6 — no per-mode defaults | T183 | After D1 (T70) |
+| A7-G7 — CLI cannot change a mode after creation | T87 | update-project --metamorph flag |
+| A7-D1 — define what each mode MEANS, in writing | T70 | The first task; gates the codec |
+| A7-D2 — wire `compress` to the GGUF quant first | T72 | Cheapest real effect |
+| A7-D3 — compress the export package when mode is `compress` | T72 | Import must accept both forms |
+| A7-D4 — variant lineage for `morph` | T73 | Spawn + parent record |
+| A7-D5 — record the mode in training artifacts now | T143 | Provenance before the codec needs it |
+| A7-D6 — fix the tooltip now | T71 | One line; do not wait for the codec |
+| A7-D7 — metamorph-notes field + CLI flag | T114 | Label it distinctly from notes.md |
+| A7-D8 — one defensive reader, used everywhere | T37, T38, T39, T177, T1 | Built once in T37; T1 uses it at the boundary |
+| A7-D9 — build the export README before creating the folder | T38 | No partial package on failure |
+| A7-D10 — New Project form with dataset + metamorph | T113 | Restates A2-W12's fix |
+| A7-D11 — corrupt-block tests for every reader | T141, T177 | Pins D8 |
+| A7-D12 — mode-version story before the first codec ships | T144 | Version gate rides T40 |
+| A7-D13 — per-mode training defaults, after D1 | T183 | Suggestions, not silent overrides |
+| A7-D14 — show the mode in the Train panel | T175 | One line until the codec lands |
+| A7-D15 — CLI help strings + a way to change mode | T87, T176 | Update rides T87; help text is T176 |
+| A7-D16 — the token-level codec is a named later item | T188 | Deep codec, after the easy wins |
 | A5-W1 — Ctrl+C pause crashes the run instead of pausing it | T4 | Signal handler must set the flag only (P0) |
-| A5-W2 — `main()` catches only StellaError; everything else is a raw traceback | T5, T33, T1 | T5 catch-all + defensive reads (P0); T33 CLI metamorph instance; T1 import instances |
-| A5-W3 — `--steps` is not a cap: 0 means "no cap", -1 means "one epoch", 2 runs 3 steps | T50 | R11 task; deduped, not duplicated |
-| A5-W4 — re-training a trained project silently overwrites the adapter | T19 | Refuse or --force |
-| A5-W5 — the train deps gate fires before cheap checks, masking the real error | T42 | Cheap checks first |
-| A5-W6 — `export-gguf` checks llama.cpp AFTER the merge, and leaves the merged weights behind | T20 | Check first; clean up on failure |
-| A5-W7 — `--quant` is never validated | T21 | choices list up front |
-| A5-W8 — `projects` on a nonexistent profile exits 0, like an empty real profile | T73 | Existence check first |
+| A5-W2 — `main()` catches only StellaError; everything else is a raw traceback | T5, T39, T1 | T5 catch-all + defensive reads (P0); T39 CLI metamorph instance; T1 import instances |
+| A5-W3 — `--steps` is not a cap: 0 means "no cap", -1 means "one epoch", 2 runs 3 steps | T56 | R11 task; deduped, not duplicated |
+| A5-W4 — re-training a trained project silently overwrites the adapter | T25 | Refuse or --force |
+| A5-W5 — the train deps gate fires before cheap checks, masking the real error | T48 | Cheap checks first |
+| A5-W6 — `export-gguf` checks llama.cpp AFTER the merge, and leaves the merged weights behind | T26 | Check first; clean up on failure |
+| A5-W7 — `--quant` is never validated | T27 | choices list up front |
+| A5-W8 — `projects` on a nonexistent profile exits 0, like an empty real profile | T88 | Existence check first |
 | A5-W9 — one corrupt profile.json is silently skipped by `profiles` | T3 | A1-W1 re-verified on the CLI |
 | A5-W10 — a bad import leaves an orphan profile behind | T1 | A3-W1 re-verified on the CLI |
-| A5-W11 — no second-Ctrl+C force quit; Ctrl+C during the base download cannot interrupt it | T93 | Second Ctrl+C exits; download interruptible or announced |
-| A5-W12 — a failed probe gate returns exit 1, the same as an error | T76 | Distinct exit code (3) |
-| A5-W13 — `--resume` on a completed project silently extends the training | T19 | Announce the extension |
-| A5-U1 — most flags have no help text, and no command shows examples | T45 | Help + examples (--metamorph text itself is T156) |
-| A5-U2 — the docs disagree with the commands that exist | T45 | Docstring, README, wrapper, hint |
-| A5-U3 — uppercase names are silently lowercased | T167 | Echo the stored name |
-| A5-U4 — library chatter pollutes stderr on every heavy run | T95 | Filter warnings; fix the float() call |
-| A5-U5 — a CLI error tells the user to use the GUI | T96 | Name the CLI fix |
-| A5-U6 — a paused run's final summary reads like a completed run | T94 | Paused wording, not Trained |
-| A5-U7 — resume prints a stale validation line for an epoch with no new steps | T94 | Skip the re-evaluated line |
-| A5-U8 — long operations print nothing on stdout until they finish | T94 | A line per pass / per phase |
-| A5-U9 — bare `stella` gives argparse's usage error, no friendly hint | T167 | Print the command list |
-| A5-G1 — no rename, delete, or update commands for profiles or projects | T72 | Eight new commands (A1-W9/A2-W11) |
-| A5-G2 — no way to inspect a profile or project from the CLI | T72 | show-profile/show-project + checkpoints |
-| A5-G3 — no CLI way to set training settings | T72 | Settings flags on create/update |
-| A5-G4 — no `verify` command, though the function exists | T90 | stella verify (A3-G5) |
-| A5-G5 — no machine-readable or quiet output | T152 | --json/--quiet/--verbose |
-| A5-G6 — the GUI lacks the CLI-only options (parity, the other way) | T141 | Step cap, resume, quant, checkpoint picker |
-| A5-G7 — no test coverage for the risky CLI paths | T127 | Pins the W1/W3/W7/W13 fixes |
+| A5-W11 — no second-Ctrl+C force quit; Ctrl+C during the base download cannot interrupt it | T108 | Second Ctrl+C exits; download interruptible or announced |
+| A5-W12 — a failed probe gate returns exit 1, the same as an error | T91 | Distinct exit code (3) |
+| A5-W13 — `--resume` on a completed project silently extends the training | T25 | Announce the extension |
+| A5-U1 — most flags have no help text, and no command shows examples | T51 | Help + examples (--metamorph text itself is T176) |
+| A5-U2 — the docs disagree with the commands that exist | T51 | Docstring, README, wrapper, hint |
+| A5-U3 — uppercase names are silently lowercased | T187 | Echo the stored name |
+| A5-U4 — library chatter pollutes stderr on every heavy run | T110 | Filter warnings; fix the float() call |
+| A5-U5 — a CLI error tells the user to use the GUI | T111 | Name the CLI fix |
+| A5-U6 — a paused run's final summary reads like a completed run | T109 | Paused wording, not Trained |
+| A5-U7 — resume prints a stale validation line for an epoch with no new steps | T109 | Skip the re-evaluated line |
+| A5-U8 — long operations print nothing on stdout until they finish | T109 | A line per pass / per phase |
+| A5-U9 — bare `stella` gives argparse's usage error, no friendly hint | T187 | Print the command list |
+| A5-G1 — no rename, delete, or update commands for profiles or projects | T87 | Eight new commands (A1-W9/A2-W11) |
+| A5-G2 — no way to inspect a profile or project from the CLI | T87 | show-profile/show-project + checkpoints |
+| A5-G3 — no CLI way to set training settings | T87 | Settings flags on create/update |
+| A5-G4 — no `verify` command, though the function exists | T105 | stella verify (A3-G5) |
+| A5-G5 — no machine-readable or quiet output | T172 | --json/--quiet/--verbose |
+| A5-G6 — the GUI lacks the CLI-only options (parity, the other way) | T161 | Step cap, resume, quant, checkpoint picker |
+| A5-G7 — no test coverage for the risky CLI paths | T142 | Pins the W1/W3/W7/W13 fixes |
 | A5-D1 — the SIGINT handler sets the flag and nothing else | T4 | |
-| A5-D2 — catch-all in `main()`, plus defensive reads in the list commands | T5, T33 | T5 catch-all; T33 metamorph reader |
-| A5-D3 — validate `--steps` and say what it really does | T50 | |
-| A5-D4 — refuse or confirm re-training and resume-on-trained | T19 | |
-| A5-D5 — reorder the train checks: cheap first, deps gate last | T42 | |
-| A5-D6 — check llama.cpp first in `export-gguf`; clean up on failure | T20 | |
-| A5-D7 — validate `--quant` up front | T21 | |
-| A5-D8 — existence checks, corrupt warnings, atomic import | T73, T3, T1 | T73 existence; T3 corrupt warnings; T1 atomicity |
-| A5-D9 — second Ctrl+C force-quits; make the download interruptible | T93 | |
-| A5-D10 — a distinct exit code for a failed probe gate | T76 | |
-| A5-D11 — help text for every flag, examples in every command, fix the drift | T45 | |
-| A5-D12 — silence the library warnings | T95 | |
-| A5-D13 — CLI-appropriate error text | T96 | |
-| A5-D14 — progress for long phases; honest paused/resumed output | T94 | |
-| A5-D15 — the missing commands: rename/delete/update, show, settings, verify, --json | T72, T90, T152 | Commands/show/settings T72; verify T90; output T152 |
-| A5-D16 — GUI parity for the CLI-only options | T141 | |
-| A5-D17 — tests for the risky paths | T127 | |
-| A5-D18 — small polish: echo normalized names, friendly no-command hint | T167 |
-| A8-W1 — no torch seeding: the same run twice gives a different adapter | T26 | |
-| A8-W2 — resume diverges: torch RNG state isn't saved | T26 | |
-| A8-W3 — datasets under 6 examples get no validation at all | T27 | |
-| A8-W4 — `is_refusal` is brittle both ways: 6 of 10 crafted replies misjudged | T24 | |
-| A8-W5 — the gate passes vacuously: empty results and a silent model pass | T24 | |
-| A8-W6 — the probe doesn't use the chat template | T24 | |
-| A8-W7 — no mutual exclusion between Train and the GGUF/probe jobs | T23 | A4-W9, re-probed with the train-vs-job hole |
+| A5-D2 — catch-all in `main()`, plus defensive reads in the list commands | T5, T39 | T5 catch-all; T39 metamorph reader |
+| A5-D3 — validate `--steps` and say what it really does | T56 | |
+| A5-D4 — refuse or confirm re-training and resume-on-trained | T25 | |
+| A5-D5 — reorder the train checks: cheap first, deps gate last | T48 | |
+| A5-D6 — check llama.cpp first in `export-gguf`; clean up on failure | T26 | |
+| A5-D7 — validate `--quant` up front | T27 | |
+| A5-D8 — existence checks, corrupt warnings, atomic import | T88, T3, T1 | T88 existence; T3 corrupt warnings; T1 atomicity |
+| A5-D9 — second Ctrl+C force-quits; make the download interruptible | T108 | |
+| A5-D10 — a distinct exit code for a failed probe gate | T91 | |
+| A5-D11 — help text for every flag, examples in every command, fix the drift | T51 | |
+| A5-D12 — silence the library warnings | T110 | |
+| A5-D13 — CLI-appropriate error text | T111 | |
+| A5-D14 — progress for long phases; honest paused/resumed output | T109 | |
+| A5-D15 — the missing commands: rename/delete/update, show, settings, verify, --json | T87, T105, T172 | Commands/show/settings T87; verify T105; output T172 |
+| A5-D16 — GUI parity for the CLI-only options | T161 | |
+| A5-D17 — tests for the risky paths | T142 | |
+| A5-D18 — small polish: echo normalized names, friendly no-command hint | T187 |
+| A8-W1 — no torch seeding: the same run twice gives a different adapter | T32 | |
+| A8-W2 — resume diverges: torch RNG state isn't saved | T32 | |
+| A8-W3 — datasets under 6 examples get no validation at all | T33 | |
+| A8-W4 — `is_refusal` is brittle both ways: 6 of 10 crafted replies misjudged | T30 | |
+| A8-W5 — the gate passes vacuously: empty results and a silent model pass | T30 | |
+| A8-W6 — the probe doesn't use the chat template | T30 | |
+| A8-W7 — no mutual exclusion between Train and the GGUF/probe jobs | T29 | A4-W9, re-probed with the train-vs-job hole |
 | A8-W8 — bad settings crash the loop with raw tracebacks, or run silently wrong | T6 | A2-W2 at the loop's conversions |
 | A8-W9 — HF load failures surface as raw tracebacks, not StellaError | T5 | A5-W2 at the model loader |
-| A8-W10 — resume silently ignores changed settings | T83 | |
-| A8-W11 — resume with a missing optimizer.pt silently restarts the optimizer | T83 | |
-| A8-W12 — resume + --steps gives the nonsense error "already at step 4 of 3" | T50 | Adjacent to R11/A5-W3 |
-| A8-W13 — a failed quantize leaves the multi-GB F16 intermediate on disk | T20 | F16 half of A5-W6 |
-| A8-W14 — a non-executable llama-quantize passes discovery, then raw PermissionError | T87 | |
-| A8-W15 — the printed `ollama create` command breaks on spaced paths | T86 | |
-| A8-W16 — completions are never truncated: a long completion blows past max_seq_len | T84 | |
-| A8-W17 — with a chat template, the completion never learns the turn terminator | T85 | |
-| A8-W18 — the val set churns when the dataset grows | T135 | |
-| A8-W19 — multi-turn conversations only train the final turn | T136 | |
-| A8-W20 — the final checkpoint double-saves and double-emits | T139 | |
-| A8-U1 — the CLI reports the RAM estimate as "RAM used" | T29 | |
-| A8-U2 — no proof-run control in the window | T80 | |
-| A8-U3 — the Train panel never shows the val loss in the summary line | T81 | |
-| A8-U4 — the probe result has no home in the window | T79 | |
-| A8-U5 — the GGUF export button gives no size/time warning | T133 | Overlaps T70/T74 |
-| A8-U6 — no "loading base model" feedback | T132 | |
-| A8-G1 — no target-module override | T28 | |
-| A8-G2 — no merge RAM guard | T25 | |
-| A8-G3 — probe_results.json carries no provenance | T77 | |
-| A8-G4 — the prompt set has no hard-benign prompts | T78 | |
-| A8-G5 — five of eleven training settings have no GUI or CLI surface | T134 | |
-| A8-G6 — no LoRA hyperparameters beyond rank | T134 | |
-| A8-G7 — no timeout on the converter/quantizer subprocesses | T88 | |
-| A8-G8 — the run summary carries no val loss | T81 | Rides with U3 |
-| A8-G9 — no dataset-size awareness: the whole file loads into RAM | T138 | |
-| A8-G10 — the "tool" role is rejected | T137 | |
-| A8-G11 — the LFM3 → GGUF conversion is unproven | T82 | |
-| A8-D1 — seed everything: torch seed at run start + RNG state in checkpoints | T26 | |
-| A8-D2 — refusal detection v2: first-sentence matching + an apology allowlist | T24 | |
-| A8-D3 — probe through the chat template | T24 | |
-| A8-D4 — minimum-val guarantee, or a loud warning | T27 | |
-| A8-D5 — one job at a time, enforced in the engine, not just the GUI | T23 | |
+| A8-W10 — resume silently ignores changed settings | T98 | |
+| A8-W11 — resume with a missing optimizer.pt silently restarts the optimizer | T98 | |
+| A8-W12 — resume + --steps gives the nonsense error "already at step 4 of 3" | T56 | Adjacent to R11/A5-W3 |
+| A8-W13 — a failed quantize leaves the multi-GB F16 intermediate on disk | T26 | F16 half of A5-W6 |
+| A8-W14 — a non-executable llama-quantize passes discovery, then raw PermissionError | T102 | |
+| A8-W15 — the printed `ollama create` command breaks on spaced paths | T101 | |
+| A8-W16 — completions are never truncated: a long completion blows past max_seq_len | T99 | |
+| A8-W17 — with a chat template, the completion never learns the turn terminator | T100 | |
+| A8-W18 — the val set churns when the dataset grows | T155 | |
+| A8-W19 — multi-turn conversations only train the final turn | T156 | |
+| A8-W20 — the final checkpoint double-saves and double-emits | T159 | |
+| A8-U1 — the CLI reports the RAM estimate as "RAM used" | T35 | |
+| A8-U2 — no proof-run control in the window | T95 | |
+| A8-U3 — the Train panel never shows the val loss in the summary line | T96 | |
+| A8-U4 — the probe result has no home in the window | T94 | |
+| A8-U5 — the GGUF export button gives no size/time warning | T153 | Overlaps T85/T89 |
+| A8-U6 — no "loading base model" feedback | T152 | |
+| A8-G1 — no target-module override | T34 | |
+| A8-G2 — no merge RAM guard | T31 | |
+| A8-G3 — probe_results.json carries no provenance | T92 | |
+| A8-G4 — the prompt set has no hard-benign prompts | T93 | |
+| A8-G5 — five of eleven training settings have no GUI or CLI surface | T154 | |
+| A8-G6 — no LoRA hyperparameters beyond rank | T154 | |
+| A8-G7 — no timeout on the converter/quantizer subprocesses | T103 | |
+| A8-G8 — the run summary carries no val loss | T96 | Rides with U3 |
+| A8-G9 — no dataset-size awareness: the whole file loads into RAM | T158 | |
+| A8-G10 — the "tool" role is rejected | T157 | |
+| A8-G11 — the LFM3 → GGUF conversion is unproven | T97 | |
+| A8-D1 — seed everything: torch seed at run start + RNG state in checkpoints | T32 | |
+| A8-D2 — refusal detection v2: first-sentence matching + an apology allowlist | T30 | |
+| A8-D3 — probe through the chat template | T30 | |
+| A8-D4 — minimum-val guarantee, or a loud warning | T33 | |
+| A8-D5 — one job at a time, enforced in the engine, not just the GUI | T29 | |
 | A8-D6 — validate settings once, at the top of train_project | T6 | |
 | A8-D7 — wrap HF load failures in StellaError | T5 | |
-| A8-D8 — resume contract: snapshot settings at pause, warn on drift | T83 | |
-| A8-D9 — compose caps with resume: remaining-steps budget | T50 | |
-| A8-D10 — clean up intermediates on failure | T20 | |
-| A8-D11 — check executability at discovery; validate quant up front | T87 | Quant half is A5-W7 (T21) |
-| A8-D12 — quote paths in the Modelfile and the printed command | T86 | |
-| A8-D13 — bound completions to max_seq_len | T84 | |
-| A8-D14 — end the completion with the template's turn terminator | T85 | |
-| A8-D15 — stable val sets via content-hash split | T135 | |
-| A8-D16 — probe provenance in the results file | T77 | |
-| A8-D17 — surface the probe in the window | T79 | |
-| A8-D18 — an Advanced settings section | T134 | |
+| A8-D8 — resume contract: snapshot settings at pause, warn on drift | T98 | |
+| A8-D9 — compose caps with resume: remaining-steps budget | T56 | |
+| A8-D10 — clean up intermediates on failure | T26 | |
+| A8-D11 — check executability at discovery; validate quant up front | T102 | Quant half is A5-W7 (T27) |
+| A8-D12 — quote paths in the Modelfile and the printed command | T101 | |
+| A8-D13 — bound completions to max_seq_len | T99 | |
+| A8-D14 — end the completion with the template's turn terminator | T100 | |
+| A8-D15 — stable val sets via content-hash split | T155 | |
+| A8-D16 — probe provenance in the results file | T92 | |
+| A8-D17 — surface the probe in the window | T94 | |
+| A8-D18 — an Advanced settings section | T154 | |
+| A9-W1 — New Profile picks the first model for the user | T18 | |
+| A9-W2 — The Profile window contradicts itself about Base ref | T79 | |
+| A9-W3 — Download model is enabled when there is no repo to download from | T79 | |
+| A9-W4 — The empty-store guidance tells the user to pick something that does not exist | T17 | |
+| A9-W5 — Four of nine menu actions are enabled with nothing selected and answer with a modal warning | T19 | |
+| A9-U1 — Training settings are on screen in four places; the brief says the user never sees them | T16 | |
+| A9-U2 — There is no "pick a job" surface | T15, T75, T149 | |
+| A9-U3 — Sleep is below the fold at both sizes, including his own screen | T74 | |
+| A9-U4 — Save project is below the fold in its own window, and half of Settings is hidden | T80 | |
+| A9-U5 — Chat makes the user type a model tag by hand | T76 | |
+| A9-U6 — Tree rows truncate long model names, with no tooltip anywhere to recover them | T78 | |
+| A9-U7 — The main window at rest is a wall of empty grey boxes | T15 | |
+| A9-U8 — No keyboard shortcuts, no visible focus ring | T82 | |
+| A9-U9 — The menu is a button, not a menu bar | T19 | |
+| A9-G1 — No graphs or charts anywhere | T20 | |
+| A9-G2 — No visual identity of its own | T81 | |
+| A9-G3 — No first-run onboarding | T17, T15 | |
+| A9-G4 — No glanceable training status card | T20, T74 | |
+| A9-G5 — No model-fit guidance at pick time | T18 | |
+| A9-G6 — No per-profile project memory | T77 | |
+| A9-G7 — No finish moment | T145 | |
+| A9-G8 — No loading or skeleton states | T146 | |
+| A9-G9 — No reduced-motion or accessibility preset | T147 | |
+| A9-G10 — No collapsible headers in the panels | T80 | |
+| A9-G11 — Chat shows no plan before it runs | T76 | |
+| A9-G12 — No progress or cancel on GGUF export and the refusal probe | T74 | |
+| A9-G13 — No before/after view of what a fine-tune changed | T148 | |
+| A9-D1 — The dead "full" method is still listed in the combo | T189 | |
+| A9-D2 — The download row is duplicated in two windows | T79 | |
+| A9-D3 — Learning rate is a free-text field | T16 | |
+| A9-D4 — The status bar repeats the session title in slug form | T191 | |
+| A9-D5 — "Dream first" is the only tooltip in the app | T192 | |
+| A9-D6 — Two taglines | T190 | |
+| A9-D7 — How to Use has no search and no link from the empty state | T193 | |
+| A9-D8 — The Chat window's help line is squeezed at the bottom edge | T194 | |
 
 **Coverage check:** audit #1: 12 weaknesses + 6 UI flaws + 6 gaps +
 12 design suggestions = 36 findings. Audit #2: 15 weaknesses + 7 UI
@@ -4866,72 +5208,73 @@ Audit #4: 17 weaknesses + 9 UI flaws + 7 gaps + 25 design suggestions
 design suggestions = 47 findings. Audit #6: 15 weaknesses + 9 UI flaws + 7 gaps + 25
 design suggestions = 56 findings. Audit #7: 11 weaknesses + 6 UI
 flaws + 7 gaps + 16 design suggestions = 40 findings. Audit #8: 20 weaknesses + 6 UI
-flaws + 11 gaps + 18 design suggestions = 55 findings. Repo-audit
+flaws + 11 gaps + 18 design suggestions = 55 findings. Audit #9: 5 weaknesses + 9 UI
+flaws + 13 gaps + 8 design suggestions = 35 findings. Repo-audit
 verdict: 14 weaknesses + 11 UI flaws + 8 ideas = 33 findings. Total
-412 findings. All 412 appear in the map above, each with at least
-one task. 168 tasks total: 14 P0 (T1–T14), 53 P1 (T15–T67), 62 P2
-(T68–T129), 39 P3 (T130–T168).
+447 findings. All 447 appear in the map above, each with at least
+one task. 194 tasks total: 20 P0 (T1–T20), 62 P1 (T21–T82), 67 P2
+(T83–T149), 45 P3 (T150–T194).
 
 **Dependency order (within the priority order above):** T6 before T7
 (the model rules define the learning-rate range the GUI enforces);
-T6 before T15's fallback defaults (the defensive fill must match the
-model ranges); T1 before T34 (the version check is enforced in
-`verify_export` alongside the schema validation) and T90 (the verify
-command runs the full verification); T37 before T55 (the base-health
-check uses the cached list) and T143 (badges need the cache); T34
-before T35 (weights round-trip lands with the version check), T71
-(profile export uses the profile kind), and T150 (recipe export uses
-the recipe kind); T51 before T52 (the preview shows the merge
-choice); T101 before T107 (the detail role combo shows the canonical
-list); T17 before T72's deletes and T161's bulk delete (both delete
-to trash); T100 before T162 (reachable fields before full environment
-management); T71 before T161's bulk export (profile export must
-exist first); T47 before T144 (status must be real before rows show
-it); T39 before T53 (the dataset picker before the dataset handling
-in the package); T89 before T90 (the verify command checks the
-checksums); T103 before T159 (provenance builds on the `exported_at`
-stamp); T23 before T30 (the close handler waits on the single job
-slot) and T92 (the stop button acts on the single running job); T38
-and T140 reshape the same detail panel — land them together or
-coordinate the layout; T2 and T40 cover the same mid-run edits from
-opposite sides (T40 locks the form so there is less to preserve; T2
-preserves what was edited before the lock); T39's full validation
-and T69's estimate depend on Item 3 (the validator engine and the
+T6 before T21's fallback defaults (the defensive fill must match the
+model ranges); T1 before T40 (the version check is enforced in
+`verify_export` alongside the schema validation) and T105 (the verify
+command runs the full verification); T43 before T61 (the base-health
+check uses the cached list) and T163 (badges need the cache); T40
+before T41 (weights round-trip lands with the version check), T86
+(profile export uses the profile kind), and T170 (recipe export uses
+the recipe kind); T57 before T58 (the preview shows the merge
+choice); T116 before T122 (the detail role combo shows the canonical
+list); T23 before T87's deletes and T181's bulk delete (both delete
+to trash); T115 before T182 (reachable fields before full environment
+management); T86 before T181's bulk export (profile export must
+exist first); T53 before T164 (status must be real before rows show
+it); T45 before T59 (the dataset picker before the dataset handling
+in the package); T104 before T105 (the verify command checks the
+checksums); T118 before T179 (provenance builds on the `exported_at`
+stamp); T29 before T36 (the close handler waits on the single job
+slot) and T107 (the stop button acts on the single running job); T44
+and T160 reshape the same detail panel — land them together or
+coordinate the layout; T2 and T46 cover the same mid-run edits from
+opposite sides (T46 locks the form so there is less to preserve; T2
+preserves what was edited before the lock); T45's full validation
+and T84's estimate depend on Item 3 (the validator engine and the
 RAM-guard math) — the picker, the existence check, and the estimate
-display can land first and be wired to Item 3 when it arrives; T130
+display can land first and be wired to Item 3 when it arrives; T150
 no longer waits on v0.2 — it has landed, and audit #4 verified the
 gaps, so the checkpoint actions are concrete work. T12 works
-standalone with a direct fetch; T37's cache improves it later. T22 before T70 (the dry-run estimate uses the honest RAM-guard
-math) and T69 (the detail-panel estimate reuses the same
-estimator); T39 before T68 (the health panel builds on the
-dataset validator); T35 before T153 (the adapter library builds on
-the weights round-trip); T112 before T149 (the menu bar shows T112's
-shortcuts); T17 before T18's overwrite-with-backup (the old output
-goes to trash); T110 and T46 coexist (T46 is launch-only; T110
-restores the project within a session). T14 before T63 (the
-installer tests pin the icon fix), T60 (repair re-links a working
-icon, not a broken one), and T123 (the hicolor install consumes the
-rendered sizes); T57 before T124 (the receipt records a complete
-install, not a failed one); T122 and T60 before the
-README-documentation part of T58 (the install section documents
-removal and repair). T64 before T67,
-T66, T163, and T168 (the definitions gate the lineage, the
-compression wiring, the per-mode defaults, and the token codec); T31
-before T32, T33, and T157 (the shared reader first, then its
-consumers); T126 after T31, T32, and T33 (the corrupt-block tests pin
-the reader); T129 with the first codec release (T66) and after T34
-(the version gate); T65 now (the tooltip fix is one line and
-independent of everything); T128 alongside T66 (provenance records
-what the codec does). T26 before T83 (the seeding fix and the
+standalone with a direct fetch; T43's cache improves it later. T28 before T85 (the dry-run estimate uses the honest RAM-guard
+math) and T84 (the detail-panel estimate reuses the same
+estimator); T45 before T83 (the health panel builds on the
+dataset validator); T41 before T173 (the adapter library builds on
+the weights round-trip); T127 before T169 (the menu bar shows T127's
+shortcuts); T23 before T24's overwrite-with-backup (the old output
+goes to trash); T125 and T52 coexist (T52 is launch-only; T125
+restores the project within a session). T14 before T69 (the
+installer tests pin the icon fix), T66 (repair re-links a working
+icon, not a broken one), and T138 (the hicolor install consumes the
+rendered sizes); T63 before T139 (the receipt records a complete
+install, not a failed one); T137 and T66 before the
+README-documentation part of T64 (the install section documents
+removal and repair). T70 before T73,
+T72, T183, and T188 (the definitions gate the lineage, the
+compression wiring, the per-mode defaults, and the token codec); T37
+before T38, T39, and T177 (the shared reader first, then its
+consumers); T141 after T37, T38, and T39 (the corrupt-block tests pin
+the reader); T144 with the first codec release (T72) and after T40
+(the version gate); T71 now (the tooltip fix is one line and
+independent of everything); T143 alongside T72 (provenance records
+what the codec does). T32 before T98 (the seeding fix and the
 resume contract both touch the checkpoint format — land the RNG
-state first, then the settings snapshot); T24 before T75 and T154
+state first, then the settings snapshot); T30 before T90 and T174
 (the probe must be trustworthy before its informational mode and
-per-role sets are built on it); T81 before T131 (the loss chart
-shows the val loss the summary now carries); T6 before T134 (the
-Advanced settings block enforces the ranges the model validates);
-T22 before T25 (the merge guard reuses the training estimator);
-T84 before trusting T22's bound (a completion longer than
-max_seq_len breaks the estimate the guard relies on); T87 with
-T20 and T21 (the three GGUF fail-fast fixes touch the same path —
-land them together); T82 before the first real LFM3 export (the
+per-role sets are built on it); T96 before T151 (the loss chart
+shows the val loss the summary now carries); T6's model-validation half stands alone (T154, Advanced settings, is
+superseded by Audit #9 R2 — the settings leave the screen entirely);
+T28 before T31 (the merge guard reuses the training estimator);
+T99 before trusting T28's bound (a completion longer than
+max_seq_len breaks the estimate the guard relies on); T102 with
+T26 and T27 (the three GGUF fail-fast fixes touch the same path —
+land them together); T97 before the first real LFM3 export (the
 pre-flight check must exist before the merge it guards).
