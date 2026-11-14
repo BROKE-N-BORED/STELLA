@@ -273,3 +273,45 @@ def test_cli_distill_teacher_unreachable_exit_1(home, tmp_path):
     )
     assert res.returncode == 1
     assert "Ollama is not running" in res.stderr
+
+
+# -- T74: cancel ------------------------------------------------------
+
+
+def test_distill_cancel_stops_and_keeps_answers(seeded, teacher_up, tmp_path):
+    """The job card's Cancel stops distillation; the answers so far
+    are saved, and a later run resumes past them."""
+    prompts = make_prompts(tmp_path, ["one", "two", "three", "four"])
+    gen = fake_teacher({})
+    state = {"asked": 0}
+
+    def _generate(tag, prompt):
+        state["asked"] += 1
+        return gen(tag, prompt)
+
+    def should_stop():
+        return state["asked"] >= 2
+
+    with pytest.raises(StellaError, match="Cancelled"):
+        distill_dataset(
+            seeded, "lfm3-tool", "tool-calls", TEACHER, prompts,
+            should_stop=should_stop, _generate=_generate,
+        )
+    assert state["asked"] == 2
+    rows = read_rows(seeded)
+    assert [r["prompt"] for r in rows] == ["one", "two"]
+
+
+def test_distill_emits_prompt_events(seeded, teacher_up, tmp_path):
+    prompts = make_prompts(tmp_path, ["one", "two", "three"])
+    events = []
+    distill_dataset(
+        seeded, "lfm3-tool", "tool-calls", TEACHER, prompts,
+        on_event=events.append, _generate=fake_teacher({}),
+    )
+    prompt_events = [e for e in events if e["type"] == "prompt"]
+    assert [(e["index"], e["total"]) for e in prompt_events] == [
+        (1, 3), (2, 3), (3, 3),
+    ]
+    assert events[-1]["type"] == "done"
+    assert events[-1]["rows"] == 3

@@ -152,7 +152,13 @@ def test_full_template_walk(agent, store, monkeypatch):
         ]
     )
     agent._chat_fn = scripted
-    reply = agent.reply("just do it: train LFM3 on tool calls")
+    # T76: "just do it" shows the plan first and waits — nothing
+    # runs until the user says go ahead.
+    plan = agent.reply("just do it: train LFM3 on tool calls")
+    assert "I will:" in plan
+    assert agent.pending_plan is not None
+    assert scripted.calls == []  # no model call, no tools ran
+    reply = agent.reply("go ahead")
     assert "All done" in reply
     proj = store.get_project("lfm3-1-7b", "tool-calls")
     assert proj["dataset_ref"] == "sample-tool-calls.jsonl"
@@ -758,3 +764,111 @@ def test_requant_tool_via_chat_loop(agent, store, seeded, monkeypatch):
     tool_msgs = [m for m in second if m["role"] == "tool"]
     assert len(tool_msgs) == 1
     assert "qwen3.5:4b-q4-k-m" in tool_msgs[0]["content"]
+
+
+# -- T76: plan before it runs, replies that stream -------------------
+
+
+def test_just_do_it_shows_plan_and_waits(agent):
+    reply = agent.reply("just do it")
+    assert "I will:" in reply
+    assert "Say go ahead to run it, or cancel to stop." in reply
+    assert agent.pending_plan is not None
+    assert len(agent.pending_plan) >= 5
+    # Nothing ran: no profile or project was created.
+    assert agent.current_profile is None
+    assert agent.current_project is None
+
+
+def test_plan_refusal_clears_plan(agent):
+    agent.reply("just do it")
+    assert agent.pending_plan is not None
+    reply = agent.reply("cancel")
+    assert agent.pending_plan is None
+    assert "will not" in reply
+
+
+def test_plan_other_message_drops_plan(agent):
+    agent.reply("just do it")
+    assert agent.pending_plan is not None
+    agent._chat_fn = ScriptedChat(["A profile is one base model."])
+    reply = agent.reply("what is a profile?")
+    assert agent.pending_plan is None
+    assert reply == "A profile is one base model."
+
+
+def test_plan_approval_runs_the_plan(agent):
+    agent.reply("just do it")
+    scripted = ScriptedChat(["Done it."])
+    agent._chat_fn = scripted
+    reply = agent.reply("go ahead")
+    assert agent.pending_plan is None
+    assert reply == "Done it."
+    # The internal "run the plan" message reached the model.
+    users = [m for m in scripted.calls[0] if m["role"] == "user"]
+    assert any("Run the plan we agreed on" in m["content"] for m in users)
+
+
+class StreamingChat:
+    """A fake stream_fn: emits each scripted reply in small chunks,
+    then returns the full text."""
+
+    def __init__(self, texts, chunk=4):
+        self.texts = list(texts)
+        self.chunk = chunk
+        self.calls = []
+
+    def __call__(self, model, messages, on_token=None):
+        self.calls.append(messages)
+        text = self.texts.pop(0) if self.texts else "Done."
+        for i in range(0, len(text), self.chunk):
+            if on_token is not None:
+                on_token(text[i:i + self.chunk])
+        return text
+
+
+def test_streaming_calls_on_token_and_records_plain(store):
+    streamed = []
+    stream = StreamingChat(["Hello there, this is a reply."])
+    agent = ChatAgent(
+        store, "lfm3:1.7b", stream_fn=stream, on_token=streamed.append
+    )
+    reply = agent.reply("hi")
+    assert reply == "Hello there, this is a reply."
+    assert "".join(streamed) == "Hello there, this is a reply."
+    assert agent.last_streamed_plain == "Hello there, this is a reply."
+
+
+def test_streaming_never_streams_a_tool_block(store):
+    streamed = []
+    text = "Setting it up.\n" + tool_block("list_profiles")
+    stream = StreamingChat([text, "Here they are."], chunk=3)
+    agent = ChatAgent(
+        store, "lfm3:1.7b", stream_fn=stream, on_token=streamed.append
+    )
+    reply = agent.reply("list my profiles")
+    assert reply == "Here they are."
+    # The user saw the plain words only — never the tool JSON.
+    shown = "".join(streamed)
+    assert "Setting it up." in shown
+    assert "Here they are." in shown
+    assert "```tool" not in shown
+    assert "list_profiles" not in shown
+    # But the tool still ran: the model was called twice.
+    assert len(stream.calls) == 2
+
+
+def test_streamed_narration_is_not_doubled(store):
+    narrated = []
+    streamed = []
+    stream = StreamingChat(["A plain reply."])
+    agent = ChatAgent(
+        store, "lfm3:1.7b", stream_fn=stream,
+        on_token=streamed.append, on_narration=narrated.append,
+    )
+    reply = agent.reply("hi")
+    assert reply == "A plain reply."
+    assert "".join(streamed) == "A plain reply."
+    # Streamed words are not narrated again: the window shows them
+    # once, as they arrive.
+    assert narrated == []

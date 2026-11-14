@@ -18,7 +18,9 @@ The training template (TEMPLATE_STEPS) is the shape every training
 platform needs, whatever the model: goal, base model, data,
 recipe, train, check, export, test and back up. The agent walks
 one step at a time, asks only for what it needs, and fills the rest
-with defaults. On "just do it" it runs the whole template.
+with defaults. On "just do it" it shows the plan first ("I will:
+1. ... 2. ...") and runs the whole template once the user says
+go ahead (T76).
 
 Qt-free on purpose: the CLI REPL drives the same core as the
 window, and tests drive it with scripted replies and no server.
@@ -33,7 +35,7 @@ from .distill import distill_dataset
 from .gguf import export_gguf
 from .howto import topic_text, topic_titles
 from .model import StellaError, Store, slug_from_model
-from .ollama import OllamaError, list_models
+from .ollama import OllamaError, chat_stream, list_models
 from .probe import probe_gate, probe_project
 from .providers import ProviderError, make_chat_fn
 from .provision import (
@@ -56,6 +58,48 @@ from .train import (
 # How many tool calls one user message may trigger. A confused model
 # that keeps calling tools forever is stopped here, in plain words.
 MAX_TOOL_CALLS = 12
+
+# The plan-first flow (T76): "just do it" shows the plan and waits.
+# A trigger starts a plan; an approval runs the pending plan; a
+# refusal drops it. Any other message drops the pending plan and is
+# handled normally.
+JUST_DO_IT_TRIGGERS = ("just do it", "do the whole thing", "go ahead")
+PLAN_APPROVALS = {
+    "go ahead", "go", "yes", "ok", "okay", "run it", "do it",
+    "go for it", "sure", "just do it", "do the whole thing",
+}
+PLAN_REFUSALS = {
+    "no", "cancel", "stop", "never mind", "don't", "do not",
+    "nope", "cancel that",
+}
+
+
+def _is_just_do_it(cleaned: str) -> bool:
+    """The message asks for the whole thing (T76)."""
+    return any(
+        cleaned == trigger or cleaned.startswith(trigger)
+        for trigger in JUST_DO_IT_TRIGGERS
+    )
+
+
+def _is_approval(cleaned: str) -> bool:
+    """The message approves the pending plan (T76)."""
+    return (
+        cleaned in PLAN_APPROVALS
+        or cleaned.startswith("go ahead")
+        or cleaned.startswith("yes ")
+    )
+
+
+def _is_refusal(cleaned: str) -> bool:
+    """The message refuses the pending plan (T76)."""
+    return (
+        cleaned in PLAN_REFUSALS
+        or cleaned.startswith("no ")
+        or cleaned.startswith("cancel")
+        or cleaned.startswith("don't")
+        or cleaned.startswith("do not")
+    )
 
 # The template: the steps every training run needs, whatever the
 # model. Each step is (key, title, what it means in plain words).
@@ -249,6 +293,7 @@ def build_system_prompt(
         "Fill everything else with the defaults. Say plainly which "
         "step you are on, like \"Step 3 of 8: Data.\"\n"
         "- If the user says just do it, do the whole thing, or go ahead, "
+        "the plan is shown first and they approve it; once approved, "
         "run the whole template end to end with the defaults and the "
         "sample dataset, and say what you did at each step.\n"
         "- Never invent a dataset path, a model name, or a setting. If "
@@ -285,8 +330,10 @@ class ChatAgent:
         profile: str | None = None,
         project: str | None = None,
         chat_fn=None,
+        stream_fn=None,
         on_narration=None,
         on_progress=None,
+        on_token=None,
     ):
         self.store = store
         self.model = model
@@ -299,11 +346,38 @@ class ChatAgent:
         # ProviderError when the chat runs, never here.
         self._default_chat_fn = chat_fn is None
         self._chat_fn = chat_fn or make_chat_fn(self.provider, store.home)
+        # Streaming (T76): a supplied stream_fn (tests) is kept;
+        # otherwise Ollama streams and cloud providers answer in one
+        # go. Recomputed on every provider switch.
+        self._explicit_stream_fn = stream_fn is not None
+        self._stream_fn = stream_fn
+        self._refresh_stream_fn()
         self._on_narration = on_narration
         self._on_progress = on_progress
+        self._on_token = on_token
         self._history: list[dict] = []
         self._cancelled = False
         self._controller: TrainController | None = None
+        # The plan-first flow (T76): the pending plan, if one was
+        # shown and neither approved nor refused yet.
+        self._pending_plan: list[str] | None = None
+        # Streaming state (T76): the plain words streamed by the
+        # most recent model call, so the window knows what is
+        # already on screen and does not show it twice.
+        self.last_streamed_plain = ""
+        self._last_call_streamed = False
+        self._stream_buf = ""
+        self._stream_suppressed = False
+        self._streamed_plain = ""
+
+    def _refresh_stream_fn(self) -> None:
+        """The streaming call for the current provider (T76)."""
+        if self._explicit_stream_fn:
+            return
+        if self._default_chat_fn and (self.provider or "ollama") == "ollama":
+            self._stream_fn = chat_stream
+        else:
+            self._stream_fn = None
 
     # -- control ----------------------------------------------------
     def set_model(self, model: str) -> None:
@@ -316,12 +390,16 @@ class ChatAgent:
         self.model = model
         if self._default_chat_fn:
             self._chat_fn = make_chat_fn(self.provider, self.store.home)
+        self._refresh_stream_fn()
 
-    def set_callbacks(self, on_narration=None, on_progress=None) -> None:
-        """Wire narration/progress callbacks (the GUI worker does
-        this each run, so the callbacks reach the live signals)."""
+    def set_callbacks(self, on_narration=None, on_progress=None,
+                      on_token=None) -> None:
+        """Wire narration/progress/token callbacks (the GUI worker
+        does this each run, so the callbacks reach the live
+        signals)."""
         self._on_narration = on_narration
         self._on_progress = on_progress
+        self._on_token = on_token
 
     def request_cancel(self) -> None:
         """Stop the current reply (and any training/sleep it started).
@@ -353,17 +431,174 @@ class ChatAgent:
         )
         return [{"role": "system", "content": system}] + self._history
 
+    # -- the plan (T76) -------------------------------------------
+    @property
+    def pending_plan(self) -> list[str] | None:
+        """The plan shown and waiting for Run or Cancel, if any."""
+        return self._pending_plan
+
+    def build_just_do_it_plan(self) -> list[str]:
+        """The "just do it" plan: the template steps, concretized
+        with the current session. Shown before anything runs — the
+        user sees what is about to happen and can stop it."""
+        steps: list[str] = []
+        if self.current_profile:
+            try:
+                prof = self.store.get_profile(self.current_profile)
+                name = prof.get("display_name") or self.current_profile
+            except StellaError:
+                name = self.current_profile
+            steps.append(f"Use the {name} profile.")
+            try:
+                status = weights_status(self.store, self.current_profile)
+                if status["state"] != "ready":
+                    steps.append(
+                        "Download the base weights (a few gigabytes)."
+                    )
+            except StellaError:
+                pass
+        else:
+            steps.append(
+                "Ask which model to start from, and set it up."
+            )
+        if self.current_project:
+            try:
+                proj = self.store.get_project(
+                    self.current_profile, self.current_project
+                )
+                name = proj.get("display_name") or self.current_project
+            except StellaError:
+                name = self.current_project
+            steps.append(f"Use the {name} project.")
+        else:
+            steps.append("Make a project for this training run.")
+        steps.append("Use the sample dataset (20 examples).")
+        steps.append("Train it. This takes hours on this PC.")
+        steps.append("Check it: validation loss and the refusal probe.")
+        steps.append("Export it as a GGUF file you can run in Ollama.")
+        steps.append("Try the tuned model, and keep the export safe.")
+        return steps
+
+    def _plan_text(self, plan: list[str]) -> str:
+        lines = ["I will:"]
+        for i, step in enumerate(plan, 1):
+            lines.append(f"{i}. {step}")
+        lines.append("")
+        lines.append("Say go ahead to run it, or cancel to stop.")
+        return "\n".join(lines)
+
+    # -- streaming (T76) --------------------------------------------
+    def _model_call(self, messages: list[dict]) -> str:
+        """One model call, streaming when the window is listening.
+
+        The reply streams token by token through on_token — but
+        only the plain words. A tool block is never streamed: the
+        filter holds back from the first ```tool fence, so the
+        user never sees JSON. `last_streamed_plain` holds the
+        streamed plain words, so the window knows what is already
+        on screen and does not show it twice.
+        """
+        if self._on_token is not None and self._stream_fn is not None:
+            self._stream_buf = ""
+            self._stream_suppressed = False
+            self._streamed_plain = ""
+            text = self._stream_fn(
+                self.model, messages, on_token=self._on_stream_token
+            )
+            self._flush_stream()
+            self._last_call_streamed = True
+            self.last_streamed_plain = self._streamed_plain.strip()
+            return text
+        self._last_call_streamed = False
+        self.last_streamed_plain = ""
+        return self._chat_fn(self.model, messages)
+
+    def _on_stream_token(self, token: str) -> None:
+        if self._stream_suppressed:
+            return
+        self._stream_buf += token
+        idx = self._stream_buf.find("```tool")
+        if idx >= 0:
+            self._emit_streamed(self._stream_buf[:idx])
+            self._stream_suppressed = True
+            self._stream_buf = ""
+            return
+        # Hold back the last few chars: a fence could be split
+        # across chunks ("``" now, "`tool" next).
+        if len(self._stream_buf) > 6:
+            self._emit_streamed(self._stream_buf[:-6])
+            self._stream_buf = self._stream_buf[-6:]
+
+    def _emit_streamed(self, text: str) -> None:
+        if not text:
+            return
+        self._streamed_plain += text
+        if self._on_token is not None:
+            self._on_token(text)
+
+    def _flush_stream(self) -> None:
+        if not self._stream_suppressed and self._stream_buf:
+            self._emit_streamed(self._stream_buf)
+        self._stream_buf = ""
+
     # -- the loop ---------------------------------------------------
     def reply(self, user_text: str) -> str:
         """One user message in, one plain-words reply out."""
         self._cancelled = False
-        self._history.append({"role": "user", "content": user_text})
+        self.last_streamed_plain = ""
+        cleaned = user_text.strip().lower()
+        if self._pending_plan is not None:
+            if _is_approval(cleaned):
+                # Approved: run the agreed plan, step by step.
+                plan = self._pending_plan
+                self._pending_plan = None
+                self._history.append(
+                    {"role": "user", "content": user_text}
+                )
+                self._history.append({
+                    "role": "user",
+                    "content": (
+                        "Run the plan we agreed on, step by step: "
+                        + "; ".join(plan)
+                    ),
+                })
+            elif _is_refusal(cleaned):
+                self._pending_plan = None
+                self._history.append(
+                    {"role": "user", "content": user_text}
+                )
+                reply = (
+                    "Okay, I will not do that. Tell me what you "
+                    "want instead."
+                )
+                self._history.append(
+                    {"role": "assistant", "content": reply}
+                )
+                return reply
+            else:
+                # Any other message drops the plan and is handled
+                # normally: the plan was for the old request.
+                self._pending_plan = None
+                self._history.append(
+                    {"role": "user", "content": user_text}
+                )
+        elif _is_just_do_it(cleaned):
+            # Show the plan first; nothing runs until the user
+            # says go ahead.
+            plan = self.build_just_do_it_plan()
+            self._pending_plan = plan
+            text = self._plan_text(plan)
+            self._history.append({"role": "user", "content": user_text})
+            self._history.append({"role": "assistant", "content": text})
+            return text
+        else:
+            self._history.append({"role": "user", "content": user_text})
         calls = 0
         while calls < MAX_TOOL_CALLS:
             if self._cancelled:
                 return "Stopped. Tell me what you want to do next."
             try:
-                text = self._chat_fn(self.model, self._messages())
+                text = self._model_call(self._messages())
             except (OllamaError, ProviderError) as exc:
                 reply = str(exc)
                 self._history.append({"role": "assistant", "content": reply})
@@ -395,7 +630,10 @@ class ChatAgent:
                 self._history.append({"role": "assistant", "content": reply})
                 return reply
             calls += 1
-            if plain:
+            if plain and not self._last_call_streamed:
+                # The plain words already streamed live when the
+                # call streamed; narrating them again would show
+                # them twice.
                 self._narrate(plain)
             self._narrate(TOOL_NARRATION.get(name, f"Working on {name}..."))
             result = self.call_tool(name, args or {})

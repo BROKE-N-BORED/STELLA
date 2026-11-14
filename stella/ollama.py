@@ -153,6 +153,76 @@ def generate(
     return text
 
 
+def chat_stream(
+    model: str,
+    messages: list[dict],
+    *,
+    url: str | None = None,
+    timeout: float = CHAT_TIMEOUT_SECONDS,
+    on_token=None,
+) -> str:
+    """One /api/chat call with streaming (T76, entry 010).
+
+    Calls on_token(chunk) for each piece of the reply as it
+    arrives, and returns the full reply text. Same failure
+    behavior as chat: OllamaError in plain words.
+    """
+    base = (url or ollama_url()).rstrip("/")
+    payload = json.dumps(
+        {
+            "model": model,
+            "messages": messages,
+            "stream": True,
+            "options": {"temperature": 0.3, "num_predict": 1024},
+        }
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        base + "/api/chat",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            parts: list[str] = []
+            for raw_line in resp:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line.decode("utf-8"))
+                except ValueError:
+                    continue
+                message = obj.get("message") if isinstance(obj, dict) else None
+                content = (
+                    message.get("content")
+                    if isinstance(message, dict)
+                    else None
+                )
+                if isinstance(content, str) and content:
+                    parts.append(content)
+                    if on_token is not None:
+                        on_token(content)
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = json.loads(exc.read().decode("utf-8")).get("error", "")
+        except (ValueError, OSError):
+            pass
+        raise OllamaError(
+            f"Ollama said no ({exc.code})"
+            + (f": {detail}" if detail else "")
+        ) from exc
+    except (urllib.error.URLError, OSError, TimeoutError) as exc:
+        raise OllamaError(
+            "Ollama is not answering. Start Ollama and try again."
+        ) from exc
+    text = "".join(parts)
+    if not text.strip():
+        raise OllamaError("Ollama answered with no text.")
+    return text
+
+
 def chat(
     model: str,
     messages: list[dict],

@@ -82,6 +82,16 @@ job, export it as a usable package.
   with actions disabled until they can work. Training shows a
   live loss curve plus speed, RAM, time left, and epoch, and
   the last run's curve is still there after it finishes.
+- v0.12.0 UI rebuild, P1 slice (2026-11-14): every job runs as
+  a card under the hero, with progress, a live status line, and
+  a Cancel button; a second job is refused in plain words. The
+  chat picks its model with clickable buttons, shows its plan
+  before it runs, and streams its replies. The session follows
+  the profile. Tree rows show full names with a health dot per
+  profile. The download row lives in the main window only, and
+  is honest about a missing repo. Sections collapse, Save stays
+  visible, and STELLA has its own dark-and-gold look with
+  keyboard shortcuts and a visible focus ring.
 
 ## Install
 

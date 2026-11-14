@@ -663,3 +663,63 @@ def test_export_gguf_refusal_happens_before_merge(tmp_path):
             _runner=FakeRunner(), _model_loader=loader,
         )
     assert (out / "proof-q4-k-m.gguf").read_bytes() == b"previous export"
+
+
+# -- T74: cancel + phase events ---------------------------------------
+
+
+def test_run_kills_process_on_cancel():
+    """A long converter run is killed when the flag flips — the job
+    card's Cancel does not wait for the converter to finish."""
+    import threading
+    import time
+
+    from stella.gguf import _run
+
+    state = {"stop": False}
+
+    def should_stop():
+        return state["stop"]
+
+    threading.Timer(0.5, lambda: state.update(stop=True)).start()
+    started = time.monotonic()
+    with pytest.raises(StellaError, match="Cancelled"):
+        _run(["sleep", "30"], should_stop=should_stop)
+    assert time.monotonic() - started < 10
+
+
+def test_convert_emits_phase_events(tmp_path):
+    hf = fake_hf_dir(tmp_path)
+    events = []
+    convert_to_gguf(
+        hf, tmp_path / "model-q4_k_m.gguf",
+        _runner=FakeRunner(), on_event=events.append,
+    )
+    assert [e["phase"] for e in events] == ["convert", "quantize"]
+    assert all(e["type"] == "phase" for e in events)
+    assert "Converting" in events[0]["message"]
+    assert "Q4_K_M" in events[1]["message"]
+
+
+def test_convert_cancel_between_steps(tmp_path):
+    class CancellingRunner(FakeRunner):
+        """Cancels after the first command finishes."""
+
+        def __init__(self, state):
+            super().__init__()
+            self.state = state
+
+        def __call__(self, cmd):
+            super().__call__(cmd)
+            self.state["stop"] = True
+
+    hf = fake_hf_dir(tmp_path)
+    state = {"stop": False}
+    runner = CancellingRunner(state)
+    with pytest.raises(StellaError, match="Cancelled"):
+        convert_to_gguf(
+            hf, tmp_path / "model-q4_k_m.gguf",
+            _runner=runner, should_stop=lambda: state["stop"],
+        )
+    # Only the convert ran; the quantize never started.
+    assert len(runner.commands) == 1

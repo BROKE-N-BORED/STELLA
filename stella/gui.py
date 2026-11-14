@@ -50,7 +50,18 @@ from PySide6.QtCore import (
     Signal,
 )
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
-from PySide6.QtGui import QBrush, QColor, QDesktopServices, QIcon, QPainter, QPen
+from PySide6.QtGui import (
+    QBrush,
+    QColor,
+    QDesktopServices,
+    QIcon,
+    QKeySequence,
+    QPainter,
+    QPen,
+    QPixmap,
+    QShortcut,
+    QTextCursor,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -94,7 +105,9 @@ from .model import (
     slug_from_model,
 )
 from .model_info import describe_model, fit_verdict, fits_this_pc
-from .ollama import list_model_sizes, list_models, ollama_url
+from .ollama import list_model_sizes, list_models, ollama_url, reachable
+from .provision import is_hf_repo_id
+from .style import apply_stella_style, install_press_dips
 from .providers import (
     PROVIDERS,
     get_custom_config,
@@ -120,7 +133,9 @@ def _weights_label(status):
     """A weights_status dict as one plain-words line."""
     state = status["state"]
     if state == "no-repo":
-        return "No Hugging Face repo set. Set Base ref in the profile window."
+        # Just the fact (T79): the fix is a button next to it, not
+        # an instruction to go to the window the user is already in.
+        return "No Hugging Face repo set."
     if state == "missing":
         return "Not downloaded yet."
     if state == "partial":
@@ -129,6 +144,42 @@ def _weights_label(status):
             f"({provision.format_size(status['size_bytes'])} so far)."
         )
     return f"Ready: {provision.format_size(status['size_bytes'])} on disk."
+
+
+def _chain_tab_order(widgets):
+    """Tab walks the widgets in the given (visual) order (T82)."""
+    for first, second in zip(widgets, widgets[1:]):
+        QWidget.setTabOrder(first, second)
+
+
+_HEALTH_ICONS: dict[str, QIcon] = {}
+
+
+def _health_icon(state: str) -> QIcon:
+    """A small health dot for a tree row (T78): green = weights
+    ready, amber = weights not ready, grey = Ollama down. Drawn
+    once and cached; 16 px, no files needed."""
+    icon = _HEALTH_ICONS.get(state)
+    if icon is not None:
+        return icon
+    colors = {
+        "ready": "#4caf50",
+        "missing": "#e8a90c",
+        "ollama-down": "#888888",
+    }
+    pixmap = QPixmap(16, 16)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    try:
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setBrush(QBrush(QColor(colors.get(state, "#888888"))))
+        painter.setPen(Qt.NoPen)
+        painter.drawEllipse(3, 3, 10, 10)
+    finally:
+        painter.end()
+    icon = QIcon(pixmap)
+    _HEALTH_ICONS[state] = icon
+    return icon
 
 
 def _tag_warnings(store, tag, *, exclude_slug=None):
@@ -282,6 +333,10 @@ class NewProfileDialog(QDialog):
         buttons.addWidget(self.create_btn)
         buttons.addWidget(self.cancel_btn)
         layout.addLayout(buttons)
+        _chain_tab_order([
+            self.model_list, self.type_edit,
+            self.create_btn, self.cancel_btn,
+        ])
 
     def picked_model(self) -> str:
         """The picked model: the tapped row, or the typed text."""
@@ -527,20 +582,55 @@ class SleepWorker(QThread):
         )
 
 
+class JobContext:
+    """What a JobWorker job gets: a log line, a progress report,
+    and a cancel check. The job runs in the worker thread; all
+    three are signal-safe."""
+
+    def __init__(self, worker: "JobWorker"):
+        self._worker = worker
+
+    def log(self, text: str) -> None:
+        self._worker.log.emit(text)
+
+    def progress(self, done: int, total: int) -> None:
+        """Report progress: done of total (total 0 = busy, no count)."""
+        self._worker.progress.emit(done, total)
+
+    def is_cancelled(self) -> bool:
+        return self._worker.cancelled
+
+
 class JobWorker(QThread):
-    """Generic off-thread job (GGUF export, refusal probe). The job
-    function takes a log callable and returns its finish message."""
+    """Generic off-thread job (GGUF export, refusal probe,
+    re-quantize, distill). The job function takes a JobContext and
+    returns its finish message. It reports progress and honors
+    cancel (T74): the job card's Cancel button sets the flag, and
+    the engine checks it between steps (and kills a running
+    subprocess when it flips)."""
 
     log = Signal(str)
+    progress = Signal(int, int)  # done, total (total 0 = busy)
     finished = Signal(bool, str)
 
     def __init__(self, fn, parent=None):
         super().__init__(parent)
         self._fn = fn
+        self._cancelled = False
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancelled
+
+    def request_cancel(self) -> None:
+        """Cancel the job (T74). The engine stops at the next check
+        point; a running subprocess is killed."""
+        self._cancelled = True
 
     def run(self):
+        ctx = JobContext(self)
         try:
-            message = self._fn(self.log.emit)
+            message = self._fn(ctx)
         except StellaError as exc:
             self.finished.emit(False, str(exc))
             return
@@ -726,7 +816,10 @@ class LossCurveWidget(QWidget):
         painter = QPainter(self)
         try:
             rect = self.rect()
-            painter.fillRect(rect, QColor("#fafafa"))
+            # Dark card colors (T81): the curve lives on a dark
+            # surface now, so the axes and labels are light and the
+            # curve is a bright green that reads on dark.
+            painter.fillRect(rect, QColor("#232323"))
             if not self._points:
                 painter.setPen(QPen(QColor("#888888")))
                 painter.drawText(
@@ -745,10 +838,10 @@ class LossCurveWidget(QWidget):
             if high - low < 1e-9:
                 high = low + 1.0
             # Axes.
-            painter.setPen(QPen(QColor("#bbbbbb")))
+            painter.setPen(QPen(QColor("#555555")))
             painter.drawLine(left, top, left, bottom)
             painter.drawLine(left, bottom, right, bottom)
-            painter.setPen(QPen(QColor("#888888")))
+            painter.setPen(QPen(QColor("#9a9a9a")))
             painter.drawText(2, top + 4, f"{high:.2f}")
             painter.drawText(2, bottom + 4, f"{low:.2f}")
             painter.drawText(left, rect.height() - 6, "step 0")
@@ -759,7 +852,7 @@ class LossCurveWidget(QWidget):
                 end_label,
             )
             # The curve.
-            painter.setPen(QPen(QColor("#2e7d32"), 2))
+            painter.setPen(QPen(QColor("#66bb6a"), 2))
             prev = None
             for step, loss in self._points:
                 x = left + (right - left) * step / max_step
@@ -770,10 +863,119 @@ class LossCurveWidget(QWidget):
                 prev = point
             # The latest point, marked.
             if prev is not None:
-                painter.setPen(QPen(QColor("#2e7d32"), 4))
+                painter.setPen(QPen(QColor("#66bb6a"), 4))
                 painter.drawPoint(prev[0], prev[1])
         finally:
             painter.end()
+
+
+class JobCard(QFrame):
+    """One running job (T74, entry 021): a title, a live status
+    line, a progress bar, and a Cancel button. Every job — Train,
+    Sleep, GGUF export, refusal probe, re-quantize, distill — runs
+    as one of these. Hidden at rest (the main screen is calm when
+    nothing runs); shown while a job runs, right under the hero,
+    so no job is ever below the fold while it runs."""
+
+    cancel_clicked = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("card")
+        self.setFrameShape(QFrame.StyledPanel)
+        layout = QVBoxLayout(self)
+        top_row = QHBoxLayout()
+        self.title_label = QLabel("")
+        self.title_label.setStyleSheet(
+            "font-size: 14px; font-weight: bold;"
+        )
+        top_row.addWidget(self.title_label, 1)
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.clicked.connect(self.cancel_clicked.emit)
+        top_row.addWidget(self.cancel_btn)
+        layout.addLayout(top_row)
+        self.status_label = QLabel("")
+        self.status_label.setWordWrap(True)
+        layout.addWidget(self.status_label)
+        self.progress = QProgressBar()
+        self.progress.setMaximum(100)
+        self.progress.setValue(0)
+        layout.addWidget(self.progress)
+        self.setVisible(False)
+
+    def start(self, title: str, determinate: bool) -> None:
+        """Show the card for a new job, with fresh state."""
+        self.title_label.setText(title)
+        self.status_label.setText("Starting...")
+        self.cancel_btn.setEnabled(True)
+        if determinate:
+            self.progress.setMaximum(100)
+            self.progress.setValue(0)
+        else:
+            # No count to show: a busy bar, not a lying 0%.
+            self.progress.setMaximum(0)
+        self.setVisible(True)
+
+    def set_status(self, text: str) -> None:
+        self.status_label.setText(text)
+
+    def set_progress(self, done: int, total: int) -> None:
+        """done of total; total 0 switches to the busy bar."""
+        if total > 0:
+            self.progress.setMaximum(total)
+            self.progress.setValue(done)
+        else:
+            self.progress.setMaximum(0)
+
+    def finish(self) -> None:
+        self.setVisible(False)
+
+
+class CollapsibleSection(QWidget):
+    """A section with a header that collapses it (T80, entry 012).
+
+    The header is a flat button with an arrow: down when open, right
+    when closed. Sections start open — collapsing is the user's
+    choice, nothing is hidden by default. Content goes in
+    `content_layout`."""
+
+    def __init__(self, title: str, parent=None):
+        super().__init__(parent)
+        self._title = title
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.header_btn = QPushButton(f"\u25be {title}")
+        self.header_btn.setObjectName("sectionHeader")
+        self.header_btn.setFlat(True)
+        self.header_btn.setCheckable(True)
+        self.header_btn.setChecked(True)
+        self.header_btn.toggled.connect(self._on_toggled)
+        layout.addWidget(self.header_btn)
+        self.content = QWidget()
+        self.content_layout = QVBoxLayout(self.content)
+        layout.addWidget(self.content)
+
+    @property
+    def title(self) -> str:
+        return self._title
+
+    def set_title(self, title: str) -> None:
+        """Rename the section (the Notes section marks itself
+        "(modified)" this way)."""
+        self._title = title
+        arrow = "\u25be" if self.header_btn.isChecked() else "\u25b8"
+        self.header_btn.setText(f"{arrow} {title}")
+
+    def is_expanded(self) -> bool:
+        return self.content.isVisible()
+
+    def set_expanded(self, expanded: bool) -> None:
+        self.header_btn.setChecked(expanded)
+
+    def _on_toggled(self, checked: bool) -> None:
+        self.content.setVisible(checked)
+        arrow = "\u25be" if checked else "\u25b8"
+        self.header_btn.setText(f"{arrow} {self._title}")
 
 
 # ---------------------------------------------------------------- windows
@@ -784,8 +986,8 @@ class ProfileWindow(QDialog):
 
     Reached from the menu (Profiles) or by double-clicking a profile
     row in the tree. Every field explains itself in plain words
-    underneath. Also the home of the Download model button: the base
-    weights for this profile, with progress and cancel.
+    underneath. The download row lives only in the main window now
+    (T79): one honest download row, not a duplicate here.
     """
 
     def __init__(self, main, slug, parent=None):
@@ -803,6 +1005,7 @@ class ProfileWindow(QDialog):
         self.tag_combo = QComboBox()
         self.tag_combo.setEditable(True)
         self.base_edit = QLineEdit()
+        self.base_edit.setPlaceholderText("LiquidAI/LFM3-1.7B")
         form.addRow("Display name", self.display_edit)
         form.addRow(
             "",
@@ -839,37 +1042,9 @@ class ProfileWindow(QDialog):
         # could answer. It stays in profile.json for compatibility.
         layout.addLayout(form)
 
-        save_btn = QPushButton("Save profile")
-        save_btn.clicked.connect(self.save)
-        layout.addWidget(save_btn)
-
-        layout.addWidget(QLabel("Model weights"))
-        self.download_status = QLabel("")
-        self.download_status.setWordWrap(True)
-        layout.addWidget(self.download_status)
-        self.download_progress = QProgressBar()
-        self.download_progress.setMaximum(100)
-        self.download_progress.setValue(0)
-        layout.addWidget(self.download_progress)
-        dl_btns = QHBoxLayout()
-        self.download_btn = QPushButton("Download model")
-        self.download_btn.clicked.connect(
-            lambda: self._main.start_download(self._slug)
-        )
-        self.download_cancel_btn = QPushButton("Cancel")
-        self.download_cancel_btn.clicked.connect(self._main.cancel_download)
-        self.download_cancel_btn.setEnabled(False)
-        dl_btns.addWidget(self.download_btn)
-        dl_btns.addWidget(self.download_cancel_btn)
-        dl_btns.addStretch(1)
-        layout.addLayout(dl_btns)
-        layout.addWidget(
-            _help_label(
-                "Downloads the base weights from Hugging Face. If it "
-                "stops, press Download again: it picks up where it left "
-                "off, nothing is downloaded twice."
-            )
-        )
+        self.save_btn = QPushButton("Save profile")
+        self.save_btn.clicked.connect(self.save)
+        layout.addWidget(self.save_btn)
 
         btns = QHBoxLayout()
         rename_btn = QPushButton("Rename")
@@ -899,7 +1074,13 @@ class ProfileWindow(QDialog):
         ):
             signal.connect(self._on_edited)
         self._load()
-        self.refresh_download_status()
+        # Ctrl+S saves here (T82); Tab walks the form in visual order.
+        QShortcut(QKeySequence("Ctrl+S"), self, self.save)
+        _chain_tab_order([
+            self.display_edit, self.role_edit, self.tag_combo,
+            self.base_edit, self.save_btn, rename_btn, delete_btn,
+            close_btn,
+        ])
 
     @property
     def slug(self):
@@ -910,7 +1091,6 @@ class ProfileWindow(QDialog):
         self._slug = new_slug
         self.setWindowTitle(f"Profile: {new_slug}")
         self._load()
-        self.refresh_download_status()
 
     def _current_values(self):
         return {
@@ -992,7 +1172,13 @@ class ProfileWindow(QDialog):
         if tag and tag not in models:
             self.tag_combo.addItem(tag)
         self.tag_combo.setCurrentText(tag)
-        self.base_edit.setText(p.get("base_ref", ""))
+        # The Base ref field shows a repo, never a tag as if it
+        # were one (T79): a stored value that is not a Hugging
+        # Face repo id (no slash) shows blank, with the placeholder
+        # saying what belongs here. Saving keeps the blank. The
+        # model-side sync rule is T54's; this is the UI face.
+        base = p.get("base_ref", "")
+        self.base_edit.setText(base if is_hf_repo_id(base) else "")
 
     def save(self):
         """Save the profile form. Returns True on success, False
@@ -1019,49 +1205,10 @@ class ProfileWindow(QDialog):
             return False
         self._main.refresh_tree()
         self._main.refresh_session()
-        self.refresh_download_status()
         self._main._say(f"Saved profile {self._slug}.")
         self._capture_snapshot()
         self._update_title()
         return True
-
-    def refresh_download_status(self):
-        """Re-read the weights state from disk (called after a
-        download finishes and whenever the window opens)."""
-        manager = self._main.download_manager
-        running_here = (
-            manager.is_running()
-            and self._main.download_profile == self._slug
-        )
-        self.download_btn.setEnabled(not running_here)
-        self.download_cancel_btn.setEnabled(running_here)
-        try:
-            status = provision.weights_status(self._main.store, self._slug)
-        except StellaError:
-            self.download_status.setText("Profile not found.")
-            return
-        self.download_status.setText(_weights_label(status))
-        self.download_progress.setMaximum(100)
-        self.download_progress.setValue(
-            100 if status["state"] == "ready" else 0
-        )
-
-    def on_download_progress(self, downloaded, total):
-        if total > 0:
-            pct = downloaded * 100 // total
-            self.download_progress.setMaximum(100)
-            self.download_progress.setValue(pct)
-            self.download_status.setText(
-                f"Downloading: {pct}% "
-                f"({provision.format_size(downloaded)} of "
-                f"{provision.format_size(total)})"
-            )
-        else:
-            self.download_progress.setMaximum(0)
-            self.download_status.setText(
-                "Downloading: "
-                f"{provision.format_size(downloaded)} so far"
-            )
 
 
 class ProjectWindow(QDialog):
@@ -1085,13 +1232,16 @@ class ProjectWindow(QDialog):
         self.setMinimumWidth(480)
         self.resize(520, 480)
 
+        # The action row (Save, Close) stays pinned under the scroll
+        # (T80): Save project is visible without scrolling, however
+        # long the form gets.
+        outer = QVBoxLayout(self)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         body = QWidget()
         layout = QVBoxLayout(body)
         scroll.setWidget(body)
-        outer = QVBoxLayout(self)
-        outer.addWidget(scroll)
+        outer.addWidget(scroll, 1)
 
         # Shown when a stored value was invalid and a blank is
         # displayed instead (T21). Hidden on a clean fill.
@@ -1100,6 +1250,10 @@ class ProjectWindow(QDialog):
         self._load_note.setVisible(False)
         layout.addWidget(self._load_note)
 
+        # Details and Notes are collapsible sections (T80, entry
+        # 012): the form is short, but a collapsed Notes still
+        # leaves Save one glance away on a small screen.
+        details = CollapsibleSection("Details")
         form = QFormLayout()
         self.display_edit = QLineEdit()
         self.dataset_edit = QLineEdit()
@@ -1114,14 +1268,15 @@ class ProjectWindow(QDialog):
                 "The main screen has a sample to try."
             ),
         )
-        layout.addLayout(form)
+        details.content_layout.addLayout(form)
+        layout.addWidget(details)
+        self.details_section = details
 
-        self.notes_label = QLabel("Notes")
-        layout.addWidget(self.notes_label)
+        notes_section = CollapsibleSection("Notes")
         self.notes_edit = QPlainTextEdit()
         self.notes_edit.setMinimumHeight(100)
-        layout.addWidget(self.notes_edit)
-        layout.addWidget(
+        notes_section.content_layout.addWidget(self.notes_edit)
+        notes_section.content_layout.addWidget(
             _help_label("Anything you want to remember about this fine-tune.")
         )
         # The notes area has its own save control (T2): notes can be
@@ -1129,13 +1284,15 @@ class ProjectWindow(QDialog):
         # label says when the notes are edited but unsaved.
         self.save_notes_btn = QPushButton("Save notes")
         self.save_notes_btn.clicked.connect(self.save_notes)
-        layout.addWidget(self.save_notes_btn)
+        notes_section.content_layout.addWidget(self.save_notes_btn)
+        layout.addWidget(notes_section)
+        self.notes_section = notes_section
+        layout.addStretch(1)
 
-        save_btn = QPushButton("Save project")
-        save_btn.clicked.connect(self.save)
-        layout.addWidget(save_btn)
-
-        btns = QHBoxLayout()
+        action_row = QHBoxLayout()
+        self.save_btn = QPushButton("Save project")
+        self.save_btn.clicked.connect(self.save)
+        action_row.addWidget(self.save_btn)
         rename_btn = QPushButton("Rename")
         rename_btn.clicked.connect(
             lambda: self._main.rename_project(self._profile, self._project)
@@ -1146,12 +1303,11 @@ class ProjectWindow(QDialog):
         )
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.close)
-        btns.addWidget(rename_btn)
-        btns.addWidget(delete_btn)
-        btns.addStretch(1)
-        btns.addWidget(close_btn)
-        layout.addLayout(btns)
-        layout.addStretch(1)
+        action_row.addWidget(rename_btn)
+        action_row.addWidget(delete_btn)
+        action_row.addStretch(1)
+        action_row.addWidget(close_btn)
+        outer.addLayout(action_row)
 
         # Dirty tracking (T2): same pattern as ProfileWindow — a
         # snapshot of the loaded values, an asterisk on the title
@@ -1166,6 +1322,13 @@ class ProjectWindow(QDialog):
         ):
             signal.connect(self._on_edited)
         self._load()
+        # Ctrl+S saves here (T82); Tab walks the form in visual order.
+        QShortcut(QKeySequence("Ctrl+S"), self, self.save)
+        _chain_tab_order([
+            self.display_edit, self.dataset_edit, self.notes_edit,
+            self.save_notes_btn, self.save_btn, rename_btn, delete_btn,
+            close_btn,
+        ])
 
     @property
     def profile(self):
@@ -1220,7 +1383,8 @@ class ProjectWindow(QDialog):
         if self.is_modified():
             title += " *"
         self.setWindowTitle(title)
-        self.notes_label.setText(
+        # The Notes section header marks unsaved notes (T2).
+        self.notes_section.set_title(
             "Notes (modified)" if self._notes_modified() else "Notes"
         )
 
@@ -1353,10 +1517,10 @@ class SettingsWindow(QDialog):
         self._main = main
         self.setWindowTitle("Settings")
         self.setMinimumWidth(480)
-        # The settings no longer fit a 768 px tall screen, so the
-        # content scrolls and Close stays pinned underneath. Without
-        # the scroll area the form rows overlap when the dialog is
-        # squeezed to the screen height.
+        # Every section is a collapsible group (T80, entry 012), so
+        # the 1,165 px wall becomes five headers the user opens as
+        # needed. The action row (Debug report, Close) stays pinned
+        # underneath, reachable without scrolling the whole form.
         self.resize(560, 680)
         outer = QVBoxLayout(self)
         scroll = QScrollArea(self)
@@ -1366,39 +1530,46 @@ class SettingsWindow(QDialog):
         layout = QVBoxLayout(inner)
         scroll.setWidget(inner)
         outer.addWidget(scroll, 1)
+        self.sections: dict[str, CollapsibleSection] = {}
 
-        layout.addWidget(QLabel("Where Stella keeps things"))
+        def section(title: str) -> QVBoxLayout:
+            part = CollapsibleSection(title)
+            self.sections[title] = part
+            layout.addWidget(part)
+            return part.content_layout
+
+        home = section("Where Stella keeps things")
         self.home_label = QLabel(str(main.store.home))
         self.home_label.setWordWrap(True)
         self.home_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        layout.addWidget(self.home_label)
-        layout.addWidget(
+        home.addWidget(self.home_label)
+        home.addWidget(
             _help_label("Your profiles and projects live here.")
         )
 
-        layout.addWidget(QLabel("Ollama"))
+        ollama = section("Ollama")
         self.ollama_host = QLabel(f"Host: {ollama_url()}")
         self.ollama_host.setWordWrap(True)
-        layout.addWidget(self.ollama_host)
+        ollama.addWidget(self.ollama_host)
         self.ollama_status = QLabel("")
         self.ollama_status.setWordWrap(True)
-        layout.addWidget(self.ollama_status)
+        ollama.addWidget(self.ollama_status)
         refresh_btn = QPushButton("Refresh Ollama status")
         refresh_btn.clicked.connect(self.refresh_ollama_status)
-        layout.addWidget(refresh_btn)
-        layout.addWidget(
+        ollama.addWidget(refresh_btn)
+        ollama.addWidget(
             _help_label(
                 "Ollama runs the models on this PC. Stella uses it for "
                 "dreaming and the refusal probe, not for training."
             )
         )
 
-        layout.addWidget(QLabel("Chat model"))
+        chat = section("Chat model")
         self.chat_combo = QComboBox()
         self.chat_combo.setPlaceholderText("Pick a model for chat")
         self.chat_combo.currentIndexChanged.connect(self._on_chat_model_changed)
-        layout.addWidget(self.chat_combo)
-        layout.addWidget(
+        chat.addWidget(self.chat_combo)
+        chat.addWidget(
             _help_label(
                 "The model the Chat window talks to. Models on this PC "
                 "run through Ollama. Groq and Gemini models need a key, "
@@ -1408,37 +1579,55 @@ class SettingsWindow(QDialog):
         )
         self._load_chat_models()
 
-        layout.addWidget(QLabel("AI providers"))
+        providers = section("AI providers")
         self._key_fields: dict[str, QLineEdit] = {}
         self._key_status: dict[str, QLabel] = {}
         self._provider_buttons: dict[str, dict[str, QPushButton]] = {}
         self._test_workers: dict[str, JobWorker] = {}
         self._custom_base = QLineEdit()
         self._custom_model = QLineEdit()
-        self._build_provider_rows(layout)
-        layout.addWidget(
+        self._build_provider_rows(providers)
+        providers.addWidget(
             _help_label(
                 "Your keys stay on this PC in a private file. They only "
                 "leave the PC to talk to that provider, and never appear "
                 "in a debug report."
             )
         )
+        layout.addStretch(1)
 
-        layout.addWidget(QLabel("Debug report"))
+        action_row = QHBoxLayout()
         self.debug_btn = QPushButton("Write debug report")
-        self.debug_btn.clicked.connect(self._on_debug_report)
-        layout.addWidget(self.debug_btn)
-        layout.addWidget(
-            _help_label(
-                "Writes a report file with the recent log and the app "
-                "state. Secrets are scrubbed out."
-            )
+        self.debug_btn.setToolTip(
+            "Writes a report file with the recent log and the app "
+            "state. Secrets are scrubbed out."
         )
-
+        self.debug_btn.clicked.connect(self._on_debug_report)
+        action_row.addWidget(self.debug_btn)
+        action_row.addStretch(1)
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.close)
-        outer.addWidget(close_btn)
-        layout.addStretch(1)
+        action_row.addWidget(close_btn)
+        outer.addLayout(action_row)
+
+        # Tab walks the window in visual order (T82).
+        chain: list = [
+            refresh_btn, self.chat_combo,
+        ]
+        for pid in ("groq", "gemini"):
+            chain.append(self._key_fields[pid])
+            buttons = self._provider_buttons[pid]
+            chain += [buttons["save"], buttons["test"], buttons["remove"]]
+        chain += [
+            self._custom_base, self._custom_model,
+            self._key_fields["custom"],
+        ]
+        custom_buttons = self._provider_buttons["custom"]
+        chain += [
+            custom_buttons["save"], custom_buttons["test"],
+            custom_buttons["remove"], self.debug_btn, close_btn,
+        ]
+        _chain_tab_order(chain)
 
         self.refresh_ollama_status()
 
@@ -1535,7 +1724,7 @@ class SettingsWindow(QDialog):
         status.setText("Testing...")
         home = self._main.store.home
 
-        def _run(log):
+        def _run(ctx):
             _ok, message = test_connection(pid, home=home)
             return message
 
@@ -1658,6 +1847,7 @@ class HowToUseWindow(QDialog):
             "Pick a topic on the left to read how it works."
         )
         layout.addWidget(self.content, 2)
+        _chain_tab_order([self.topic_list, self.content])
 
     def _on_topic(self, current, _previous):
         if current is None:
@@ -1675,6 +1865,7 @@ class ChatWorker(QThread):
 
     narration = Signal(str)
     progress = Signal(str)
+    token = Signal(str)
     reply = Signal(str)
 
     def __init__(self, agent, text, parent=None):
@@ -1689,6 +1880,7 @@ class ChatWorker(QThread):
         self._agent.set_callbacks(
             on_narration=self.narration.emit,
             on_progress=self.progress.emit,
+            on_token=self.token.emit,
         )
         try:
             answer = self._agent.reply(self._text)
@@ -1718,6 +1910,7 @@ class ChatWindow(QDialog):
         self._agent = None
         self._worker: ChatWorker | None = None
         self._awaiting_model = False
+        self._streaming = False
         self.setWindowTitle("Chat with Stella")
         self.resize(700, 520)
         layout = QVBoxLayout(self)
@@ -1733,6 +1926,35 @@ class ChatWindow(QDialog):
         self.messages = QTextBrowser()
         self.messages.setReadOnly(True)
         layout.addWidget(self.messages, 1)
+
+        # Click-to-pick model buttons (T76): when no chat model is
+        # picked, the installed models appear as buttons here — no
+        # typing a tag by hand. Hidden once a model is picked.
+        self.model_pick_scroll = QScrollArea()
+        self.model_pick_scroll.setWidgetResizable(True)
+        self.model_pick_scroll.setMaximumHeight(180)
+        model_pick_body = QWidget()
+        self.model_pick_layout = QVBoxLayout(model_pick_body)
+        self.model_pick_scroll.setWidget(model_pick_body)
+        self.model_pick_scroll.setVisible(False)
+        layout.addWidget(self.model_pick_scroll)
+        self.model_buttons: list[QPushButton] = []
+
+        # The plan row (T76): when the agent shows a plan, Run and
+        # Cancel sit here. Run sends "go ahead", Cancel sends
+        # "cancel" — the same words the user could type.
+        self.plan_row = QWidget()
+        plan_layout = QHBoxLayout(self.plan_row)
+        plan_layout.setContentsMargins(0, 0, 0, 0)
+        self.plan_run_btn = QPushButton("Run")
+        self.plan_run_btn.clicked.connect(self._on_plan_run)
+        self.plan_cancel_btn = QPushButton("Cancel")
+        self.plan_cancel_btn.clicked.connect(self._on_plan_cancel)
+        plan_layout.addWidget(self.plan_run_btn)
+        plan_layout.addWidget(self.plan_cancel_btn)
+        plan_layout.addStretch(1)
+        self.plan_row.setVisible(False)
+        layout.addWidget(self.plan_row)
 
         input_row = QHBoxLayout()
         self.input = QLineEdit()
@@ -1754,25 +1976,46 @@ class ChatWindow(QDialog):
                 "The chat talks to the model you pick in Settings: a "
                 "model on this PC through Ollama, or Groq or Gemini "
                 "with your key. It can set up and run training for "
-                "you. Say just do it and it runs the whole thing."
+                "you. Say just do it and it shows the plan first, "
+                "then runs it when you say go ahead."
             )
         )
+        _chain_tab_order([self.messages, self.input, self.send_btn,
+                          self.cancel_btn])
         self._append(
             "Stella",
             "Hi. Tell me what you want to train, and I will set it up "
-            "and run it for you. Or say just do it and I will run the "
-            "whole thing.",
+            "and run it for you. Or say just do it and I will show "
+            "you the plan first, then run the whole thing when you "
+            "say go ahead.",
         )
         if not self._main.chat_model:
             self._ask_for_model()
 
     # -- messages ---------------------------------------------------
     def _append(self, who: str, text: str):
+        self._streaming = False
         self.messages.append(f"{who}: {text}")
         self.messages.append("")
 
     def _append_plain(self, text: str):
+        self._streaming = False
         self.messages.append(text)
+
+    def _append_token(self, text: str):
+        """One streamed piece of a reply (T76, entry 010): it lands
+        in the live "Stella: ..." paragraph as it arrives, instead
+        of waiting for the whole reply."""
+        cursor = self.messages.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        if not self._streaming:
+            self._streaming = True
+            if cursor.block().text().strip():
+                cursor.insertBlock()
+            cursor.insertText("Stella: ")
+        cursor.insertText(text)
+        self.messages.setTextCursor(cursor)
+        self.messages.ensureCursorVisible()
 
     def _set_activity(self, busy: bool, text: str):
         color = "#4caf50" if busy else "#888888"
@@ -1796,10 +2039,40 @@ class ChatWindow(QDialog):
         self._awaiting_model = True
         self._append(
             "Stella",
-            "Which model should I chat with? Type one of these:\n"
-            + "\n".join(f"- {name}" for name in models)
-            + "\n\nYou can also pick a Groq or Gemini model in "
+            "Which model should I chat with? Pick one below.\n\n"
+            "You can also pick a Groq or Gemini model in "
             "Settings, under AI providers.",
+        )
+        # One button per installed model (T76): click to pick, no
+        # typing a tag by hand. Any old buttons go first, so asking
+        # twice never doubles the list.
+        for btn in self.model_buttons:
+            self.model_pick_layout.removeWidget(btn)
+            btn.deleteLater()
+        self.model_buttons = []
+        for name in models:
+            btn = QPushButton(name)
+            btn.clicked.connect(
+                lambda _checked=False, n=name: self._pick_chat_model(n)
+            )
+            self.model_pick_layout.addWidget(btn)
+            self.model_buttons.append(btn)
+        self.model_pick_scroll.setVisible(True)
+        if self.model_buttons:
+            _chain_tab_order(
+                [*self.model_buttons, self.input]
+            )
+
+    def _pick_chat_model(self, name: str):
+        """A model button was clicked: chat with that model."""
+        self._awaiting_model = False
+        self.model_pick_scroll.setVisible(False)
+        self._main.set_chat_provider("ollama")
+        self._main.set_chat_model(name)
+        self._append(
+            "Stella",
+            f"Got it, I will chat with {name}. What do you want "
+            "to train?",
         )
 
     def _match_model(self, text: str) -> tuple[str, str] | None:
@@ -1861,11 +2134,12 @@ class ChatWindow(QDialog):
             if match is None:
                 self._append(
                     "Stella",
-                    "I did not find that model. Type one of the names "
-                    "from the list above.",
+                    "I did not find that model. Pick one of the "
+                    "buttons above, or type one of the names.",
                 )
                 return
             self._awaiting_model = False
+            self.model_pick_scroll.setVisible(False)
             provider, model = match
             self._main.set_chat_provider(provider)
             self._main.set_chat_model(model)
@@ -1887,18 +2161,43 @@ class ChatWindow(QDialog):
         self._worker = ChatWorker(agent, text, parent=self)
         self._worker.narration.connect(self._append_plain)
         self._worker.progress.connect(self._append_plain)
+        self._worker.token.connect(self._append_token)
         self._worker.reply.connect(self._on_reply)
         self.send_btn.setEnabled(False)
         self.cancel_btn.setEnabled(True)
         self._set_activity(True, "Thinking...")
         self._worker.start()
 
+    def _on_plan_run(self):
+        """Run the shown plan: the same words as typing go ahead."""
+        if self._worker is not None and self._worker.isRunning():
+            return
+        self.input.setText("Go ahead")
+        self._on_send()
+
+    def _on_plan_cancel(self):
+        """Cancel the shown plan: the same words as typing cancel."""
+        if self._worker is not None and self._worker.isRunning():
+            return
+        self.input.setText("Cancel")
+        self._on_send()
+
     def _on_reply(self, text: str):
-        self._append("Stella", text)
+        # A reply that already streamed in live is on screen: just
+        # close its paragraph instead of showing it twice (T76).
+        streamed = getattr(self._agent, "last_streamed_plain", "") or ""
+        if self._streaming and streamed and streamed == text.strip():
+            self.messages.append("")
+        else:
+            self._append("Stella", text)
+        self._streaming = False
         self.send_btn.setEnabled(True)
         self.cancel_btn.setEnabled(False)
         self._set_activity(False, "Idle")
         self._worker = None
+        # A pending plan shows its Run and Cancel buttons (T76).
+        pending = getattr(self._agent, "pending_plan", None)
+        self.plan_row.setVisible(pending is not None)
         # Tools may have made profiles or projects: the tree and the
         # session follow the chat's session.
         if self._agent is not None and self._agent.current_profile:
@@ -1982,6 +2281,10 @@ class DistillDialog(QDialog):
         buttons.addWidget(self.start_btn)
         buttons.addWidget(self.cancel_btn)
         layout.addLayout(buttons)
+        _chain_tab_order([
+            self.teacher_combo, self.prompts_btn,
+            self.start_btn, self.cancel_btn,
+        ])
 
     def teacher(self) -> str:
         return self.teacher_combo.currentText().strip()
@@ -2041,6 +2344,11 @@ class MainWindow(QMainWindow):
         self._tree_profiles: dict[str, QTreeWidgetItem] = {}
         self._tree_projects: dict[tuple, QTreeWidgetItem] = {}
         self._download_profile: str | None = None
+        # The Ollama check for the tree health badges (T78), cached
+        # briefly: refresh_tree runs in bursts, and one localhost
+        # round-trip per burst is enough.
+        self._ollama_up: bool | None = None
+        self._ollama_checked_at = 0.0
 
         # Debug log layer (U12): rotating log under the Stella home,
         # ring buffer, scrubbed report on demand from Settings.
@@ -2098,6 +2406,8 @@ class MainWindow(QMainWindow):
                 self.set_session(saved_profile, None)
         else:
             self.refresh_session()
+        # Ctrl+S saves any open edit window (T82).
+        QShortcut(QKeySequence("Ctrl+S"), self, self._save_open_windows)
 
     # -- layout -----------------------------------------------------
     def _build_ui(self):
@@ -2143,28 +2453,39 @@ class MainWindow(QMainWindow):
         self.session_scroll.setWidget(session)
         self._build_session()
         self.splitter.addWidget(self.session_scroll)
-        self.splitter.setSizes([260, 840])
+        self._set_tab_order()
+        # A wider tree pane (T78): long model names get more room
+        # before they truncate, and every row carries its full text
+        # as a tooltip besides.
+        self.splitter.setSizes([340, 760])
         self.statusBar().showMessage("Stella ready.")
 
     def _build_menu_bar(self):
         """A real menu bar (T19, U38): File, View, Help. The Menu
         button is gone. Actions that need a selection start disabled
         and are refreshed by _refresh_menu_state; nothing answers
-        with a "pick one first" modal anymore."""
+        with a "pick one first" modal anymore. Shortcuts (T82) ride
+        on the actions, so the menu shows them."""
         bar = self.menuBar()
         file_menu = bar.addMenu("File")
         self._menu_action_new_profile = file_menu.addAction(
             "New profile...", self.new_profile
         )
+        self._menu_action_new_profile.setShortcut("Ctrl+N")
         self._menu_action_new_project = file_menu.addAction(
             "New project...", self.new_project
         )
+        self._menu_action_new_project.setShortcut("Ctrl+Shift+N")
         self._menu_action_export = file_menu.addAction(
             "Export project...", self.export_project
         )
         self._menu_action_import = file_menu.addAction(
             "Import package...", self.import_package
         )
+        self._menu_action_run = file_menu.addAction(
+            "Run the picked job", self._on_go
+        )
+        self._menu_action_run.setShortcut("Ctrl+G")
         file_menu.addSeparator()
         self._menu_action_settings = file_menu.addAction(
             "Settings...", self.open_settings_window
@@ -2180,9 +2501,11 @@ class MainWindow(QMainWindow):
         self._menu_action_howto = help_menu.addAction(
             "How to Use Stella...", self.open_howto_window
         )
+        self._menu_action_howto.setShortcut("F1")
         self._menu_action_chat = help_menu.addAction(
             "Chat...", self.open_chat_window
         )
+        self._menu_action_chat.setShortcut("F2")
 
     def _refresh_menu_state(self):
         """Grey out the actions that cannot work yet (T19): New
@@ -2263,6 +2586,7 @@ class MainWindow(QMainWindow):
 
         # -- hero tile: pick a model, pick a job, press go ---------
         hero = QFrame()
+        hero.setObjectName("card")
         hero.setFrameShape(QFrame.StyledPanel)
         hero_layout = QVBoxLayout(hero)
 
@@ -2295,8 +2619,17 @@ class MainWindow(QMainWindow):
         self.download_cancel_btn = QPushButton("Cancel")
         self.download_cancel_btn.clicked.connect(self.cancel_download)
         self.download_cancel_btn.setEnabled(False)
+        # The fix button (T79): when there is no repo to download
+        # from, this button — not a label — opens the profile
+        # window, where Base ref gets set. Visible only then.
+        self.download_fix_btn = QPushButton("Set the model source...")
+        self.download_fix_btn.clicked.connect(
+            self.open_current_profile_window
+        )
+        self.download_fix_btn.setVisible(False)
         dl_btns.addWidget(self.download_btn)
         dl_btns.addWidget(self.download_cancel_btn)
+        dl_btns.addWidget(self.download_fix_btn)
         dl_btns.addStretch(1)
         hero_layout.addLayout(dl_btns)
         hero_layout.addWidget(
@@ -2332,6 +2665,7 @@ class MainWindow(QMainWindow):
 
         hero_layout.addWidget(QLabel("3. Press go"))
         self.go_btn = QPushButton("Go")
+        self.go_btn.setObjectName("goButton")
         self.go_btn.setMinimumHeight(40)
         self.go_btn.setStyleSheet("font-size: 15px; font-weight: bold;")
         self.go_btn.clicked.connect(self._on_go)
@@ -2374,8 +2708,14 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(hero)
 
+        # -- the job card: the running job, with progress + cancel --
+        self.job_card = JobCard()
+        self.job_card.cancel_clicked.connect(self._cancel_current_job)
+        layout.addWidget(self.job_card)
+
         # -- glanceable card: the loss curve and the live numbers --
         card = QFrame()
+        card.setObjectName("card")
         card.setFrameShape(QFrame.StyledPanel)
         card_layout = QVBoxLayout(card)
         card_layout.addWidget(QLabel("How it is going"))
@@ -2412,8 +2752,13 @@ class MainWindow(QMainWindow):
         card_layout.addLayout(run_btns)
         layout.addWidget(card)
 
-        # -- train details, below, in the scroll --------------------
-        layout.addWidget(QLabel("Dataset"))
+        # -- train details, below, in collapsible sections ---------
+        # (T80, entry 012): Dataset, Checkpoints, Training log, and
+        # Sleep cycles each collapse to one header, so the scroll
+        # shortens to what the user is actually looking at. All
+        # start open; the widgets keep their attributes, so the
+        # rest of the window does not care that they moved.
+        dataset_section = CollapsibleSection("Dataset")
         dataset_btns = QHBoxLayout()
         self.train_pick_dataset_btn = QPushButton("Pick dataset file")
         self.train_pick_dataset_btn.clicked.connect(self.pick_dataset)
@@ -2422,11 +2767,14 @@ class MainWindow(QMainWindow):
         dataset_btns.addWidget(self.train_pick_dataset_btn)
         dataset_btns.addWidget(self.train_sample_btn)
         dataset_btns.addStretch(1)
-        layout.addLayout(dataset_btns)
-        layout.addWidget(QLabel("Checkpoints"))
+        dataset_section.content_layout.addLayout(dataset_btns)
+        layout.addWidget(dataset_section)
+        self.dataset_section = dataset_section
+
+        checkpoints_section = CollapsibleSection("Checkpoints")
         self.train_checkpoints = QListWidget()
         self.train_checkpoints.setMaximumHeight(90)
-        layout.addWidget(self.train_checkpoints)
+        checkpoints_section.content_layout.addWidget(self.train_checkpoints)
         export_btns = QHBoxLayout()
         self.train_export_gguf_btn = QPushButton("Export GGUF")
         self.train_export_gguf_btn.clicked.connect(self.export_gguf_gui)
@@ -2435,15 +2783,23 @@ class MainWindow(QMainWindow):
         export_btns.addWidget(self.train_export_gguf_btn)
         export_btns.addWidget(self.train_probe_btn)
         export_btns.addStretch(1)
-        layout.addLayout(export_btns)
-        layout.addWidget(QLabel("Training log"))
+        checkpoints_section.content_layout.addLayout(export_btns)
+        layout.addWidget(checkpoints_section)
+        self.checkpoints_section = checkpoints_section
+
+        log_section = CollapsibleSection("Training log")
         self.train_log = QPlainTextEdit()
         self.train_log.setReadOnly(True)
         self.train_log.setMinimumHeight(120)
-        layout.addWidget(self.train_log)
+        log_section.content_layout.addWidget(self.train_log)
+        layout.addWidget(log_section)
+        self.log_section = log_section
 
         # Sleep keeps its dream switch and its cycles list here; the
         # Sleep button itself is gone — Go starts it, like every job.
+        sleep_section = CollapsibleSection(
+            "Sleep cycles (click one to see its report)"
+        )
         dream_row = QHBoxLayout()
         self.sleep_dream_check = QCheckBox("Dream first")
         self.sleep_dream_check.setToolTip(
@@ -2453,18 +2809,43 @@ class MainWindow(QMainWindow):
         )
         dream_row.addWidget(self.sleep_dream_check)
         dream_row.addStretch(1)
-        layout.addLayout(dream_row)
-        layout.addWidget(
-            QLabel("Sleep cycles (click one to see its report)")
-        )
+        sleep_section.content_layout.addLayout(dream_row)
         self.sleep_cycles = QListWidget()
         self.sleep_cycles.setMaximumHeight(90)
         self.sleep_cycles.itemClicked.connect(self._on_sleep_cycle_clicked)
-        layout.addWidget(self.sleep_cycles)
+        sleep_section.content_layout.addWidget(self.sleep_cycles)
+        layout.addWidget(sleep_section)
+        self.sleep_section = sleep_section
         layout.addStretch(1)
 
         self.bento_widget = page
         self.session_layout.addWidget(page)
+
+    def _set_tab_order(self):
+        """Tab walks the main screen in visual order (T82). Runs at
+        the end of _build_ui, once every panel is parented into the
+        window — setTabOrder refuses pairs in different windows,
+        and the session scroll area is still top-level while the
+        bento is being built."""
+        _chain_tab_order([
+            self.tree, self.model_combo, self.new_model_btn,
+            self.download_btn, self.download_cancel_btn,
+            self.download_fix_btn,
+            self.job_buttons["train"], self.job_buttons["sleep"],
+            self.job_buttons["requant"], self.job_buttons["distill"],
+            self.go_btn, self.project_name_edit,
+            self.dataset_sample_btn, self.dataset_pick_btn,
+            self.job_card.cancel_btn,
+            self.train_pause_btn, self.train_resume_btn,
+            self.dataset_section.header_btn,
+            self.train_pick_dataset_btn, self.train_sample_btn,
+            self.checkpoints_section.header_btn,
+            self.train_checkpoints, self.train_export_gguf_btn,
+            self.train_probe_btn,
+            self.log_section.header_btn, self.train_log,
+            self.sleep_section.header_btn,
+            self.sleep_dream_check, self.sleep_cycles,
+        ])
 
     # -- helpers ----------------------------------------------------
     def _say(self, text: str):
@@ -2530,8 +2911,11 @@ class MainWindow(QMainWindow):
         """One tree row's text + look. A damaged row (T3) is greyed
         and italic with its error in the label; a healed row goes
         back to plain text. The damaged flag lives in UserRole + 1
-        so clicks can tell the row apart from a healthy one."""
+        so clicks can tell the row apart from a healthy one. Every
+        row carries its full text as a tooltip (T78): long names
+        truncate in the pane, and hovering shows the whole row."""
         item.setText(0, label)
+        item.setToolTip(0, label)
         item.setData(0, Qt.UserRole + 1, bool(damaged))
         font = item.font(0)
         font.setItalic(bool(damaged))
@@ -2540,6 +2924,47 @@ class MainWindow(QMainWindow):
             item.setForeground(0, QBrush(QColor("#888888")))
         else:
             item.setForeground(0, QBrush())
+
+    def _ollama_up_cached(self) -> bool:
+        """Is Ollama answering? Checked at most once every 10 s
+        (T78): refresh_tree runs in bursts, and the health badge
+        does not need a fresh round-trip per burst."""
+        now = time.monotonic()
+        if self._ollama_up is None or now - self._ollama_checked_at > 10:
+            self._ollama_up = reachable()
+            self._ollama_checked_at = now
+        return self._ollama_up
+
+    def _refresh_tree_badges(self):
+        """The health badge on each profile row (T78): a green dot
+        when the weights are ready, amber when they are not, grey
+        when Ollama is down and the weights are not ready either
+        (the tag side cannot be checked then). Weights ready wins
+        over Ollama down: training can start without Ollama. The
+        tooltip carries the full row text plus the health line, so
+        the badge is never a mystery. Separated from refresh_tree
+        so the Ollama check runs once per pass, not once per row."""
+        ollama_up = self._ollama_up_cached()
+        for slug, item in self._tree_profiles.items():
+            if item.data(0, Qt.UserRole + 1):
+                item.setIcon(0, QIcon())  # damaged: no badge
+                continue
+            try:
+                status = provision.weights_status(self.store, slug)
+            except StellaError:
+                item.setIcon(0, _health_icon("ollama-down"))
+                continue
+            if status["state"] == "ready":
+                state = "ready"
+            elif not ollama_up:
+                state = "ollama-down"
+            else:
+                state = "missing"
+            item.setIcon(0, _health_icon(state))
+            line = _weights_label(status)
+            if state == "ollama-down":
+                line += " Ollama is down."
+            item.setToolTip(0, f"{item.text(0)}\n{line}")
 
     def refresh_tree(self):
         """Sync the tree with the store WITHOUT rebuilding it (U28):
@@ -2599,6 +3024,7 @@ class MainWindow(QMainWindow):
             item.setExpanded(slug in expanded)
         if vbar is not None:
             vbar.setValue(scroll)
+        self._refresh_tree_badges()
         self._sync_tree_selection()
 
     def _sync_tree_selection(self):
@@ -2667,11 +3093,37 @@ class MainWindow(QMainWindow):
     # -- session ----------------------------------------------------
     def set_session(self, profile, project):
         """Clicking a project in the tree sets the training session.
-        The session is remembered across restarts (QSettings)."""
+        The session is remembered across restarts (QSettings), and
+        the last project is remembered PER PROFILE (T77, entry 022):
+        switching profiles restores that profile's project, so the
+        session follows the profile. The memory is only written
+        when a project is picked (never erased by a profile-only
+        click), and only restored on a profile change to a project
+        that still exists."""
+        if (
+            project is None
+            and profile is not None
+            and profile != self._current_profile
+        ):
+            remembered = (
+                self.settings.value(f"session/by-profile/{profile}", "")
+                or None
+            )
+            if remembered:
+                try:
+                    self.store.get_project(profile, remembered)
+                except StellaError:
+                    remembered = None
+                else:
+                    project = remembered
         self._current_profile = profile
         self._current_project = project
         self.settings.setValue("session/profile", profile or "")
         self.settings.setValue("session/project", project or "")
+        if profile and project:
+            self.settings.setValue(
+                f"session/by-profile/{profile}", project
+            )
         self.refresh_tree()
         self.refresh_session()
 
@@ -2753,8 +3205,6 @@ class MainWindow(QMainWindow):
         for w in (
             self.train_pick_dataset_btn,
             self.train_sample_btn,
-            self.train_export_gguf_btn,
-            self.train_probe_btn,
         ):
             w.setEnabled(has_session)
         self.train_resume_btn.setEnabled(
@@ -2762,9 +3212,9 @@ class MainWindow(QMainWindow):
             and not self._training_running()
             and not self._sleep_running()
         )
-        self.download_btn.setEnabled(
-            has_profile and not self.download_manager.is_running()
-        )
+        # Export and probe follow the job rule in _refresh_go (a
+        # second job is refused, T74); the download button follows
+        # the weights state in _refresh_download_row (T79).
         self.download_cancel_btn.setEnabled(
             self.download_manager.is_running()
         )
@@ -2778,6 +3228,8 @@ class MainWindow(QMainWindow):
         if not self._current_profile:
             self.download_status_label.setText("Pick a profile first.")
             self.download_progress.setVisible(False)
+            self.download_btn.setEnabled(False)
+            self.download_fix_btn.setVisible(False)
             return
         try:
             status = provision.weights_status(
@@ -2785,8 +3237,20 @@ class MainWindow(QMainWindow):
             )
         except StellaError:
             self.download_status_label.setText("Profile not found.")
+            self.download_btn.setEnabled(False)
+            self.download_fix_btn.setVisible(False)
             return
-        if self.download_manager.is_running():
+        running = self.download_manager.is_running()
+        # Download is honest (T79): disabled when there is no repo
+        # to download from, and the fix button — which opens the
+        # profile window, where Base ref gets set — shows instead.
+        self.download_btn.setEnabled(
+            status["state"] != "no-repo" and not running
+        )
+        self.download_fix_btn.setVisible(
+            status["state"] == "no-repo" and not running
+        )
+        if running:
             return  # progress updates own the label while downloading
         self.download_status_label.setText(_weights_label(status))
         # The bar only earns its space while downloading or when the
@@ -2825,12 +3289,58 @@ class MainWindow(QMainWindow):
     def _refresh_go(self):
         """Go is live when a model and a job are picked and nothing
         is running. A project is NOT required: Go makes one (the
-        name becomes part of the pick)."""
+        name becomes part of the pick). Export and probe follow the
+        same rule — a second job is refused (T74) — and the File
+        menu's Run action mirrors Go (T82)."""
+        running = self._job_running()
         self.go_btn.setEnabled(
             bool(self._current_profile)
             and self._picked_job() is not None
-            and not self._job_running()
+            and not running
         )
+        has_session = bool(self._current_profile and self._current_project)
+        for w in (self.train_export_gguf_btn, self.train_probe_btn):
+            w.setEnabled(has_session and not running)
+        self._menu_action_run.setEnabled(self.go_btn.isEnabled())
+
+    def _job_already_running(self) -> bool:
+        """True when a job is running, with the plain-words refusal
+        said (T74): starting a second job is refused, not queued."""
+        if self._job_running():
+            self._say(
+                "A job is already running. Wait for it to finish, "
+                "or cancel it first."
+            )
+            return True
+        return False
+
+    def _cancel_current_job(self):
+        """The job card's Cancel button (T74): stop the running job.
+        Training and sleep stop after the current step and save a
+        checkpoint, so the work so far is kept; a GGUF/probe/
+        re-quantize/distill job stops at the next check point (a
+        running subprocess is killed)."""
+        self.job_card.cancel_btn.setEnabled(False)
+        if self._training_running():
+            self._train_worker.request_stop()
+            self.job_card.set_status(
+                "Stopping after this step. The work so far is saved."
+            )
+            self._train_log_line(
+                "Cancelling: stopping after this step "
+                "(checkpoint will save)..."
+            )
+        elif self._sleep_running():
+            self._sleep_worker.request_stop()
+            self.job_card.set_status(
+                "Stopping after this step. The work so far is saved."
+            )
+            self._train_log_line(
+                "Cancelling sleep: stopping after this step..."
+            )
+        elif self._job_worker is not None and self._job_worker.isRunning():
+            self._job_worker.request_cancel()
+            self.job_card.set_status("Stopping...")
 
     def _on_go(self):
         """Press go: run the picked job on the picked model."""
@@ -2838,8 +3348,7 @@ class MainWindow(QMainWindow):
         profile = self._current_profile
         if not job or not profile:
             return
-        if self._job_running():
-            self._say("A job is already running.")
+        if self._job_already_running():
             return
         if job == "requant":
             self._start_requant()
@@ -2929,9 +3438,8 @@ class MainWindow(QMainWindow):
     def _start_requant(self):
         """Make smaller: re-quantize the picked model's Ollama copy
         to Q4_K_M under a new name. No typing needed — the quant
-        and the new name are the usual ones (R8 gives this job the
-        full card flow later; it runs as a job with log lines
-        today, like GGUF export)."""
+        and the new name are the usual ones. Runs as a job card
+        (T74/T75), like every other job."""
         profile = self._current_profile
         try:
             prof = self.store.get_profile(profile)
@@ -2947,8 +3455,27 @@ class MainWindow(QMainWindow):
             return
         from .requant import requant_model
 
-        def job(log):
-            report = requant_model(tag)
+        def job(ctx):
+            def on_event(event):
+                kind = event.get("type")
+                if kind == "found":
+                    ctx.log(
+                        f"Found {event['source_tag']} "
+                        f"({provision.format_size(event['source_bytes'])}). "
+                        "Shrinking it..."
+                    )
+                elif kind == "quantized":
+                    ctx.log(
+                        "Shrunk to "
+                        f"{provision.format_size(event['output_bytes'])}."
+                    )
+                elif kind == "created":
+                    ctx.log(f"Registered as {event['new_tag']}.")
+
+            report = requant_model(
+                tag, on_event=on_event,
+                should_stop=ctx.is_cancelled,
+            )
             return (
                 f"Made a smaller copy: {report['new_tag']} "
                 f"({provision.format_size(report['output_bytes'])}, "
@@ -2956,20 +3483,15 @@ class MainWindow(QMainWindow):
                 f"Run it with: {report['ollama_run']}"
             )
 
-        self._job_worker = JobWorker(job)
-        self._job_worker.log.connect(self._train_log_line)
-        self._job_worker.finished.connect(self._on_job_finished)
-        self._set_activity("job", "Working: making a smaller copy...")
+        self._start_job_worker(job, "Making a smaller copy", False)
         self._train_log_line(f"Making a smaller copy of {tag}...")
-        self._job_worker.start()
-        self._refresh_go()
-        self._refresh_checklist()
 
     def _start_distill(self):
         """Teach a small model: ask a teacher model the prompts in a
         file, save the answers as this project's dataset. The
         teacher and the prompts file come from one small dialog —
-        a combo pick and a file pick, no typing."""
+        a combo pick and a file pick, no typing. Runs as a job card
+        (T74/T75), like every other job."""
         profile = self._current_profile
         project = self._current_project
         dialog = DistillDialog(self)
@@ -2981,9 +3503,18 @@ class MainWindow(QMainWindow):
             return
         from .distill import distill_dataset
 
-        def job(log):
+        def job(ctx):
+            def on_event(event):
+                if event.get("type") == "prompt":
+                    ctx.progress(event["index"], event["total"])
+                    ctx.log(
+                        f"Asking the teacher: prompt {event['index']} "
+                        f"of {event['total']}."
+                    )
+
             report = distill_dataset(
-                self.store, profile, project, teacher, prompts
+                self.store, profile, project, teacher, prompts,
+                on_event=on_event, should_stop=ctx.is_cancelled,
             )
             return (
                 f"Distilled {report['rows']} examples from {teacher} "
@@ -2991,11 +3522,21 @@ class MainWindow(QMainWindow):
                 "then train when ready."
             )
 
+        self._start_job_worker(job, "Teaching a small model", True)
+        self._train_log_line(f"Asking {teacher} the prompts...")
+
+    def _start_job_worker(self, job, title: str, determinate: bool):
+        """Start a JobWorker job as a job card (T74): the card shows
+        the title, the job's log lines become its live status, and
+        its progress reports move the bar. One job at a time — the
+        caller refuses a second job before this runs."""
         self._job_worker = JobWorker(job)
         self._job_worker.log.connect(self._train_log_line)
+        self._job_worker.log.connect(self.job_card.set_status)
+        self._job_worker.progress.connect(self.job_card.set_progress)
         self._job_worker.finished.connect(self._on_job_finished)
-        self._set_activity("job", "Working: asking the teacher...")
-        self._train_log_line(f"Asking {teacher} the prompts...")
+        self._set_activity("job", f"Working: {title.lower()}...")
+        self.job_card.start(title, determinate)
         self._job_worker.start()
         self._refresh_go()
         self._refresh_checklist()
@@ -3257,9 +3798,6 @@ class MainWindow(QMainWindow):
         self.download_progress.setMaximum(100)
         self.download_progress.setValue(0)
         self.download_status_label.setText("Downloading: 0%")
-        win = self._profile_windows.get(slug)
-        if win is not None:
-            win.refresh_download_status()
         self._say(f"Downloading {repo}...")
         self.debug_log.action(f"download started: {repo} ({slug})")
 
@@ -3284,19 +3822,11 @@ class MainWindow(QMainWindow):
                 "Downloading: "
                 f"{provision.format_size(downloaded)} so far"
             )
-        win = (
-            self._profile_windows.get(self._download_profile)
-            if self._download_profile
-            else None
-        )
-        if win is not None:
-            win.on_download_progress(downloaded, total)
 
     def _on_download_finished(self, ok, message):
         slug = self._download_profile
         self._download_profile = None
         self._set_activity("idle", "Idle")
-        self.download_btn.setEnabled(bool(self._current_profile))
         self.download_cancel_btn.setEnabled(False)
         self.download_progress.setMaximum(100)
         if ok:
@@ -3314,10 +3844,6 @@ class MainWindow(QMainWindow):
                 self._warn(message)
                 self.debug_log.action(f"download failed: {slug}: {message}")
         self._refresh_download_row()
-        if slug:
-            win = self._profile_windows.get(slug)
-            if win is not None:
-                win.refresh_download_status()
 
     def _weights_offer(self, profile) -> bool:
         """True when training may start. When the weights are
@@ -3348,6 +3874,22 @@ class MainWindow(QMainWindow):
         if answer == QMessageBox.Yes:
             self.start_download(profile)
         return False
+
+    def _save_open_windows(self):
+        """Ctrl+S in the main window (T82): save every open profile
+        or project window that has unsaved edits. Says what it did,
+        or that there was nothing to save."""
+        saved = 0
+        for win in list(self._profile_windows.values()):
+            if win.is_modified() and win.save():
+                saved += 1
+        for win in list(self._project_windows.values()):
+            if win.is_modified() and win.save():
+                saved += 1
+        if saved:
+            self._say(f"Saved {saved} window(s).")
+        else:
+            self._say("Nothing to save.")
 
     # -- dedicated windows ------------------------------------------
     def open_profile_window(self, slug=None):
@@ -3883,6 +4425,7 @@ class MainWindow(QMainWindow):
         )
         self._train_worker.progress.connect(self._on_train_progress)
         self._train_worker.log.connect(self._train_log_line)
+        self._train_worker.log.connect(self.job_card.set_status)
         self._train_worker.finished.connect(self._on_train_finished)
         self._run_started_at = None
         self.go_btn.setEnabled(False)
@@ -3890,6 +4433,9 @@ class MainWindow(QMainWindow):
         self.train_pause_btn.setEnabled(True)
         self._set_activity(
             "training", "Resuming training..." if resume else "Training..."
+        )
+        self.job_card.start(
+            "Resuming training" if resume else "Training", True
         )
         self._train_log_line(
             "Resuming training..." if resume else "Starting training..."
@@ -3912,6 +4458,12 @@ class MainWindow(QMainWindow):
         self.train_progress.setMaximum(max(1, total))
         self.train_progress.setValue(step)
         self.train_loss.setText(f"Step {step} / {total}, loss {loss:.4f}")
+        if self._sleep_running():
+            self.job_card.set_progress(step, total)
+            self.job_card.set_status(f"Sleep: step {step} / {total}")
+        else:
+            self.job_card.set_progress(step, total)
+            self.job_card.set_status(f"Training: step {step} / {total}")
         if step > 0:
             # Step 0 is the "started" marker, not a real point.
             self.loss_curve.append_point(step, loss, total)
@@ -3927,6 +4479,7 @@ class MainWindow(QMainWindow):
         self._train_log_line(message)
         self.debug_log.action(f"training finished: ok={ok}: {message}")
         self._say(message.splitlines()[0] if message else "Training done.")
+        self.job_card.finish()
         # The finished run's curve and summary stay visible (T20):
         # the curve keeps its points, the loss line keeps its final
         # step, and the card says done. refresh_session re-enables
@@ -3940,6 +4493,7 @@ class MainWindow(QMainWindow):
         self._set_activity("idle", "Idle")
         self._train_log_line(message)
         self._say(message.splitlines()[0] if message else "Done.")
+        self.job_card.finish()
         self._refresh_go()
         self.refresh_train_panel()
         self._refresh_checklist()
@@ -3976,10 +4530,12 @@ class MainWindow(QMainWindow):
         )
         self._sleep_worker.progress.connect(self._on_train_progress)
         self._sleep_worker.log.connect(self._train_log_line)
+        self._sleep_worker.log.connect(self.job_card.set_status)
         self._sleep_worker.finished.connect(self._on_sleep_finished)
         self._run_started_at = None
         self.go_btn.setEnabled(False)
         self._set_activity("sleep", "Sleep: starting...")
+        self.job_card.start("Sleep", True)
         self._train_log_line("Starting sleep cycle...")
         self.debug_log.action(f"sleep started: {profile}/{project}")
         self._sleep_worker.start()
@@ -3990,6 +4546,7 @@ class MainWindow(QMainWindow):
         self._train_log_line(message)
         self.debug_log.action(f"sleep finished: ok={ok}: {message}")
         self._say(message.splitlines()[0] if message else "Sleep done.")
+        self.job_card.finish()
         # The finished cycle's curve and summary stay visible (T20),
         # like a finished training run.
         self.stat_time_left.setText("Time left: done")
@@ -4033,6 +4590,8 @@ class MainWindow(QMainWindow):
         if not profile or not project:
             self._warn("Pick a project to export.")
             return
+        if self._job_already_running():
+            return
         dest = QFileDialog.getExistingDirectory(
             self, "Export GGUF to folder", str(Path.home())
         )
@@ -4040,10 +4599,16 @@ class MainWindow(QMainWindow):
             return
         from .gguf import export_gguf
 
-        def job(log):
+        def job(ctx):
+            def on_event(event):
+                if event.get("type") == "phase":
+                    ctx.log(event["message"])
+
             result = export_gguf(
                 self.store, profile, project, dest,
-                on_warning=log,  # T31: converter warning, before the merge
+                on_warning=ctx.log,  # T31: converter warning, before the merge
+                on_event=on_event,
+                should_stop=ctx.is_cancelled,
             )
             return (
                 f"GGUF ready: {result['gguf']} "
@@ -4051,14 +4616,8 @@ class MainWindow(QMainWindow):
                 f"Run: {result['ollama_create']}"
             )
 
-        self._job_worker = JobWorker(job)
-        self._job_worker.log.connect(self._train_log_line)
-        self._job_worker.finished.connect(self._on_job_finished)
-        self._set_activity("job", "Working: exporting GGUF...")
+        self._start_job_worker(job, "Exporting GGUF", False)
         self._train_log_line("Exporting GGUF (merge, convert, quantize)...")
-        self._job_worker.start()
-        self._refresh_go()
-        self._refresh_checklist()
 
     def run_probe_gui(self):
         profile = self._selected_profile()
@@ -4066,10 +4625,28 @@ class MainWindow(QMainWindow):
         if not profile or not project:
             self._warn("Pick a project to probe.")
             return
+        if self._job_already_running():
+            return
         from .probe import probe_gate, probe_project
 
-        def job(log):
-            result = probe_project(self.store, profile, project)
+        def job(ctx):
+            def on_event(event):
+                if event.get("type") == "prompt":
+                    ctx.progress(event["done"], event["total"])
+                    phase = (
+                        "the base model"
+                        if event["phase"] == "before"
+                        else "the tuned model"
+                    )
+                    ctx.log(
+                        f"Probing {phase}: prompt {event['done']} "
+                        f"of {event['total']}."
+                    )
+
+            result = probe_project(
+                self.store, profile, project,
+                on_event=on_event, should_stop=ctx.is_cancelled,
+            )
             _passed, verdict = probe_gate(result)
             before = result["before"]
             after = result["after"]
@@ -4079,14 +4656,8 @@ class MainWindow(QMainWindow):
                 f"after.\n{verdict}"
             )
 
-        self._job_worker = JobWorker(job)
-        self._job_worker.log.connect(self._train_log_line)
-        self._job_worker.finished.connect(self._on_job_finished)
-        self._set_activity("job", "Working: running refusal probe...")
+        self._start_job_worker(job, "Refusal probe", True)
         self._train_log_line("Running refusal probe (before vs after)...")
-        self._job_worker.start()
-        self._refresh_go()
-        self._refresh_checklist()
 
     def closeEvent(self, event):
         self.settings.setValue("geometry", self.saveGeometry())
@@ -4107,6 +4678,13 @@ class MainWindow(QMainWindow):
         if self._sleep_running():
             self._sleep_worker.request_stop()
             self._sleep_worker.wait(15000)
+        if self._job_worker is not None and self._job_worker.isRunning():
+            # A job thread destroyed while running aborts the app:
+            # cancel it and wait for it to stop (the cancel kills
+            # a running subprocess; only the in-process merge phase
+            # of an export runs to its next check point).
+            self._job_worker.request_cancel()
+            self._job_worker.wait(60000)
         if self._chat_window is not None:
             self._chat_window.stop_worker()
         if self.download_manager.is_running():
@@ -4119,6 +4697,14 @@ def main(argv: list[str] | None = None) -> int:
     app = QApplication(sys.argv if argv is None else argv)
     app.setApplicationName("Stella")
     app.setOrganizationName("BrokeNBored")
+
+    # STELLA's own look (T81): one stylesheet, drawn from the icon,
+    # applied to the whole application — every window carries it.
+    # Plus the button press dip (150 ms to 0.97, entry 001). The
+    # filter object must stay alive: it is a local, and main() runs
+    # app.exec(), so it lives as long as the app does.
+    apply_stella_style(app)
+    _press_dips = install_press_dips(app)
 
     # Single instance (U27): re-clicking the icon focuses the running
     # app instead of starting a second copy.

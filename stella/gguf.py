@@ -214,14 +214,36 @@ def merge_adapter(
     return out_dir
 
 
-def _run(cmd: list[str], *, _runner=None) -> None:
-    """Run a converter command, or hand it to the injected fake."""
+def _run(cmd: list[str], *, _runner=None, should_stop=None) -> None:
+    """Run a converter command, or hand it to the injected fake.
+
+    `should_stop` (a no-arg callable, T74) cancels a long command:
+    the process is polled and killed when the flag flips, so the
+    job card's Cancel button stops the converter instead of
+    waiting for it. A Ctrl+C kills the child too before re-raising.
+    """
     if _runner is not None:
         _runner(cmd)
         return
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+    try:
+        while True:
+            try:
+                out, err = proc.communicate(timeout=0.2)
+                break
+            except subprocess.TimeoutExpired:
+                if should_stop is not None and should_stop():
+                    proc.kill()
+                    proc.wait()
+                    raise StellaError("Cancelled.")
+    except KeyboardInterrupt:
+        proc.kill()
+        proc.wait()
+        raise
     if proc.returncode != 0:
-        tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-5:]
+        tail = ((err or out) or "").strip().splitlines()[-5:]
         raise StellaError(
             f"command failed ({proc.returncode}): {' '.join(cmd)}\n"
             + "\n".join(tail)
@@ -234,12 +256,17 @@ def convert_to_gguf(
     *,
     quant: str = DEFAULT_QUANT,
     llama_cpp: tuple[Path, Path] | None = None,
+    on_event=None,
+    should_stop=None,
     _runner=None,
 ) -> dict:
     """Convert merged HF weights to a quantized GGUF file.
 
     Two steps, the classic reliable path: convert to F16 GGUF, then
     quantize. Returns {"gguf": path, "quant": quant, "bytes": size}.
+    `on_event` (T74) gets a phase event before each step; `should_stop`
+    (a no-arg callable) cancels between steps and kills a running
+    converter subprocess.
     """
     import sys
 
@@ -262,21 +289,43 @@ def convert_to_gguf(
     convert, quantize = llama_cpp
     out_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_f16 = out_path.parent / (out_path.stem + "-f16.gguf")
+
+    def emit(event: dict):
+        if on_event is not None:
+            on_event(event)
+
+    def cancelled() -> bool:
+        return should_stop is not None and should_stop()
+
     try:
+        if cancelled():
+            raise StellaError("Cancelled.")
+        emit({
+            "type": "phase", "phase": "convert",
+            "message": "Converting the merged model to GGUF...",
+        })
         _run(
             [
                 sys.executable, str(convert), str(hf_dir),
                 "--outfile", str(tmp_f16), "--outtype", "f16",
             ],
             _runner=_runner,
+            should_stop=should_stop,
         )
         if _runner is None and not tmp_f16.is_file():
             raise StellaError(
                 f"converter finished but wrote no file: {tmp_f16}"
             )
+        if cancelled():
+            raise StellaError("Cancelled.")
+        emit({
+            "type": "phase", "phase": "quantize",
+            "message": f"Quantizing to {quant}...",
+        })
         _run(
             [str(quantize), str(tmp_f16), str(out_path), quant],
             _runner=_runner,
+            should_stop=should_stop,
         )
         if _runner is None and not out_path.is_file():
             raise StellaError(
@@ -337,6 +386,8 @@ def export_gguf(
     from_checkpoint: int | None = None,
     llama_cpp: tuple[Path, Path] | None = None,
     on_warning=None,
+    on_event=None,
+    should_stop=None,
     force: bool = False,
     _runner=None,
     _model_loader=None,
@@ -348,7 +399,10 @@ def export_gguf(
     --from-checkpoint), converts, quantizes, writes the Modelfile.
     Returns paths + the ollama create command. `on_warning` (a
     callable taking one string) is called up front, before the
-    merge, with any converter warning (T31).
+    merge, with any converter warning (T31). `on_event` (T74) gets
+    a phase event before each step; `should_stop` (a no-arg
+    callable) cancels between phases and kills a running converter
+    subprocess.
 
     Overwriting (T24 — the REFUSE pick): an existing GGUF at the
     output path refuses the export with a plain message naming
@@ -427,7 +481,21 @@ def export_gguf(
     for warning in warnings:
         if on_warning is not None:
             on_warning(warning)
+
+    def emit(event: dict):
+        if on_event is not None:
+            on_event(event)
+
+    def cancelled() -> bool:
+        return should_stop is not None and should_stop()
+
     try:
+        if cancelled():
+            raise StellaError("Cancelled.")
+        emit({
+            "type": "phase", "phase": "merge",
+            "message": "Merging the adapter into the base model...",
+        })
         merge_adapter(
             base_ref, adapter_dir, merged_dir,
             _model_loader=_model_loader, _dtype=_dtype,
@@ -435,9 +503,12 @@ def export_gguf(
         if gguf_path.exists():
             # --force: the deliberate overwrite (T24).
             gguf_path.unlink()
+        if cancelled():
+            raise StellaError("Cancelled.")
         result = convert_to_gguf(
             merged_dir, gguf_path, quant=quant,
             llama_cpp=llama_cpp, _runner=_runner,
+            on_event=on_event, should_stop=should_stop,
         )
     except StellaError as exc:
         # A failure after the merge leaves no orphaned merged

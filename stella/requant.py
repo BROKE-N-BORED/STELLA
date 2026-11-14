@@ -336,14 +336,37 @@ def validate_new_tag(tag: str) -> str:
     return value
 
 
-def _run(cmd: list[str], *, what: str, _runner=None) -> None:
-    """Run a command, or hand it to the injected fake (tests)."""
+def _run(cmd: list[str], *, what: str, _runner=None,
+         should_stop=None) -> None:
+    """Run a command, or hand it to the injected fake (tests).
+
+    `should_stop` (a no-arg callable, T74) cancels a long command:
+    the process is polled and killed when the flag flips, so the
+    job card's Cancel button stops the quantizer instead of
+    waiting for it. A Ctrl+C kills the child too before re-raising.
+    """
     if _runner is not None:
         _runner(cmd)
         return
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+    try:
+        while True:
+            try:
+                out, err = proc.communicate(timeout=0.2)
+                break
+            except subprocess.TimeoutExpired:
+                if should_stop is not None and should_stop():
+                    proc.kill()
+                    proc.wait()
+                    raise StellaError("Cancelled.")
+    except KeyboardInterrupt:
+        proc.kill()
+        proc.wait()
+        raise
     if proc.returncode != 0:
-        tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-5:]
+        tail = ((err or out) or "").strip().splitlines()[-5:]
         raise StellaError(
             f"{what} failed ({proc.returncode}).\n" + "\n".join(tail)
         )
@@ -364,6 +387,7 @@ def requant_model(
     new_tag: str | None = None,
     work_dir: str | Path | None = None,
     on_event=None,
+    should_stop=None,
     _runner=None,
     _models_dir: Path | None = None,
 ) -> dict:
@@ -373,7 +397,9 @@ def requant_model(
     and Ollama exist, check free disk, quantize into Stella's work
     folder, write a Modelfile, `ollama create` the new tag, clean
     up the work files (Ollama has its own copy by then). The
-    original model is never written to.
+    original model is never written to. `should_stop` (a no-arg
+    callable, T74) cancels between phases and kills a running
+    quantizer subprocess.
 
     Returns a report: source tag + size + quant, new tag, quant,
     output size, and the `ollama run` command for the new model.
@@ -446,10 +472,13 @@ def requant_model(
         "quant": quant,
         "new_tag": new_tag,
     })
+    if should_stop is not None and should_stop():
+        raise StellaError("Cancelled.")
     _run(
         [str(quantize), str(source), str(out_path), quant],
         what=f"Shrinking {tag!r} to {quant}",
         _runner=_runner,
+        should_stop=should_stop,
     )
     if not out_path.is_file() or out_path.stat().st_size == 0:
         raise StellaError(
@@ -467,11 +496,14 @@ def requant_model(
     modelfile, _command = write_modelfile(
         out_path, work / "Modelfile", name=new_tag
     )
+    if should_stop is not None and should_stop():
+        raise StellaError("Cancelled.")
     try:
         _run(
             ["ollama", "create", new_tag, "-f", str(modelfile)],
             what=f"Registering the new model {new_tag!r} with Ollama",
             _runner=_runner,
+            should_stop=should_stop,
         )
     except StellaError as exc:
         raise StellaError(

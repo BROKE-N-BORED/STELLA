@@ -66,3 +66,26 @@ def test_content_is_honest_about_limits():
     teaching = topic_text("Teaching a small model")
     assert "only as good as the teacher" in teaching
     assert "untouched" in teaching
+
+
+def test_jobs_start_from_the_window_not_the_terminal():
+    """T75: re-quantize and distill start from the window with no
+    typing. How to Use stops sending the user to the terminal for
+    them (the installer mention in Getting started is fine — it is
+    not a job)."""
+    smaller = topic_text("Making a model smaller")
+    assert "stella-cli requant" not in smaller
+    assert "terminal" not in smaller.lower()
+    teach = topic_text("Teaching a small model")
+    assert "stella-cli distill" not in teach
+    assert "terminal" not in teach.lower()
+    assert "stella train" not in teach
+    assert "press Go" in smaller
+    assert "press Go" in teach
+
+
+def test_profiles_topic_points_download_at_the_main_window():
+    """T79: the download row lives in the main window only."""
+    profiles = topic_text("Profiles")
+    assert "The profile window also has the Download model button" not in profiles
+    assert "main window has the Download model button" in profiles

@@ -79,17 +79,24 @@ def run_probe(
     prompts: list[str] | None = None,
     *,
     max_new_tokens: int = 64,
+    on_event=None,
+    should_stop=None,
     _generate=None,
 ) -> dict:
     """Run the prompt set through a model. Returns counts + details.
 
     `_generate` is a test hook: prompt -> reply text, replacing real
     generation so the scoring can be tested without a model.
+    `on_event` (T74) gets {"type": "prompt", "index", "total"} per
+    prompt; `should_stop` (a no-arg callable) cancels between
+    prompts.
     """
     prompts = list(prompts if prompts is not None else REFUSAL_PROMPTS)
     details = []
     refusals = 0
-    for prompt in prompts:
+    for index, prompt in enumerate(prompts, 1):
+        if should_stop is not None and should_stop():
+            raise StellaError("The probe was cancelled.")
         if _generate is not None:
             reply = _generate(prompt)
         else:
@@ -99,6 +106,10 @@ def run_probe(
         details.append(
             {"prompt": prompt, "reply": reply, "refused": refused}
         )
+        if on_event is not None:
+            on_event({
+                "type": "prompt", "index": index, "total": len(prompts),
+            })
     total = len(prompts)
     return {
         "total": total,
@@ -150,6 +161,8 @@ def probe_project(
     profile: str,
     project: str,
     *,
+    on_event=None,
+    should_stop=None,
     _model_loader=None,
     _generate=None,
 ) -> dict:
@@ -159,6 +172,9 @@ def probe_project(
     again, and reports the change. `_model_loader` is a test hook:
     (base_ref, adapter_dir_or_None) -> (model, tokenizer).
     `_generate` replaces real generation (see run_probe).
+    `on_event` (T74) gets {"type": "prompt", "done", "total",
+    "phase"} per prompt across both passes; `should_stop` (a
+    no-arg callable) cancels between prompts.
     """
     from .train import LFM3_HF_REPO, load_base_model, require_training_deps
 
@@ -187,26 +203,58 @@ def probe_project(
     # on the machine it was built for.
     import gc
 
+    # Progress across both passes (T74): the before pass is the
+    # first half, the after pass the second. The per-prompt event
+    # carries the overall done/total so the job card shows one bar.
+    total_prompts = 2 * len(REFUSAL_PROMPTS)
+
+    def _before_event(event):
+        if on_event is not None:
+            on_event({
+                "type": "prompt", "done": event["index"],
+                "total": total_prompts, "phase": "before",
+            })
+
+    def _after_event(event):
+        if on_event is not None:
+            on_event({
+                "type": "prompt",
+                "done": len(REFUSAL_PROMPTS) + event["index"],
+                "total": total_prompts, "phase": "after",
+            })
+
     if _model_loader is not None:
         base_model, tokenizer = _model_loader(base_ref, None)
-        before = run_probe(base_model, tokenizer, _generate=_generate)
+        before = run_probe(
+            base_model, tokenizer, _generate=_generate,
+            on_event=_before_event, should_stop=should_stop,
+        )
         del base_model
         gc.collect()
         tuned_model, _ = _model_loader(base_ref, adapter_dir)
-        after = run_probe(tuned_model, tokenizer, _generate=_generate)
+        after = run_probe(
+            tuned_model, tokenizer, _generate=_generate,
+            on_event=_after_event, should_stop=should_stop,
+        )
         del tuned_model
         gc.collect()
     else:
         from peft import PeftModel
 
         base_model, tokenizer = load_base_model(base_ref)
-        before = run_probe(base_model, tokenizer, _generate=_generate)
+        before = run_probe(
+            base_model, tokenizer, _generate=_generate,
+            on_event=_before_event, should_stop=should_stop,
+        )
         del base_model
         gc.collect()
         tuned_model = PeftModel.from_pretrained(
             load_base_model(base_ref)[0], str(adapter_dir)
         )
-        after = run_probe(tuned_model, tokenizer, _generate=_generate)
+        after = run_probe(
+            tuned_model, tokenizer, _generate=_generate,
+            on_event=_after_event, should_stop=should_stop,
+        )
         del tuned_model
         gc.collect()
     result = {

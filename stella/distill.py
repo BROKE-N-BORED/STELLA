@@ -101,6 +101,7 @@ def distill_dataset(
     ollama_url: str | None = None,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
     on_event=None,
+    should_stop=None,
     _generate=None,
 ) -> dict:
     """Ask the teacher every prompt and save the answers as a dataset.
@@ -110,7 +111,9 @@ def distill_dataset(
     it. Returns a report: prompts, asked, skipped counts, rows, and
     the dataset path. Raises StellaError in plain words when the
     teacher is missing, the prompts file is empty, or fewer than 2
-    good rows come back (training needs at least 2).
+    good rows come back (training needs at least 2). `should_stop`
+    (a no-arg callable, T74) cancels between prompts: the answers
+    so far stay saved, and a re-run picks up where it stopped.
     """
     store.get_profile(profile)
     store.get_project(profile, project)
@@ -139,6 +142,13 @@ def distill_dataset(
     asked_this_run: set[str] = set()
     with out_path.open("a", encoding="utf-8") as handle:
         for index, prompt in enumerate(prompts, 1):
+            if should_stop is not None and should_stop():
+                # Cancelled between prompts (T74): the answers so
+                # far are already on disk, and a re-run skips them.
+                raise StellaError(
+                    "Cancelled. The answers so far are saved; run it "
+                    "again to pick up where it stopped."
+                )
             if prompt in asked_this_run:
                 # Same prompt twice in the file: one answer is
                 # enough, the pair would be a duplicate. This check

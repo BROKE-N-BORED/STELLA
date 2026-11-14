@@ -169,3 +169,32 @@ def test_probe_loads_one_base_at_a_time(tmp_path):
     # happened only after the first was freed.
     assert CountedModel.peak == 1
     assert CountedModel.live == 0
+
+
+# -- T74: cancel + progress events ------------------------------------
+
+
+def test_run_probe_cancel_stops_midway():
+    seen = []
+
+    def generate(prompt):
+        seen.append(prompt)
+        return "Here is the answer."
+
+    def should_stop():
+        return len(seen) >= 3
+
+    with pytest.raises(StellaError, match="cancelled"):
+        run_probe(None, None, _generate=generate, should_stop=should_stop)
+    assert len(seen) == 3
+
+
+def test_run_probe_emits_prompt_events():
+    events = []
+    run_probe(
+        None, None, _generate=lambda p: "Here is the answer.",
+        on_event=events.append,
+    )
+    assert len(events) == 12
+    assert events[0] == {"type": "prompt", "index": 1, "total": 12}
+    assert events[-1] == {"type": "prompt", "index": 12, "total": 12}

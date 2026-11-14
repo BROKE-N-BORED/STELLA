@@ -1,5 +1,69 @@
 # Changelog
 
+## v0.12.0 — 2026-11-14
+
+The UI rebuild, P1 slice (audit #9, tasks T74-T82): every job
+runs as a card, the chat plans before it runs, and STELLA gets
+its own look.
+
+- T74 — one job card for every job: Train, Sleep, GGUF export,
+  refusal probe, re-quantize, and distill all run as a card
+  under the hero, with a progress bar, a live status line, and
+  a Cancel button. Sleep stops being a section at the bottom of
+  a column. Starting a second job is refused in plain words
+  ("A job is already running. Wait for it to finish, or cancel
+  it first."). Train and Sleep cancel after the current step
+  with a checkpoint saved; the other jobs stop at the next check
+  point (a running subprocess is killed). The engines gained
+  cancel checks and progress events to feed the card
+  (`should_stop` / `on_event` in distill, requant, gguf, probe).
+- T75 — re-quantize and distill get window surfaces: both jobs
+  already started from the job picker; now they run as job
+  cards too, and How to Use stops sending the user to the
+  terminal for them. Both start from the window with no typing.
+- T76 — chat: click-to-pick model, plan before it runs. When
+  no chat model is picked, the chat shows clickable model
+  buttons from the installed list instead of "type one of
+  these". Before a multi-step plan runs, the agent shows the
+  plan ("I will: 1. ... 2. ...") with Run and Cancel buttons
+  and waits for the go-ahead. Replies stream as they arrive
+  (Ollama `chat_stream`); a tool block is never streamed, so
+  the user never sees JSON.
+- T77 — the session follows the profile: the last project is
+  remembered per profile, so switching profiles restores that
+  profile's project. The memory lives in QSettings and survives
+  restarts.
+- T78 — tree rows show full names, with a health badge: the
+  tree pane defaults wider (340 px), every row carries its full
+  text as a tooltip, and each profile row shows a health dot —
+  green when the weights are ready, amber when they are not,
+  grey when Ollama is down and the weights are not ready
+  (weights ready wins over Ollama down, since training can
+  start without Ollama). The tooltip carries the health line.
+- T79 — one honest download row: the Profile window's duplicate
+  download row is gone; the main window's row is the only one.
+  Download is disabled when there is no repo, and a "Set the
+  model source..." button shows instead, opening the profile
+  window where Base ref gets set. The Base ref field stops
+  showing a tag as if it were a repo (a tag-valued base_ref
+  shows blank, with a placeholder saying what belongs there).
+- T80 — collapsible section headers: the main panel's train
+  details (Dataset, Checkpoints, Training log, Sleep) and every
+  Settings section are collapsible groups, open by default.
+  The Project window's action row (Save, Rename, Delete,
+  Close) is pinned below the scroll area, so Save is visible
+  without scrolling.
+- T81 — STELLA's own look: one stylesheet (`stella/style.py`),
+  drawn from the icon — dark surfaces, the gold accent — applied
+  by `main()` to every window. Button presses dip to 0.97 over
+  150 ms. No per-frame cost: the sheet is static, the dip is a
+  press-only geometry animation.
+- T82 — keyboard: shortcuts for the main actions (Ctrl+N new
+  profile, Ctrl+Shift+N new project, Ctrl+G run the picked job,
+  Ctrl+S save, F1 How to Use, F2 Chat), a visible gold focus
+  ring in the stylesheet, and tab order in visual order on the
+  main screen and every dedicated window.
+
 ## v0.11.0 — 2026-11-14
 
 The UI rebuild, P0 slice (audit #9, tasks T15-T20): the window

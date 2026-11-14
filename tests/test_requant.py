@@ -447,3 +447,26 @@ def test_cli_requant_missing_model_exit_1(monkeypatch, tmp_path, home):
     res = run_cli(home, "requant", "ghost:1b")
     assert res.returncode == 1
     assert "does not have a model" in res.stderr
+
+
+# -- T74: cancel ------------------------------------------------------
+
+
+def test_run_kills_process_on_cancel():
+    """A long quantize is killed when the flag flips — the job
+    card's Cancel does not wait for the quantizer to finish."""
+    import threading
+    import time
+
+    from stella.requant import _run
+
+    state = {"stop": False}
+
+    def should_stop():
+        return state["stop"]
+
+    threading.Timer(0.5, lambda: state.update(stop=True)).start()
+    started = time.monotonic()
+    with pytest.raises(StellaError, match="Cancelled"):
+        _run(["sleep", "30"], what="sleeping", should_stop=should_stop)
+    assert time.monotonic() - started < 10

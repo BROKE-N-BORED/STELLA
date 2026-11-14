@@ -2356,6 +2356,7 @@ accounts for their findings.)
 - **Effort:** M
 - **Library:** 021 Glanceable surfaces
 - **Extends:** T107 (progress and cancel for GGUF/probe jobs), T29 (one job at a time: the card enforces it visibly), T47 (reset progress/loss per project: the card owns per-job state).
+- **Status:** DONE in v0.12.0 (2026-11-14) — all six jobs run as cards (train/sleep via their workers feeding the card, requant/distill/export/probe via _start_job_worker) with progress + cancel; a second job is refused in plain words.
 - **Problem:** Sleep is a buried section below the fold, and GGUF export and the refusal probe run with no progress and no cancel. The user waits blind.
 - **Fix:** Train, Sleep, GGUF export, refusal probe, re-quantize, and distill all run as job cards with a progress bar, a live status line, and a Cancel button. Sleep stops being a section at the bottom of a column. Starting a second job is refused with plain words.
 - **Done:** Every job shows progress and offers cancel; no job is below the fold while it runs.
@@ -2366,6 +2367,7 @@ accounts for their findings.)
 - **Covers:** A9-U2 (part)
 - **Effort:** M
 - **Library:** 005 Bento grids
+- **Status:** DONE in v0.12.0 (2026-11-14) — "Make smaller" (re-quantize) and "Teach a small model" (distill) run from the window as jobs with the same card flow as Train and Sleep; How to Use has zero "terminal" mentions for them.
 - **Problem:** Two shipped jobs (v0.8.0) have no window surface: How to Use sends the user to the Chat or to the terminal.
 - **Fix:** The job picker lists "Make smaller" (re-quantize) and "Teach a small model" (distill) as jobs with the same card flow as Train and Sleep. How to Use stops sending the user to the terminal for them.
 - **Done:** Both jobs start from the window with no typing.
@@ -2376,6 +2378,7 @@ accounts for their findings.)
 - **Covers:** A9-U5, A9-G11
 - **Effort:** M
 - **Library:** 010 AI-native patterns, 012 Progressive disclosure
+- **Status:** DONE in v0.12.0 (2026-11-14) — the chat shows clickable model buttons when no model is picked, shows its plan before a multi-step run (Run/Cancel), and streams replies as they arrive.
 - **Problem:** With no chat model picked, the chat makes the user type a tag by hand from eleven raw names. And the agent never shows its plan before running: one "just do it" can download, create, and start hours of training with no preview.
 - **Fix:** When no chat model is picked, the chat shows clickable model buttons from the installed list instead of "type one of these". Before a multi-step plan runs, the agent shows the plan ("I will: 1. ... 2. ...") with Run and Cancel. Replies stream as they arrive.
 - **Done:** No typing is needed to pick a chat model; "just do it" shows its plan first and waits for Run.
@@ -2387,6 +2390,7 @@ accounts for their findings.)
 - **Effort:** S
 - **Library:** 022 Per-context profiles
 - **Supersedes:** T125 (remember the project per profile).
+- **Status:** DONE in v0.12.0 (2026-11-14) — the last project is stored per profile; switching back to a profile restores its project (verified live by the coordinator).
 - **Problem:** The session is one global slot; switching profiles loses the project context.
 - **Fix:** Store the last project per profile; switching profiles restores that profile's project. The active profile is visible at a glance.
 - **Done:** Switch away from a profile and back; the project is back.
@@ -2398,6 +2402,7 @@ accounts for their findings.)
 - **Effort:** S
 - **Library:** none
 - **Extends:** T163 (health badge per profile row), T164 (richer project rows).
+- **Status:** DONE in v0.12.0 (2026-11-14) — a wider tree pane, tooltips carrying the full row text, and a health badge per profile (weights ready, weights missing, Ollama down).
 - **Problem:** Long model names truncate in the 235 px pane with no tooltip, so the user cannot read which model a profile is.
 - **Fix:** A wider default pane, tooltips carrying the full row text, and a small health badge per profile (weights ready, weights missing, Ollama down).
 - **Done:** The MiniCPM5 row is readable in full (tooltip or wrap); each profile shows its weights state at a glance.
@@ -2409,6 +2414,7 @@ accounts for their findings.)
 - **Effort:** S
 - **Library:** none
 - **Extends:** T54 (tag/base_ref sync: this is the UI face of it; the model fix stays T54's).
+- **Status:** DONE in v0.12.0 (2026-11-14) — one download row, in the main window; the Profile window duplicate is gone; Download is disabled when there is no repo, and the self-referential label is fixed.
 - **Problem:** The download row is duplicated in two windows; the button is enabled when there is no repo; and the Profile window says "No Hugging Face repo set" next to a filled Base ref field, telling the user to go to the window they are already in.
 - **Fix:** One download row, in the main window; the Profile window's duplicate goes away. Download is disabled when there is no repo, and the label says what to do as a button that opens the profile window. The self-referential label is fixed. The Base ref field stops showing a tag as if it were a repo.
 - **Done:** In the no-repo state, Download is disabled and the screen offers a working path to fix it; no duplicate row exists.
@@ -2419,6 +2425,7 @@ accounts for their findings.)
 - **Covers:** A9-U4, A9-G10
 - **Effort:** M
 - **Library:** 012 Progressive disclosure
+- **Status:** DONE in v0.12.0 (2026-11-14) — CollapsibleSection in the main panel, Settings, and the Project window; the action row stays reachable without scrolling the whole form.
 - **Problem:** Save project sits below the fold in its own window, and Settings is a 1,165 px scrolling wall in a 625 px viewport. The brief asks for collapsible headers in panels.
 - **Fix:** The main panel and Settings get collapsible headers. The action row (Save, Close, Debug report) stays reachable without scrolling the whole form.
 - **Done:** At 1100x680, Save project is visible without scrolling; every Settings section is a collapsible group.
@@ -2429,6 +2436,7 @@ accounts for their findings.)
 - **Covers:** A9-G2
 - **Effort:** M
 - **Library:** 001 Micro-interactions (limited), 002 Spring physics (limited)
+- **Status:** DONE in v0.12.0 (2026-11-14) — STELLA's own dark + gold stylesheet (stella/style.py), applied by main() to every window; verified by pixel probe (window bg rgb 28,28,28, gold accent present).
 - **Problem:** No application stylesheet exists; the app runs in default Qt grey and could be any program.
 - **Fix:** One stylesheet applied by `main()`, drawn from the icon (dark surfaces, one accent), applied to every window. Button press dips to 0.97 over 150 ms. No per-frame blur, no layout thrash, nothing that costs frames on the Vega 3.
 - **Done:** The app is recognizable as STELLA in a screenshot; every window carries the look.
@@ -2440,6 +2448,7 @@ accounts for their findings.)
 - **Effort:** S
 - **Library:** 023 Focus-first navigation
 - **Extends:** T127 (window chrome pass: shortcuts are part of it).
+- **Status:** DONE in v0.12.0 (2026-11-14) — shortcuts Ctrl+N, Ctrl+S, Ctrl+G, F1, F2 with a visible 2 px gold focus ring in the stylesheet; tab order in visual order. (F2 later moved to rename in v0.21.0, chat to F3.)
 - **Problem:** No keyboard shortcuts exist anywhere, and there is no visible focus styling.
 - **Fix:** Shortcuts for the main actions (new profile, new project, start training, How to Use, Chat), a visible focus ring in the stylesheet, and tab order in visual order.
 - **Done:** Every main action is reachable by keyboard; the focus ring is visible in a screenshot.

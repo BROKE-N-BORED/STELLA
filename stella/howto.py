@@ -115,9 +115,12 @@ dreaming and the refusal probe.
 Base ref. Where training loads the base model from: a Hugging
 Face name like LiquidAI/LFM3-1.7B. Needed before you train.
 
-The profile window also has the Download model button, which
-pulls the base weights with a progress bar, and a Cancel button
-while it runs.""",
+The main window has the Download model button, next to the
+model picker. It pulls the base weights with a progress bar,
+and a Cancel button while it runs. If no Base ref is set, the
+button is greyed out and a "Set the model source..." button
+shows instead: it opens the profile window, where Base ref
+gets set.""",
     ),
     (
         "Projects",
@@ -257,14 +260,10 @@ around 1.8 GB, and it runs faster because there is less to read
 from memory.
 
 Pick a model, pick Make smaller, and press Go. Stella makes the
-smaller copy for you. Or run it in a terminal inside the
-Stella folder:
-
-  bash stella-cli requant qwen3.5:4b
-
-That makes a new model called qwen3.5:4b-q4-k-m. Pick your own
-name with --as, and another size with --quant. The original
-model is never touched: the smaller one is a separate copy.
+smaller copy for you: a new model called qwen3.5:4b-q4-k-m, for
+example. The original model is never touched: the smaller one
+is a separate copy. The job runs as a card under the picker,
+with a progress bar and a Cancel button.
 
 Honest limits: re-quantizing a model that is already quantized
 loses a little quality, because the weights get rounded twice.
@@ -286,21 +285,21 @@ does the jobs you want. A big teacher model answers a list of
 prompts, and its answers become the training examples for a
 small student model. The student learns only what it was taught.
 
-Ask the Chat to do it for you, or run it in a terminal inside the
-Stella folder. First, make a plain text file with one prompt per
-line, the jobs you want the small model to learn. Or pick a model,
-pick Teach a small model, and press Go: Stella asks for the
-teacher and the prompts file, then runs it. In a terminal:
-
-  bash stella-cli distill lfm3-tool tool-calls --teacher qwen3.5:4b --prompts prompts.txt
+First, make a plain text file with one prompt per line, the
+jobs you want the small model to learn. Then pick a model, pick
+Teach a small model, and press Go. Stella asks for the teacher
+and the prompts file, then runs it. Or ask the Chat to do it for
+you: it picks the teacher and the file itself. The job runs as
+a card under the picker, with a progress bar and a Cancel
+button.
 
 Stella asks the teacher each prompt and saves the answers as
 the project's dataset. Empty answers are skipped. If you stop
 part way and run it again, it skips the prompts already
 answered, so no teacher time is wasted.
 
-Then train the student the usual way: stella train lfm3-tool
-tool-calls, or pick Train and press Go in the window.
+Then train the student the usual way: pick Train and press Go
+in the window.
 
 Honest limits: the student is only as good as the teacher's
 answers. A teacher that answers badly teaches badly, so look

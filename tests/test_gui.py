@@ -140,6 +140,7 @@ def test_menu_bar_has_expected_menus_and_actions(window):
             "New project...",
             "Export project...",
             "Import package...",
+            "Run the picked job",
             "Settings...",
         ],
         "View": ["Profiles", "Projects"],
@@ -302,14 +303,26 @@ def test_profile_window_has_help_lines_and_no_processor(window):
     win.close()
 
 
-def test_profile_window_has_download_row(window):
+def test_profile_window_has_no_download_row(window):
+    """T79: one honest download row, in the main window. The
+    Profile window's duplicate is gone; the seeded profile has no
+    base_ref, so the main Download button is disabled and the fix
+    button shows instead."""
     win = window.open_profile_window("lfm3-tool")
-    assert win.download_btn.text() == "Download model"
-    assert win.download_cancel_btn is not None
-    assert win.download_progress is not None
-    # The seeded profile has no base_ref: the status says so.
-    assert "No Hugging Face repo set" in win.download_status.text()
+    for attr in (
+        "download_btn",
+        "download_cancel_btn",
+        "download_progress",
+        "download_status",
+        "download_help",
+    ):
+        assert not hasattr(win, attr), attr
     win.close()
+    window.set_session("lfm3-tool", "tool-calls")
+    window._checklist_dismiss()
+    assert window.download_btn.isEnabled() is False
+    assert window.download_fix_btn.isVisibleTo(window) is True
+    assert "No Hugging Face repo set." in window.download_status_label.text()
 
 
 def test_project_window_save_writes_through(window, seeded):
@@ -787,6 +800,8 @@ def test_new_profile_enter_creates(window, seeded):
 class FakeChatAgent:
     """A stand-in for ChatAgent: instant replies, records cancel."""
 
+    pending_plan = None
+
     def __init__(self, reply_text="Hello from the fake chat."):
         self.reply_text = reply_text
         self.received = []
@@ -800,7 +815,8 @@ class FakeChatAgent:
     def set_provider(self, provider, model):
         pass
 
-    def set_callbacks(self, on_narration=None, on_progress=None):
+    def set_callbacks(self, on_narration=None, on_progress=None,
+                      on_token=None):
         pass
 
     def request_cancel(self):
@@ -910,6 +926,8 @@ def test_chat_window_cancel_stops_worker(window, qapp):
 
 
 def test_chat_window_asks_for_model_when_none_picked(window, monkeypatch, qapp):
+    """T76: no typing needed to pick a chat model — clickable
+    buttons, one per installed model."""
     import stella.gui as gui_mod
 
     from stella.gui import ChatWindow
@@ -922,12 +940,17 @@ def test_chat_window_asks_for_model_when_none_picked(window, monkeypatch, qapp):
     chat.show()
     qapp.processEvents()
     assert "Which model should I chat with?" in chat.messages.toPlainText()
-    assert "lfm3:1.7b" in chat.messages.toPlainText()
-    chat.input.setText("lfm3:1.7b")
-    chat.send_btn.click()
+    assert "Pick one below." in chat.messages.toPlainText()
+    assert len(chat.model_buttons) == 2
+    assert [b.text() for b in chat.model_buttons] == [
+        "lfm3:1.7b",
+        "qwen3.5:2b",
+    ]
+    chat.model_buttons[0].click()
     qapp.processEvents()
     assert window.chat_model == "lfm3:1.7b"
     assert "I will chat with lfm3:1.7b" in chat.messages.toPlainText()
+    assert chat.model_pick_scroll.isVisible() is False
     chat.close()
 
 
@@ -1607,12 +1630,12 @@ def test_notes_marker_and_save_notes_only(window, seeded, monkeypatch, qapp):
 
     proj_win = window.open_project_window("lfm3-tool", "tool-calls")
     qapp.processEvents()
-    assert proj_win.notes_label.text() == "Notes"
+    assert proj_win.notes_section.title == "Notes"
     proj_win.notes_edit.setPlainText("just the notes")
     proj_win.display_edit.setText("Renamed in the form")
-    assert proj_win.notes_label.text() == "Notes (modified)"
+    assert proj_win.notes_section.title == "Notes (modified)"
     assert proj_win.save_notes() is True
-    assert proj_win.notes_label.text() == "Notes"
+    assert proj_win.notes_section.title == "Notes"
     assert "just the notes" in seeded.read_notes("lfm3-tool", "tool-calls")
     # Save notes touches only the notes: the display-name edit is
     # still unsaved (and the window still shows it as modified).
@@ -2086,7 +2109,7 @@ def test_go_requant_runs(window, monkeypatch, qapp):
 
     import stella.requant as requant_mod
 
-    def _fake_requant(tag):
+    def _fake_requant(tag, **kwargs):
         assert tag == "lfm3:1.7b"
         return {
             "source_tag": "lfm3:1.7b",
@@ -2424,6 +2447,7 @@ def test_menu_actions_disabled_without_selection(qapp, store, settings):
     assert not win._menu_action_new_project.isEnabled()
     assert not win._menu_action_export.isEnabled()
     assert win._menu_action_import.isEnabled()
+    assert not win._menu_action_run.isEnabled()
     assert win._menu_action_settings.isEnabled()
     assert not win._menu_action_profiles.isEnabled()
     assert not win._menu_action_projects.isEnabled()
@@ -2440,14 +2464,17 @@ def test_menu_actions_enable_with_session(window, qapp):
     assert window._menu_action_profiles.isEnabled()
     assert not window._menu_action_export.isEnabled()
     assert not window._menu_action_projects.isEnabled()
-    # A full session: everything works.
+    # A full session: everything works. Pick a job first: Run
+    # mirrors Go, and Go needs a job picked (T82).
     _select_session(window)
+    window.job_buttons["train"].click()
     qapp.processEvents()
     for action in (
         window._menu_action_new_profile,
         window._menu_action_new_project,
         window._menu_action_export,
         window._menu_action_import,
+        window._menu_action_run,
         window._menu_action_settings,
         window._menu_action_profiles,
         window._menu_action_projects,
@@ -2543,3 +2570,550 @@ def test_loss_curve_widget_unit(qapp):
     widget.clear()
     assert widget.points == []
     widget.close()
+
+
+# -- v0.12.0: UI REBUILD P1 (T74-T82) -----------------------------------
+
+
+def test_job_card_shows_progress_and_cancel(window, qapp):
+    """T74: every job runs as a card with progress and Cancel."""
+    import time
+
+    from PySide6.QtTest import QTest
+
+    from stella.model import StellaError
+
+    window._checklist_dismiss()
+    _select_session(window)
+    window.job_buttons["train"].click()
+    assert window.go_btn.isEnabled()
+    assert window.job_card.isVisible() is False
+
+    def job(ctx):
+        for i in range(1, 11):
+            if ctx.is_cancelled():
+                raise StellaError("Cancelled.")
+            ctx.progress(i, 10)
+            ctx.log(f"Working: step {i} of 10.")
+            time.sleep(0.05)
+        return "All done."
+
+    window._start_job_worker(job, "A test job", True)
+    # Poll for the status: worker threads are slow under sandbox
+    # load, and a fixed short wait flakes (same as _wait_for_text).
+    deadline = 0
+    while "Working: step" not in window.job_card.status_label.text():
+        QTest.qWait(100)
+        deadline += 100
+        assert deadline < 10000
+    assert window.job_card.isVisible()
+    assert window.job_card.title_label.text() == "A test job"
+    assert window.job_card.progress.value() > 0
+    assert window.job_card.cancel_btn.isEnabled()
+    # Go and the other job buttons refuse a second job while one runs.
+    assert window.go_btn.isEnabled() is False
+    assert window.train_export_gguf_btn.isEnabled() is False
+    assert window.train_probe_btn.isEnabled() is False
+    window.job_card.cancel_btn.click()
+    deadline = 0
+    while window.job_card.isVisible():
+        QTest.qWait(100)
+        deadline += 100
+        assert deadline < 10000
+    assert "Cancelled" in window.train_log.toPlainText()
+    assert window._job_worker.isRunning() is False
+
+
+def test_second_job_is_refused_in_plain_words(window, monkeypatch, qapp):
+    """T74: starting a second job is refused, not queued."""
+    import time
+
+    from PySide6.QtTest import QTest
+
+    _select_session(window)
+    said = []
+    monkeypatch.setattr(window, "_say", said.append)
+
+    def job(ctx):
+        for _ in range(40):
+            if ctx.is_cancelled():
+                return "stopped"
+            time.sleep(0.05)
+        return "done"
+
+    window._start_job_worker(job, "A long job", False)
+    first = window._job_worker
+    assert first.isRunning()
+    # Export refuses before it even asks for a folder.
+    window.export_gguf_gui()
+    assert window._job_worker is first
+    assert any("already running" in s for s in said)
+    assert any("cancel it first" in s for s in said)
+    window.job_card.cancel_btn.click()
+    QTest.qWait(500)
+
+
+def test_requant_runs_as_a_job_card(window, monkeypatch, qapp):
+    """T74/T75: Make smaller runs as a card with a title."""
+    from PySide6.QtTest import QTest
+
+    import stella.requant as requant_mod
+
+    def _fake_requant(tag, **kwargs):
+        return {
+            "source_tag": "lfm3:1.7b",
+            "source_bytes": 2_000_000_000,
+            "source_quant": "Q4_K_M",
+            "new_tag": "lfm3:1.7b-q4_k_m",
+            "quant": "Q4_K_M",
+            "output_bytes": 1_900_000_000,
+            "ollama_run": "ollama run lfm3:1.7b-q4_k_m",
+        }
+
+    monkeypatch.setattr(requant_mod, "requant_model", _fake_requant)
+    _select_session(window)
+    window._checklist_dismiss()
+    window.job_buttons["requant"].click()
+    window.go_btn.click()
+    deadline = 0
+    while "Made a smaller copy" not in window.train_log.toPlainText():
+        QTest.qWait(100)
+        deadline += 100
+        assert deadline < 5000
+    assert window.job_card.title_label.text() == "Making a smaller copy"
+    assert window.job_card.isVisible() is False
+
+
+class PlanningFakeChatAgent(FakeChatAgent):
+    """Shows a plan on the first message, runs it on approval."""
+
+    def __init__(self):
+        super().__init__()
+        self.pending_plan = None
+
+    def reply(self, text):
+        self.received.append(text)
+        if text == "Go ahead":
+            self.pending_plan = None
+            self.last_streamed_plain = ""
+            return "Running the plan."
+        self.pending_plan = ["Use the LFM3 profile.", "Train it."]
+        self.last_streamed_plain = ""
+        return "I will:\n1. Use the LFM3 profile.\n2. Train it."
+
+
+def test_chat_plan_row_shows_run_and_cancel(window, qapp):
+    """T76: the plan shows with Run and Cancel buttons; Run sends
+    the approval, and the plan row goes away."""
+    from stella.gui import ChatWindow
+
+    window.set_chat_model("lfm3:1.7b")
+    fake = PlanningFakeChatAgent()
+    chat = ChatWindow(window, agent_factory=lambda: fake)
+    chat.show()
+    qapp.processEvents()
+    assert chat.plan_row.isVisible() is False
+    chat.input.setText("just do it")
+    chat.send_btn.click()
+    assert _wait_for_text(chat, "I will:", qapp)
+    assert chat.plan_row.isVisible()
+    assert chat.plan_run_btn.text() == "Run"
+    assert chat.plan_cancel_btn.text() == "Cancel"
+    chat.plan_run_btn.click()
+    assert _wait_for_text(chat, "Running the plan.", qapp)
+    assert fake.received == ["just do it", "Go ahead"]
+    assert chat.plan_row.isVisible() is False
+    chat.close()
+
+
+class StreamingFakeChatAgent(FakeChatAgent):
+    """Streams its reply token by token, like a real model."""
+
+    def __init__(self):
+        super().__init__("Streamed reply here.")
+        self._on_token = None
+        self.last_streamed_plain = ""
+
+    def set_callbacks(self, on_narration=None, on_progress=None,
+                      on_token=None):
+        self._on_token = on_token
+
+    def reply(self, text):
+        self.received.append(text)
+        if self._on_token is not None:
+            for chunk in ["Streamed ", "reply ", "here."]:
+                self._on_token(chunk)
+        self.last_streamed_plain = "Streamed reply here."
+        return "Streamed reply here."
+
+
+def test_chat_streams_tokens_without_doubling(window, qapp):
+    """T76: replies stream as they arrive, shown once — the final
+    reply does not re-append what already streamed."""
+    from stella.gui import ChatWindow
+
+    window.set_chat_model("lfm3:1.7b")
+    fake = StreamingFakeChatAgent()
+    chat = ChatWindow(window, agent_factory=lambda: fake)
+    chat.show()
+    qapp.processEvents()
+    chat.input.setText("hello")
+    chat.send_btn.click()
+    assert _wait_for_text(chat, "Streamed reply here.", qapp)
+    text = chat.messages.toPlainText()
+    assert text.count("Streamed reply here.") == 1
+    chat.close()
+
+
+def test_session_follows_profile(window, seeded, qapp):
+    """T77: switching profiles restores that profile's project."""
+    seeded.create_profile(
+        "qwen-2b", display_name="Qwen", ollama_tag="qwen:2b"
+    )
+    seeded.create_project("qwen-2b", "other-job")
+    window.set_session("lfm3-tool", "tool-calls")
+    window.set_session("qwen-2b", "other-job")
+    assert window._current_project == "other-job"
+    # Back to the first profile, project only: the project is back.
+    window.set_session("lfm3-tool", None)
+    assert window._current_profile == "lfm3-tool"
+    assert window._current_project == "tool-calls"
+    # And the other way: the second profile remembers its own.
+    window.set_session("qwen-2b", None)
+    assert window._current_profile == "qwen-2b"
+    assert window._current_project == "other-job"
+
+
+def test_session_memory_survives_new_window(qapp, seeded, settings):
+    """T77: the per-profile memory lives in QSettings, so a new
+    window remembers it too."""
+    from stella.gui import MainWindow
+
+    seeded.create_profile(
+        "qwen-2b", display_name="Qwen", ollama_tag="qwen:2b"
+    )
+    seeded.create_project("qwen-2b", "other-job")
+    first = MainWindow(store=seeded, settings=settings)
+    first.show()
+    qapp.processEvents()
+    first.set_session("lfm3-tool", "tool-calls")
+    first.set_session("qwen-2b", "other-job")
+    first.close()
+    second = MainWindow(store=seeded, settings=settings)
+    second.show()
+    qapp.processEvents()
+    # The last session restores; switching profiles restores the
+    # other profile's remembered project.
+    assert second._current_profile == "qwen-2b"
+    assert second._current_project == "other-job"
+    second.set_session("lfm3-tool", None)
+    assert second._current_project == "tool-calls"
+    second.close()
+
+
+def test_tree_pane_is_wider(window, qapp):
+    """T78: the tree pane defaults wide enough for long names."""
+    qapp.processEvents()
+    assert window.splitter.sizes()[0] >= 300
+
+
+def test_tree_rows_carry_full_text_tooltips(window):
+    """T78: every row carries its full text as a tooltip, so a
+    truncated name is still readable on hover."""
+    top = window.tree.topLevelItem(0)
+    assert top.toolTip(0).startswith(top.text(0))
+    child = top.child(0)
+    assert child.toolTip(0) == "tool-calls"
+
+
+def test_profile_row_shows_health_badge(window, monkeypatch, qapp):
+    """T78: each profile row shows a health dot — green when the
+    weights are ready, amber when they are not, grey when Ollama
+    is down and the weights are not ready."""
+    import stella.gui as gui_mod
+    from PySide6.QtGui import QColor
+
+    def badge_color():
+        item = window.tree.topLevelItem(0)
+        image = item.icon(0).pixmap(16, 16).toImage()
+        return image.pixelColor(8, 8)
+
+    def refresh_as(state, ollama_up):
+        monkeypatch.setattr(
+            gui_mod.provision, "weights_status",
+            lambda store, slug: {
+                "repo": "LiquidAI/LFM3-1.7B", "state": state,
+                "size_bytes": 0, "path": None,
+            },
+        )
+        monkeypatch.setattr(gui_mod, "reachable", lambda url=None: ollama_up)
+        window._ollama_checked_at = 0
+        window.refresh_tree()
+        qapp.processEvents()
+
+    refresh_as("ready", True)
+    assert badge_color() == QColor("#4caf50")
+    refresh_as("missing", True)
+    assert badge_color() == QColor("#e8a90c")
+    refresh_as("missing", False)
+    assert badge_color() == QColor("#888888")
+    # Weights ready wins over Ollama down: training can start.
+    refresh_as("ready", False)
+    assert badge_color() == QColor("#4caf50")
+
+
+def test_download_fix_button_opens_profile_window(window, qapp):
+    """T79: in the no-repo state the fix button opens the profile
+    window, where Base ref gets set."""
+    _select_session(window)
+    window._checklist_dismiss()
+    assert window.download_fix_btn.isVisible()
+    window.download_fix_btn.click()
+    qapp.processEvents()
+    win = window._profile_windows.get("lfm3-tool")
+    assert win is not None
+    assert win.isVisible()
+    win.close()
+
+
+def test_download_enabled_with_repo(window, seeded, qapp):
+    """T79: with a repo set, Download is live and the fix button
+    is gone."""
+    seeded.update_profile("lfm3-tool", base_ref="LiquidAI/LFM3-1.7B")
+    _select_session(window)
+    window._checklist_dismiss()
+    assert window.download_btn.isEnabled()
+    assert window.download_fix_btn.isVisible() is False
+
+
+def test_profile_window_base_edit_blank_for_tag(window, seeded, qapp):
+    """T79: a tag-valued base_ref is not shown as if it were a
+    repo; a real repo is shown."""
+    win = window.open_profile_window("lfm3-tool")
+    # The seeded profile's base_ref is the Ollama tag, not a repo.
+    assert seeded.get_profile("lfm3-tool")["base_ref"] == "lfm3:1.7b"
+    assert win.base_edit.text() == ""
+    win.close()
+    # The window is cached per profile: destroy it so the second
+    # open loads fresh from the store.
+    from PySide6.QtTest import QTest
+
+    win.deleteLater()
+    deadline = 0
+    while "lfm3-tool" in window._profile_windows:
+        QTest.qWait(100)
+        deadline += 100
+        assert deadline < 5000
+    seeded.update_profile("lfm3-tool", base_ref="LiquidAI/LFM3-1.7B")
+    win = window.open_profile_window("lfm3-tool")
+    assert win.base_edit.text() == "LiquidAI/LFM3-1.7B"
+    win.close()
+
+
+def test_project_window_save_visible_without_scrolling(window, qapp):
+    """T80: the action row is pinned below the scroll area, so
+    Save stays visible even in a short window."""
+    proj_win = window.open_project_window("lfm3-tool", "tool-calls")
+    proj_win.resize(500, 300)
+    proj_win.show()
+    qapp.processEvents()
+    assert proj_win.save_btn.isVisible()
+    assert proj_win.save_btn.geometry().bottom() <= proj_win.height()
+    proj_win.close()
+
+
+def test_settings_sections_are_collapsible(window, qapp):
+    """T80: every Settings section is a collapsible group, open by
+    default; collapsing hides its content."""
+    from stella.gui import CollapsibleSection
+
+    settings_win = window.open_settings_window()
+    assert set(settings_win.sections) == {
+        "Where Stella keeps things",
+        "Ollama",
+        "Chat model",
+        "AI providers",
+    }
+    for section in settings_win.sections.values():
+        assert isinstance(section, CollapsibleSection)
+        assert section.is_expanded()
+    section = settings_win.sections["Where Stella keeps things"]
+    section.header_btn.click()
+    qapp.processEvents()
+    assert section.is_expanded() is False
+    assert section.content.isVisible() is False
+    section.header_btn.click()
+    qapp.processEvents()
+    assert section.is_expanded()
+    settings_win.close()
+
+
+def test_main_window_train_sections_collapse(window, qapp):
+    """T80: the main panel's train-detail sections collapse."""
+    window._checklist_dismiss()
+    qapp.processEvents()
+    for section in (
+        window.dataset_section,
+        window.checkpoints_section,
+        window.log_section,
+        window.sleep_section,
+    ):
+        assert section.is_expanded()
+    window.log_section.header_btn.click()
+    qapp.processEvents()
+    assert window.log_section.is_expanded() is False
+    assert window.log_section.content.isVisible() is False
+    assert window.train_log.isVisible() is False
+
+
+def test_stylesheet_is_stellas_own_look(qapp):
+    """T81: one stylesheet, drawn from the icon: dark surfaces,
+    the gold accent, and a visible focus ring."""
+    from stella.style import STELLA_STYLESHEET, apply_stella_style
+
+    assert "#e8a90c" in STELLA_STYLESHEET  # the icon's gold
+    assert "#1c1c1c" in STELLA_STYLESHEET  # dark surface
+    assert ":focus" in STELLA_STYLESHEET  # the focus ring (T82)
+    old = qapp.styleSheet()
+    try:
+        apply_stella_style(qapp)
+        assert qapp.styleSheet() == STELLA_STYLESHEET
+    finally:
+        qapp.setStyleSheet(old)
+
+
+def test_bento_page_background_is_dark(window, qapp):
+    """T81: no light bands — a bare page (the session header sits
+    on the plain bento page, not a card) carries the dark surface,
+    so the light session text stays readable. The first cut of
+    the sheet left plain widgets on Fusion's light background."""
+    from stella.style import apply_stella_style
+
+    old = qapp.styleSheet()
+    try:
+        apply_stella_style(qapp)
+        window._checklist_dismiss()
+        qapp.processEvents()
+        pixmap = window.bento_widget.grab()
+        image = pixmap.toImage()
+        # Top-right corner of the page: bare, no text reaches it.
+        c = image.pixelColor(image.width() - 10, 10)
+        assert c.red() < 80 and c.green() < 80 and c.blue() < 80, (
+            c.red(), c.green(), c.blue()
+        )
+    finally:
+        qapp.setStyleSheet(old)
+
+
+def test_press_dip_shrinks_then_restores(qapp):
+    """T81: a button press dips to 97% over 150 ms, then comes
+    back to its original geometry. resize(), not setFixedSize:
+    a fixed size clamps setGeometry and the dip never shows."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QPushButton
+
+    from stella.style import install_press_dips
+
+    button = QPushButton("Dip me")
+    button.resize(120, 40)
+    button.show()
+    qapp.processEvents()
+    original = button.geometry()
+    dips = install_press_dips(qapp)
+    try:
+        QTest.mousePress(button, Qt.LeftButton)
+        # An animation is running for this button.
+        assert button in dips._animations
+        # Sample through the dip: the width must go below the
+        # original at some point (the 97% bottom is brief, so a
+        # single sample can miss it).
+        min_width = original.width()
+        deadline = 0
+        while button in dips._animations:
+            QTest.qWait(20)
+            min_width = min(min_width, button.geometry().width())
+            deadline += 20
+            assert deadline < 5000
+        assert min_width < original.width(), min_width
+        assert button.geometry() == original
+    finally:
+        qapp.removeEventFilter(dips._filter)
+        button.close()
+
+
+def test_menu_shortcuts(window):
+    """T82: the main actions have keyboard shortcuts."""
+    assert window._menu_action_new_profile.shortcut().toString() == "Ctrl+N"
+    assert window._menu_action_new_project.shortcut().toString() == "Ctrl+Shift+N"
+    assert window._menu_action_run.shortcut().toString() == "Ctrl+G"
+    assert window._menu_action_howto.shortcut().toString() == "F1"
+    assert window._menu_action_chat.shortcut().toString() == "F2"
+
+
+def test_f1_opens_howto(window, qapp):
+    """T82: F1 opens How to Use."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    QTest.keyClick(window, Qt.Key_F1)
+    qapp.processEvents()
+    assert window._howto_window is not None
+    assert window._howto_window.isVisible()
+    window._howto_window.close()
+
+
+def test_ctrl_n_opens_new_profile_dialog(window, qapp):
+    """T82: Ctrl+N opens the new profile dialog."""
+    from PySide6.QtCore import Qt, QTimer
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication, QDialog
+
+    def close_dialog():
+        dlg = QApplication.activeModalWidget()
+        assert dlg is not None
+        dlg.reject()
+
+    QTimer.singleShot(100, close_dialog)
+    QTest.keyClick(window, Qt.Key_N, Qt.ControlModifier)
+    qapp.processEvents()
+    assert window._profile_dialog is not None
+    assert window._profile_dialog.result() == QDialog.Rejected
+
+
+def test_ctrl_s_saves_project_window(window, seeded, qapp):
+    """T82: Ctrl+S saves the project window."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    proj_win = window.open_project_window("lfm3-tool", "tool-calls")
+    proj_win.show()
+    qapp.processEvents()
+    proj_win.display_edit.setText("Saved by shortcut")
+    QTest.keyClick(proj_win, Qt.Key_S, Qt.ControlModifier)
+    qapp.processEvents()
+    assert seeded.get_project("lfm3-tool", "tool-calls")["display_name"] == (
+        "Saved by shortcut"
+    )
+    proj_win.close()
+
+
+def test_tab_order_follows_visual_order(window, seeded, qapp):
+    """T82: Tab walks the hero in visual order — model, new
+    model, download."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+
+    seeded.update_profile("lfm3-tool", base_ref="LiquidAI/LFM3-1.7B")
+    _select_session(window)
+    window._checklist_dismiss()
+    qapp.processEvents()
+    window.model_combo.setFocus()
+    assert QApplication.focusWidget() is window.model_combo
+    QTest.keyClick(window.model_combo, Qt.Key_Tab)
+    qapp.processEvents()
+    assert QApplication.focusWidget() is window.new_model_btn
+    QTest.keyClick(window.new_model_btn, Qt.Key_Tab)
+    qapp.processEvents()
+    assert QApplication.focusWidget() is window.download_btn
