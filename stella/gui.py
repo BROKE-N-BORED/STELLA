@@ -72,6 +72,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QFormLayout,
     QFrame,
@@ -551,7 +552,11 @@ class TrainWorker(QThread):
 
     def _event(self, event: dict):
         kind = event.get("type")
-        if kind == "started":
+        if kind == "loading":
+            # T108: the base load (a first run downloads it) is
+            # said before it starts, so the wait is not a mystery.
+            self.log.emit(event.get("message", "Loading the base model."))
+        elif kind == "started":
             self.progress.emit(0, event["total_steps"], 0.0, 0)
             self.log.emit(
                 f"Training: {event['total_steps']} steps."
@@ -646,7 +651,11 @@ class SleepWorker(QThread):
 
     def _event(self, event: dict):
         kind = event.get("type")
-        if kind == "started":
+        if kind == "loading":
+            # T108: the base load is said before it starts, so the
+            # wait is not a mystery (sleep forwards train events).
+            self.log.emit(event.get("message", "Loading the base model."))
+        elif kind == "started":
             self.log.emit(
                 f"Sleep cycle {event['cycle']}: {event['new_rows']} new rows"
                 + (
@@ -1599,6 +1608,10 @@ class ProjectWindow(QDialog):
         rename_btn.clicked.connect(
             lambda: self._main.rename_project(self._profile, self._project)
         )
+        clone_btn = QPushButton("Clone")
+        clone_btn.clicked.connect(
+            lambda: self._main.clone_project(self._profile, self._project)
+        )
         delete_btn = QPushButton("Delete")
         delete_btn.clicked.connect(
             lambda: self._main.delete_project(self._profile, self._project)
@@ -1606,6 +1619,7 @@ class ProjectWindow(QDialog):
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.close)
         action_row.addWidget(rename_btn)
+        action_row.addWidget(clone_btn)
         action_row.addWidget(delete_btn)
         action_row.addStretch(1)
         action_row.addWidget(close_btn)
@@ -1636,8 +1650,8 @@ class ProjectWindow(QDialog):
             self.display_edit, self.dataset_edit, self.dataset_browse_btn,
             self.mark_ready_btn,
             self.notes_edit,
-            self.save_notes_btn, self.save_btn, rename_btn, delete_btn,
-            close_btn,
+            self.save_notes_btn, self.save_btn, rename_btn, clone_btn,
+            delete_btn, close_btn,
         ])
 
     @property
@@ -3110,6 +3124,110 @@ class ProbeResultsDialog(QDialog):
         return "Refused" if detail.get("refused") else "Answered"
 
 
+class NewProjectDialog(QDialog):
+    """New project (T112): a name, and a template picker. The
+    picker shows template names and plain-words descriptions only
+    — never training settings (T16). The first entry is "No
+    template: start blank", and nothing is selected by default
+    beyond that blank start."""
+
+    def __init__(self, parent, templates):
+        super().__init__(parent)
+        self.setWindowTitle("New project")
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Project name (lowercase, dashes ok):"))
+        self.name_edit = QLineEdit()
+        layout.addWidget(self.name_edit)
+        layout.addWidget(QLabel("Start from a template (optional):"))
+        self.template_combo = QComboBox()
+        self.template_combo.addItem("No template: start blank", None)
+        self._descriptions = {None: ""}
+        for template in templates:
+            self.template_combo.addItem(
+                template.get("title", template["name"]),
+                template["name"],
+            )
+            self._descriptions[template["name"]] = (
+                template.get("description", "")
+            )
+        self.template_combo.currentIndexChanged.connect(
+            self._on_template_changed
+        )
+        layout.addWidget(self.template_combo)
+        self.description_label = QLabel("")
+        self.description_label.setWordWrap(True)
+        layout.addWidget(self.description_label)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _on_template_changed(self, _index):
+        self.description_label.setText(
+            self._descriptions.get(
+                self.template_combo.currentData(), ""
+            )
+        )
+
+    def project_name(self) -> str:
+        return self.name_edit.text().strip()
+
+    def template_name(self):
+        return self.template_combo.currentData()
+
+
+def _import_message(result: dict) -> str:
+    """The import confirmation (T57/T86/T117): what landed, whether
+    the profile already existed, whether the profile now uses the
+    package's values, and what a collision did. One line, said
+    last (T50)."""
+    if "projects" in result:
+        # A profile package (T86).
+        names = result["projects"]
+        if names:
+            message = (
+                f"Imported profile {result['profile']} with "
+                f"{len(names)} project"
+                f"{'s' if len(names) != 1 else ''}: "
+                f"{', '.join(names)}."
+            )
+        else:
+            message = (
+                f"Imported profile {result['profile']} "
+                "(no projects)."
+            )
+    else:
+        message = (
+            f"Imported {result['project']} into {result['profile']}."
+        )
+        if result.get("collision") == "copy":
+            message = (
+                f"Imported {result['project']} into "
+                f"{result['profile']} (a copy of "
+                f"{result.get('copy_of', '')!r})."
+            )
+        elif result.get("collision") == "replace":
+            message += " The old project went to the trash."
+    if result.get("profile_existed"):
+        message += " The profile already existed."
+    if result.get("profile_choice") == "take":
+        fields = export_mod.describe_profile_diff(
+            result.get("profile_diff") or {}
+        )
+        message += f" The profile now uses the package's {fields}."
+    missing = result.get("datasets_missing") or []
+    if missing:
+        message += (
+            f" {len(missing)} project"
+            f"{'s' if len(missing) != 1 else ''} "
+            "have datasets not on this PC."
+        )
+    return message
+
+
 class MainWindow(QMainWindow):
     def __init__(self, store: Store | None = None, settings=None):
         super().__init__()
@@ -3322,8 +3440,17 @@ class MainWindow(QMainWindow):
         self._menu_action_export = file_menu.addAction(
             "Export project...", self.export_project
         )
+        # T86: a whole profile (optionally with its projects) exports
+        # as one package, and T105 checks a package without
+        # importing it.
+        self._menu_action_export_profile = file_menu.addAction(
+            "Export profile...", self.export_profile
+        )
         self._menu_action_import = file_menu.addAction(
             "Import package...", self.import_package
+        )
+        self._menu_action_check = file_menu.addAction(
+            "Check package...", self.check_package
         )
         self._menu_action_run = file_menu.addAction(
             "Run the picked job", self._on_go
@@ -3358,12 +3485,14 @@ class MainWindow(QMainWindow):
     def _refresh_menu_state(self):
         """Grey out the actions that cannot work yet (T19): New
         project and Profiles need a profile; Export and Projects
-        need a project. The rest always work."""
+        need a project. Export profile needs a profile; Check
+        package always works. The rest always work."""
         has_profile = bool(self._current_profile)
         has_session = bool(self._current_profile and self._current_project)
         self._menu_action_new_project.setEnabled(has_profile)
         self._menu_action_profiles.setEnabled(has_profile)
         self._menu_action_export.setEnabled(has_session)
+        self._menu_action_export_profile.setEnabled(has_profile)
         self._menu_action_projects.setEnabled(has_session)
 
     def _build_session(self):
@@ -3660,6 +3789,11 @@ class MainWindow(QMainWindow):
         export_btns = QHBoxLayout()
         self.train_export_gguf_btn = QPushButton("Export GGUF")
         self.train_export_gguf_btn.clicked.connect(self.export_gguf_gui)
+        # T89: create the last GGUF export in Ollama, one click.
+        self.train_create_ollama_btn = QPushButton("Create in Ollama")
+        self.train_create_ollama_btn.clicked.connect(
+            self.create_in_ollama_gui
+        )
         self.train_probe_btn = QPushButton("Run refusal probe")
         self.train_probe_btn.clicked.connect(self.run_probe_gui)
         # The probe evidence (T94), re-openable after the run: the
@@ -3667,6 +3801,7 @@ class MainWindow(QMainWindow):
         self.train_view_probe_btn = QPushButton("View probe results")
         self.train_view_probe_btn.clicked.connect(self._view_probe_results)
         export_btns.addWidget(self.train_export_gguf_btn)
+        export_btns.addWidget(self.train_create_ollama_btn)
         export_btns.addWidget(self.train_probe_btn)
         export_btns.addWidget(self.train_view_probe_btn)
         export_btns.addStretch(1)
@@ -4326,6 +4461,20 @@ class MainWindow(QMainWindow):
             self.train_view_probe_btn,
         ):
             w.setEnabled(has_session and not running)
+        # T89: Create in Ollama is live only when the project has a
+        # GGUF export to create (its record is in the project dir).
+        has_export = False
+        if has_session and not running:
+            try:
+                has_export = (
+                    self._last_gguf_export(
+                        self._current_profile, self._current_project
+                    )
+                    is not None
+                )
+            except StellaError:
+                has_export = False
+        self.train_create_ollama_btn.setEnabled(has_export)
         self._menu_action_run.setEnabled(self.go_btn.isEnabled())
 
     def _running_job_name(self) -> str | None:
@@ -5209,17 +5358,32 @@ class MainWindow(QMainWindow):
         if not profile:
             self._warn("Pick a profile first, then add a project to it.")
             return
-        text, ok = QInputDialog.getText(
-            self, "New project", "Project name (lowercase, dashes ok):"
+        from .templates import (
+            list_templates, load_template, template_project_kwargs,
         )
-        if not ok or not text.strip():
+
+        dialog = NewProjectDialog(self, list_templates())
+        if dialog.exec() != QDialog.Accepted:
             return
+        name = dialog.project_name()
+        if not name:
+            return
+        kwargs: dict = {}
+        template = dialog.template_name()
+        if template:
+            try:
+                kwargs.update(
+                    template_project_kwargs(load_template(template))
+                )
+            except StellaError as exc:
+                self._warn(str(exc))
+                return
         try:
-            self.store.create_project(profile, text.strip())
+            self.store.create_project(profile, name, **kwargs)
         except StellaError as exc:
             self._warn(str(exc))
             return
-        self._current_project = text.strip().lower()
+        self._current_project = name.lower()
         self.debug_log.action(
             f"project created: {profile}/{self._current_project}"
         )
@@ -5259,6 +5423,36 @@ class MainWindow(QMainWindow):
             self.set_session(profile, new)
         else:
             self.refresh_tree()
+
+    def clone_project(self, profile=None, project=None):
+        """Clone a project (T112): the same dataset, settings, and
+        metamorph mode under a new name, no checkpoints, fresh
+        notes with a "cloned from" line. The session moves to the
+        clone."""
+        profile = profile or self._selected_profile()
+        project = project or self._selected_project()
+        if not profile or not project:
+            return
+        text, ok = QInputDialog.getText(
+            self, "Clone project",
+            f"Name for the copy of {project!r} "
+            "(lowercase, dashes ok):",
+        )
+        if not ok or not text.strip():
+            return
+        try:
+            data = self.store.clone_project(
+                profile, project, text.strip()
+            )
+        except StellaError as exc:
+            self._warn(str(exc))
+            return
+        self.debug_log.action(
+            f"project cloned: {profile}/{project} to "
+            f"{profile}/{data['name']}"
+        )
+        self.set_session(profile, data["name"])
+        self._say(f"Cloned {project} as {data['name']}.")
 
     def delete_project(self, profile=None, project=None):
         profile = profile or self._selected_profile()
@@ -5363,20 +5557,206 @@ class MainWindow(QMainWindow):
         self._say(f"Exported {len(projects)} projects to {dest}.")
         return True
 
+    # -- T117: the overwrite question (menu exports only) --------
+    def _overwrite_box(self, target):
+        """The overwrite dialog: the package folder already exists.
+        Factored out so tests can read the box without showing it,
+        like _profile_merge_box."""
+        box = QMessageBox(self)
+        box.setWindowTitle("Export already exists")
+        box.setText(f"{target.name} already exists in that folder.")
+        box.setInformativeText(
+            "Overwrite it, or cancel and pick another folder?"
+        )
+        over = box.addButton(
+            "Overwrite", QMessageBox.ButtonRole.AcceptRole
+        )
+        cancel = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(cancel)
+        box.setEscapeButton(cancel)
+        box._stella_overwrite_button = over
+        box._stella_cancel_button = cancel
+        return box
+
+    def _ask_overwrite(self, target) -> bool:
+        """Ask whether to overwrite an existing export folder.
+        A dialog that closes without a click (or a stubbed exec in
+        a test) means do not overwrite — the safe answer."""
+        box = self._overwrite_box(target)
+        box.exec()
+        return box.clickedButton() is box._stella_overwrite_button
+
+    def _export_job(self, export_fn, title, log_line):
+        """Run an export on the job card (T106): the copy runs off
+        the GUI thread with a determinate progress bar and a Cancel
+        button, and a cancel leaves no partial package (the engine
+        removes the staging dir, T1's atomicity). `export_fn` takes
+        (on_progress, should_stop) and returns the output path.
+        The lists refresh when the job finishes either way."""
+
+        def job(ctx):
+            out = export_fn(
+                on_progress=lambda done, total: ctx.progress(
+                    done, total
+                ),
+                should_stop=ctx.is_cancelled,
+            )
+            return f"Exported to {out}."
+
+        def on_finished(ok, message):
+            self.refresh_tree()
+            self.refresh_session()
+            if not ok:
+                self._warn(message)
+            # On success _on_job_finished already said the message;
+            # refresh_session says the session line after it, so say
+            # the confirmation again, last (T50).
+            else:
+                self._say(message.splitlines()[0] if message else "Done.")
+
+        if self._start_job_worker(job, title, True, on_finished=on_finished):
+            self._train_log_line(log_line)
+
     def export_project(self):
         profile = self._selected_profile()
         project = self._selected_project()
         if not profile or not project:
             self._warn("Pick a project to export.")
             return
-        bundle = self._ask_bundle_dataset(profile, project)
-        out = self._export_project_to_folder(
-            profile, project, bundle_dataset=bundle
-        )
-        if out is None:
+        if self._job_already_running():
             return
-        self._say(f"Exported to {out}.")
-        QMessageBox.information(self, "Stella", f"Exported project to:\n{out}")
+        bundle = self._ask_bundle_dataset(profile, project)
+        dest = QFileDialog.getExistingDirectory(
+            self, "Export project to folder", str(Path.home())
+        )
+        if not dest:
+            return
+        target = Path(dest) / (project + export_mod.EXPORT_SUFFIX)
+        force = False
+        if target.exists():
+            # T117: the folder already holds a package with this
+            # name — overwrite, or stop here.
+            if not self._ask_overwrite(target):
+                self._say("Export cancelled.")
+                return
+            force = True
+        self._export_job(
+            lambda on_progress, should_stop: export_mod.export_project(
+                self.store, profile, project, dest,
+                bundle_dataset=bundle, force=force,
+                on_progress=on_progress, should_stop=should_stop,
+            ),
+            "Exporting project",
+            f"Exporting project {profile}/{project}...",
+        )
+        self.debug_log.action(
+            f"project export started: {profile}/{project} to {dest}"
+        )
+
+    # -- T86: export a whole profile -------------------------------
+    def _ask_include_projects(self, slug) -> bool | None:
+        """The profile-export question (T86): include the profile's
+        projects, or the profile alone? Returns True to include,
+        False for the profile alone, None when the user cancels.
+        No projects means no question — the profile alone is the
+        only choice."""
+        projects = [
+            p for p in self.store.list_projects(slug)
+            if not p.get("_damaged")
+        ]
+        if not projects:
+            return False
+        box = QMessageBox(self)
+        box.setWindowTitle("Include the projects?")
+        box.setText(
+            f"Profile {slug!r} has {len(projects)} project"
+            f"{'s' if len(projects) != 1 else ''}."
+        )
+        box.setInformativeText(
+            "Include them and the package carries each project with "
+            "its weights, checkpoints, and notes. Profile alone "
+            "carries just the profile."
+        )
+        include = box.addButton(
+            "Include projects", QMessageBox.ButtonRole.AcceptRole
+        )
+        alone = box.addButton(
+            "Profile alone", QMessageBox.ButtonRole.AcceptRole
+        )
+        cancel = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(include)
+        box.setEscapeButton(cancel)
+        box._stella_include_button = include
+        box._stella_alone_button = alone
+        box._stella_cancel_button = cancel
+        box.exec()
+        if box.clickedButton() is include:
+            return True
+        if box.clickedButton() is alone:
+            return False
+        return None
+
+    def export_profile(self):
+        profile = self._selected_profile()
+        if not profile:
+            self._warn("Pick a profile to export.")
+            return
+        if self._job_already_running():
+            return
+        include = self._ask_include_projects(profile)
+        if include is None:
+            self._say("Export cancelled.")
+            return
+        dest = QFileDialog.getExistingDirectory(
+            self, "Export profile to folder", str(Path.home())
+        )
+        if not dest:
+            return
+        target = (
+            Path(dest) / (profile + export_mod.PROFILE_EXPORT_SUFFIX)
+        )
+        force = False
+        if target.exists():
+            if not self._ask_overwrite(target):
+                self._say("Export cancelled.")
+                return
+            force = True
+        self._export_job(
+            lambda on_progress, should_stop: export_mod.export_profile(
+                self.store, profile, dest,
+                include_projects=include, force=force,
+                on_progress=on_progress, should_stop=should_stop,
+            ),
+            "Exporting profile",
+            f"Exporting profile {profile}...",
+        )
+        self.debug_log.action(
+            f"profile export started: {profile} to {dest}"
+        )
+
+    # -- T105: check a package without importing it -----------------
+    def check_package(self):
+        path = QFileDialog.getExistingDirectory(
+            self, "Pick an export package folder", str(Path.home())
+        )
+        if not path:
+            return
+        report = export_mod.check_export(path)
+        box = QMessageBox(self)
+        box.setWindowTitle("Check package")
+        box.setText(
+            "All checks passed. Nothing was imported."
+            if report["ok"]
+            else "A check failed. Nothing was imported."
+        )
+        box.setInformativeText(
+            export_mod.format_check_report(report)
+        )
+        box.setIcon(
+            QMessageBox.Icon.Information if report["ok"]
+            else QMessageBox.Icon.Warning
+        )
+        box.exec()
 
     def _ask_bundle_dataset(self, profile, project) -> bool:
         """The dataset offer (T59): when the project has a dataset
@@ -5486,11 +5866,54 @@ class MainWindow(QMainWindow):
             return False, None
         return True, dialog.profile_choice()
 
+    # -- T117: the import collision question -----------------------
+    def _import_collision_box(self, slug):
+        """The collision dialog: the project already exists here.
+        Factored out so tests can read the box without showing it,
+        like _profile_merge_box."""
+        box = QMessageBox(self)
+        box.setWindowTitle("Project already exists")
+        box.setText(f"The project {slug!r} is already here.")
+        box.setInformativeText(
+            "Import it as a copy under a new name, replace the one "
+            "here (the old one goes to the trash), or cancel?"
+        )
+        copy_btn = box.addButton(
+            "Import as a copy", QMessageBox.ButtonRole.AcceptRole
+        )
+        replace_btn = box.addButton(
+            "Replace it", QMessageBox.ButtonRole.AcceptRole
+        )
+        cancel_btn = box.addButton(
+            "Cancel", QMessageBox.ButtonRole.RejectRole
+        )
+        box.setDefaultButton(copy_btn)
+        box.setEscapeButton(cancel_btn)
+        box._stella_copy_button = copy_btn
+        box._stella_replace_button = replace_btn
+        box._stella_cancel_button = cancel_btn
+        return box
+
+    def _ask_import_collision(self, slug):
+        """Ask what to do with a project that already exists:
+        "copy", "replace", or None when the user cancels. A dialog
+        that closes without a click means cancel — the safe
+        answer."""
+        box = self._import_collision_box(slug)
+        box.exec()
+        if box.clickedButton() is box._stella_copy_button:
+            return "copy"
+        if box.clickedButton() is box._stella_replace_button:
+            return "replace"
+        return None
+
     def import_package(self):
         path = QFileDialog.getExistingDirectory(
             self, "Pick an export package folder", str(Path.home())
         )
         if not path:
+            return
+        if self._job_already_running():
             return
         # The preview (T58): what the package is, before anything
         # is imported. A bad package warns and refreshes, exactly
@@ -5508,62 +5931,96 @@ class MainWindow(QMainWindow):
         confirmed, choice = self._confirm_import_preview(path, summary)
         if not confirmed:
             return
-        try:
+        # Every choice is resolved HERE, on the GUI thread, before
+        # the worker starts (T106): a modal cannot run in a worker
+        # thread. The profile merge (T57) still asks when the
+        # preview had no choice to make; the collision (T117) asks
+        # when the project already exists.
+        if choice is None and summary.get("profile_diff"):
+            choice = self._ask_profile_merge(
+                summary["profile"], summary["profile_diff"]
+            )
+        collision = None
+        if summary.get("kind") != export_mod.PROFILE_PACKAGE_KIND:
+            if summary.get("project_existed"):
+                collision = self._ask_import_collision(
+                    summary["project"]
+                )
+                if collision is None:
+                    self._say("Import cancelled.")
+                    return
+        box: dict = {}
+
+        def job(ctx):
             result = export_mod.import_export(
                 self.store, path,
                 profile_choice=choice,
-                on_profile_conflict=self._ask_profile_merge,
+                collision=collision,
                 # The base-health check (T61) reads the cached
                 # model list: an uninstalled tag warns, never blocks.
                 installed_models=MODEL_CACHE.models(),
+                on_progress=lambda done, total: ctx.progress(
+                    done, total
+                ),
+                should_stop=ctx.is_cancelled,
             )
-        except StellaError as exc:
-            self._warn(str(exc))
+            box["result"] = result
+            return _import_message(result)
+
+        def on_finished(ok, message):
+            # The lists refresh on failure too (T106): the window
+            # matches the disk even when the import fails.
             self.refresh_tree()
             self.refresh_session()
-            return
-        except Exception as exc:
-            # Last-resort catch (T1): an unexpected failure still
-            # surfaces as a readable error, never a raw crash — and
-            # the lists refresh so the window matches the disk even
-            # when the import fails.
-            message = str(exc).strip() or f"unexpected {type(exc).__name__}"
-            self._warn(f"Import failed: {message}")
-            self.refresh_tree()
-            self.refresh_session()
-            return
-        self.debug_log.action(
-            f"project imported: {result['profile']}/{result['project']}"
+            if not ok:
+                self._warn(message)
+                return
+            result = box.get("result")
+            if result is None:
+                return
+            if "projects" in result:
+                # A profile package (T86): the session lands on its
+                # first project, or the profile alone.
+                names = result["projects"]
+                self.debug_log.action(
+                    f"profile imported: {result['profile']} "
+                    f"({len(names)} projects)"
+                )
+                self.set_session(
+                    result["profile"],
+                    names[0] if names else None,
+                )
+            else:
+                self.debug_log.action(
+                    f"project imported: "
+                    f"{result['profile']}/{result['project']}"
+                )
+                self.set_session(result["profile"], result["project"])
+            # An import warning (T41: a "done" package with no
+            # weights imports as a draft) is shown, not buried: the
+            # project the user just imported is not what the package
+            # claimed it was.
+            for warning in result.get("warnings", []):
+                self._warn(warning)
+            # A missing dataset (T59): offer to find the file now,
+            # so the imported project trains without a trip to its
+            # window. A profile import names its missing datasets
+            # in the message instead — one dialog per project
+            # would stack up.
+            if result.get("dataset_missing") and "project" in result:
+                self._offer_locate_dataset(
+                    result["profile"], result["project"],
+                    result.get("dataset_ref", ""),
+                )
+            # The confirmation goes last (T50): set_session's
+            # refresh says the session line, so say the import
+            # message again, after it.
+            self._say(message.splitlines()[0] if message else "Done.")
+
+        self._start_job_worker(
+            job, "Importing package", True, on_finished=on_finished
         )
-        self.set_session(result["profile"], result["project"])
-        # T57: the window says when the profile already existed,
-        # and when the profile now uses the package's values.
-        message = (
-            f"Imported {result['project']} into {result['profile']}."
-        )
-        if result.get("profile_existed"):
-            message += " The profile already existed."
-        if result.get("profile_choice") == "take":
-            fields = export_mod.describe_profile_diff(
-                result.get("profile_diff") or {}
-            )
-            message += (
-                f" The profile now uses the package's {fields}."
-            )
-        self._say(message)
-        # An import warning (T41: a "done" package with no
-        # weights imports as a draft) is shown, not buried: the
-        # project the user just imported is not what the package
-        # claimed it was.
-        for warning in result.get("warnings", []):
-            self._warn(warning)
-        # A missing dataset (T59): offer to find the file now, so
-        # the imported project trains without a trip to its window.
-        if result.get("dataset_missing"):
-            self._offer_locate_dataset(
-                result["profile"], result["project"],
-                result.get("dataset_ref", ""),
-            )
+        self._train_log_line(f"Importing package from {path}...")
 
     def _dataset_locate_box(self, ref):
         """The missing-dataset repair dialog (T59): one question,
@@ -6296,8 +6753,14 @@ class MainWindow(QMainWindow):
         from .gguf import export_gguf
 
         def job(ctx):
+            # T107: the three phases move a determinate bar
+            # (merge 1 of 3, convert 2 of 3, quantize 3 of 3), so
+            # the export is not a mystery wait.
+            phases = {"merge": 1, "convert": 2, "quantize": 3}
+
             def on_event(event):
                 if event.get("type") == "phase":
+                    ctx.progress(phases.get(event["phase"], 0), 3)
                     ctx.log(event["message"])
 
             result = export_gguf(
@@ -6312,8 +6775,61 @@ class MainWindow(QMainWindow):
                 f"Run: {result['ollama_create']}"
             )
 
-        self._start_job_worker(job, "Exporting GGUF", False)
+        self._start_job_worker(job, "Exporting GGUF", True)
         self._train_log_line("Exporting GGUF (merge, convert, quantize)...")
+
+    # -- T89: create the exported model in Ollama -------------------
+    def _last_gguf_export(self, profile, project):
+        """The last GGUF export record for a project (the export
+        writes gguf-export.json into the project dir), or None."""
+        import json as json_mod
+
+        record = (
+            self.store.project_dir(profile, project) / "gguf-export.json"
+        )
+        if not record.is_file():
+            return None
+        try:
+            data = json_mod.loads(record.read_text())
+        except (OSError, ValueError):
+            return None
+        if not isinstance(data, dict) or "modelfile" not in data:
+            return None
+        return data
+
+    def create_in_ollama_gui(self):
+        """Run `ollama create` for the last GGUF export (T89): the
+        model the user just exported becomes usable in Ollama
+        without a copy-paste. Runs on the job card, so a slow
+        create can be cancelled."""
+        profile = self._selected_profile()
+        project = self._selected_project()
+        if not profile or not project:
+            self._warn("Pick a project first.")
+            return
+        if self._job_already_running():
+            return
+        record = self._last_gguf_export(profile, project)
+        if record is None:
+            self._warn(
+                "No GGUF export yet for this project. Export GGUF "
+                "first, then create it in Ollama."
+            )
+            return
+        name = record.get("ollama_name") or f"{profile}-{project}"
+        modelfile = record["modelfile"]
+        from .gguf import create_in_ollama
+
+        def job(ctx):
+            output = create_in_ollama(
+                name, modelfile, should_stop=ctx.is_cancelled,
+            )
+            if output:
+                ctx.log(output)
+            return f"Created in Ollama as {name}."
+
+        self._start_job_worker(job, "Creating in Ollama", False)
+        self._train_log_line(f"Creating {name} in Ollama...")
 
     def run_probe_gui(self):
         profile = self._selected_profile()

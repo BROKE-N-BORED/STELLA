@@ -1852,6 +1852,20 @@ def train_project(
         # Load the base, then check the guard a second time with the
         # real param counts (belt and braces: the pre-load estimate
         # already refused anything that cannot fit).
+        # T108: the base load is a blocking call — a first run
+        # downloads gigabytes before the loop the stop flag can
+        # reach. Say so before it starts, so a Ctrl+C during the
+        # download is not a mystery: the first press waits for the
+        # download, the second exits at once (the CLI handler).
+        if on_event is not None:
+            on_event({
+                "type": "loading",
+                "message": (
+                    "Loading the base model. The first run "
+                    "downloads it, and Ctrl+C takes effect when "
+                    "the download finishes."
+                ),
+            })
         if _model_loader is not None:
             model, tokenizer = _model_loader()
         else:

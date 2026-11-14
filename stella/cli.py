@@ -4,14 +4,38 @@
     stella projects <profile>             list projects in a profile
     stella export <profile> <project> <dir>
                                           export a project package
+    stella export-profile <profile> <dir>
+                                          export a profile package
     stella import <export-dir>            import a package back
+    stella verify <export-dir>            check a package without
+                                          importing it
     stella create-profile <name> [--tag <ollama-tag>] [--role <role>]
                                           [--display <name>]
                                           [--base <hf-repo>]
                                           create a profile
     stella create-project <profile> <name> [--display <name>]
                                           [--dataset <file>]
+                                          [--template <name>]
                                           create a project in a profile
+    stella rename-profile <old> <new>     rename a profile
+    stella delete-profile <name> [--purge]
+                                          delete a profile (to the trash,
+                                          or forever with --purge)
+    stella update-profile <name> [--role ...] [--tag ...]
+                                          [--display ...] [--base ...]
+                                          change a profile
+    stella show-profile <name>            show a profile's record
+    stella rename-project <profile> <old> <new>
+                                          rename a project
+    stella delete-project <profile> <name> [--purge]
+                                          delete a project (to the trash,
+                                          or forever with --purge)
+    stella update-project <profile> <name> [--display ...]
+                                          [--dataset ...] [--metamorph ...]
+                                          [--rank ...] ...
+                                          change a project
+    stella show-project <profile> <name>  show a project's record and
+                                          its checkpoints
     stella train <profile> <project>      LoRA-tune a project (Item 3)
     stella export-gguf <profile> <project> <dir>
                                           merge + convert + quantize to GGUF
@@ -96,6 +120,9 @@ def cmd_profiles(args) -> int:
 
 def cmd_projects(args) -> int:
     store = _store()
+    # T88: a typo'd profile name reads as "that profile doesn't
+    # exist", not as "you haven't made any projects yet".
+    store.get_profile(args.profile)
     projects = store.list_projects(args.profile)
     if not projects:
         print(f"No projects in profile {args.profile!r}.")
@@ -143,9 +170,31 @@ def cmd_export(args) -> int:
     out = export_mod.export_project(
         store, args.profile, args.project, args.dir,
         bundle_dataset=getattr(args, "bundle_dataset", False),
+        force=getattr(args, "force", False),
     )
     print(f"Exported to {out}")
     return 0
+
+
+def cmd_export_profile(args) -> int:
+    """Export a profile on its own (T86)."""
+    store = _store()
+    out = export_mod.export_profile(
+        store, args.profile, args.dir,
+        include_projects=getattr(args, "with_projects", False),
+        force=getattr(args, "force", False),
+    )
+    print(f"Exported to {out}")
+    return 0
+
+
+def cmd_verify(args) -> int:
+    """Check a package without importing it (T105): one
+    readable pass/fail per check, exit 0 when all pass."""
+    report = export_mod.check_export(args.dir)
+    print(f"Checking {args.dir}...")
+    print(export_mod.format_check_report(report))
+    return 0 if report["ok"] else 1
 
 
 def _prompt_profile_merge(slug, diff) -> str:
@@ -197,12 +246,48 @@ def cmd_import(args) -> int:
     print(export_mod.format_preview(summary))
     if getattr(args, "preview", False):
         return 0
+    # T117: the collision choice, from the flags. Without one, a
+    # collision is refused with the flags named (the engine's
+    # error) — a scripted import never hangs on a prompt.
+    collision = None
+    if getattr(args, "as_copy", False):
+        collision = "copy"
+    elif getattr(args, "replace", False):
+        collision = "replace"
     result = export_mod.import_export(
         store, args.dir,
         profile_choice=choice, on_profile_conflict=on_conflict,
         installed_models=models,
+        collision=collision,
     )
-    print(f"Imported project {result['project']!r} into profile {result['profile']!r}")
+    if summary.get("kind") == export_mod.PROFILE_PACKAGE_KIND:
+        names = result.get("projects", [])
+        if names:
+            print(
+                f"Imported profile {result['profile']!r} with "
+                f"{len(names)} project{'s' if len(names) != 1 else ''}: "
+                f"{', '.join(names)}."
+            )
+        else:
+            print(f"Imported profile {result['profile']!r} (no projects).")
+    else:
+        if result.get("collision") == "copy":
+            print(
+                f"Imported project {result['project']!r} into profile "
+                f"{result['profile']!r} (a copy of "
+                f"{result.get('copy_of', '')!r})."
+            )
+        elif result.get("collision") == "replace":
+            print(
+                f"Imported project {result['project']!r} into profile "
+                f"{result['profile']!r} (the old project went to the "
+                "trash)."
+            )
+        else:
+            print(
+                f"Imported project {result['project']!r} into profile "
+                f"{result['profile']!r}"
+            )
     if result.get("profile_existed"):
         print(f"Profile {result['profile']!r} already existed.")
     if result.get("profile_choice") == "take":
@@ -232,6 +317,219 @@ def cmd_create_profile(args) -> int:
         base_ref=args.base or "",
     )
     print(f"Created profile {data['name']!r} (role: {data.get('role') or '-'})")
+    return 0
+
+
+# -- T87: CLI parity — rename, delete, update, show ------------------
+# One cli.py change adding both sets of commands, reusing the Store
+# methods and error messages the GUI already uses. The --processor
+# option on update-profile is NOT here: the processor field's
+# meaning is undecided (T128, hard-gated on Joshua's decision), so
+# the CLI does not invent it.
+
+
+def cmd_rename_profile(args) -> int:
+    store = _store()
+    data = store.rename_profile(args.old, args.new)
+    print(f"Renamed profile {args.old!r} to {data['name']!r}")
+    return 0
+
+
+def cmd_delete_profile(args) -> int:
+    store = _store()
+    if getattr(args, "purge", False):
+        store.purge_profile(args.name)
+        print(f"Deleted profile {args.name!r} forever.")
+    else:
+        trash = store.delete_profile(args.name)
+        print(
+            f"Moved profile {args.name!r} to the trash ({trash}). "
+            "Move it back to undo, or delete it forever from Trash "
+            "in the File menu."
+        )
+    return 0
+
+
+def cmd_update_profile(args) -> int:
+    store = _store()
+    fields = {}
+    if args.role is not None:
+        fields["role"] = args.role
+    if args.tag is not None:
+        fields["ollama_tag"] = args.tag
+    if args.display is not None:
+        fields["display_name"] = args.display
+    if args.base is not None:
+        fields["base_ref"] = args.base
+    if not fields:
+        print("Nothing to change: pass --role, --tag, --display, or --base.")
+        return 0
+    data = store.update_profile(args.name, **fields)
+    print(f"Updated profile {data['name']!r}.")
+    return 0
+
+
+def cmd_show_profile(args) -> int:
+    store = _store()
+    prof = store.get_profile(args.name)
+    projects = store.list_projects(args.name)
+    print(f"Profile {prof['name']} ({prof.get('display_name', prof['name'])})")
+    print(f"  role: {prof.get('role') or '-'}")
+    print(f"  tag: {prof.get('ollama_tag') or '-'}")
+    print(f"  base: {prof.get('base_ref') or '-'}")
+    config = prof.get("config") or {}
+    print(f"  config: {config if config else '(none)'}")
+    deps = prof.get("dependencies") or []
+    print(f"  dependencies: {', '.join(deps) if deps else '(none)'}")
+    if prof.get("created"):
+        print(f"  created: {prof['created']}")
+    if prof.get("updated"):
+        print(f"  updated: {prof['updated']}")
+    healthy = [p for p in projects if not p.get("_damaged")]
+    if healthy:
+        print(
+            f"  projects ({len(healthy)}): "
+            + ", ".join(p["name"] for p in healthy)
+        )
+    else:
+        print("  projects: (none)")
+    return 0
+
+
+def cmd_rename_project(args) -> int:
+    store = _store()
+    data = store.rename_project(args.profile, args.old, args.new)
+    print(f"Renamed project {args.old!r} to {data['name']!r}")
+    return 0
+
+
+def cmd_delete_project(args) -> int:
+    store = _store()
+    if getattr(args, "purge", False):
+        store.purge_project(args.profile, args.name)
+        print(
+            f"Deleted project {args.name!r} from profile "
+            f"{args.profile!r} forever."
+        )
+    else:
+        trash = store.delete_project(args.profile, args.name)
+        print(
+            f"Moved project {args.name!r} to the trash ({trash}). "
+            "Move it back to undo, or delete it forever from Trash "
+            "in the File menu."
+        )
+    return 0
+
+
+# The training-setting flags, shared by create-project and
+# update-project (T87): (flag, setting key, argparse type). The
+# same flags, the same ranges, on both commands.
+SETTING_FLAGS = [
+    ("--rank", "rank", int),
+    ("--epochs", "epochs", int),
+    ("--learning-rate", "learning_rate", float),
+    ("--batch-size", "batch_size", int),
+    ("--grad-accum", "grad_accum", int),
+    ("--max-seq-len", "max_seq_len", int),
+    ("--checkpoint-steps", "checkpoint_steps", int),
+    ("--val-fraction", "val_fraction", float),
+    ("--warmup-steps", "warmup_steps", int),
+    ("--seed", "seed", int),
+    ("--method", "method", str),
+]
+
+
+def _settings_from_args(args) -> dict:
+    """The settings the flags name (only the flags that were
+    passed — an absent flag leaves the setting alone)."""
+    settings = {}
+    for flag, key, _kind in SETTING_FLAGS:
+        value = getattr(args, key, None)
+        if value is not None:
+            settings[key] = value
+    return settings
+
+
+def _add_setting_flags(parser) -> None:
+    """Add the training-setting flags to a subcommand parser."""
+    for flag, key, kind in SETTING_FLAGS:
+        parser.add_argument(
+            flag, dest=key, type=kind, default=None,
+            help=f"training setting: {key}",
+        )
+
+
+def cmd_update_project(args) -> int:
+    store = _store()
+    fields: dict = {}
+    if args.display is not None:
+        fields["display_name"] = args.display
+    if args.dataset is not None:
+        fields["dataset_ref"] = args.dataset
+    settings = _settings_from_args(args)
+    if settings:
+        fields["settings"] = settings
+    metamorph = {}
+    if args.metamorph is not None:
+        metamorph["mode"] = args.metamorph
+    if getattr(args, "metamorph_notes", None) is not None:
+        metamorph["notes"] = args.metamorph_notes
+    if metamorph:
+        fields["metamorph"] = metamorph
+    if not fields:
+        print(
+            "Nothing to change: pass --display, --dataset, "
+            "--metamorph, or a setting flag."
+        )
+        return 0
+    data = store.update_project(args.profile, args.name, **fields)
+    print(
+        f"Updated project {data['name']!r} in profile {args.profile!r}."
+    )
+    return 0
+
+
+def cmd_show_project(args) -> int:
+    store = _store()
+    from .model import metamorph_mode
+    from .train import list_checkpoints
+
+    proj = store.get_project(args.profile, args.name)
+    print(
+        f"Project {proj['name']} "
+        f"({proj.get('display_name', proj['name'])}) "
+        f"in profile {args.profile}"
+    )
+    print(f"  dataset: {proj.get('dataset_ref') or '(not set)'}")
+    print(f"  status: {proj.get('status', 'draft')}")
+    print(f"  metamorph: {metamorph_mode(proj)}")
+    notes = (proj.get("metamorph") or {}).get("notes", "")
+    if isinstance(proj.get("metamorph"), dict) and notes:
+        print(f"  metamorph notes: {notes}")
+    settings = proj.get("settings") or {}
+    print("  settings:")
+    for key in sorted(settings):
+        print(f"    {key}: {settings[key]}")
+    if proj.get("created"):
+        print(f"  created: {proj['created']}")
+    if proj.get("updated"):
+        print(f"  updated: {proj['updated']}")
+    # A5-G2: the checkpoints, so the user can see what
+    # `train --resume` would use.
+    checkpoints = list_checkpoints(store, args.profile, args.name)
+    if checkpoints:
+        print(f"  checkpoints ({len(checkpoints)}):")
+        for ck in checkpoints:
+            loss = (
+                f"{ck['loss']:.4f}" if ck.get("loss") is not None
+                else "n/a"
+            )
+            print(
+                f"    step {ck['step']} (epoch {ck.get('epoch', '?')}, "
+                f"loss {loss})"
+            )
+    else:
+        print("  checkpoints: (none)")
     return 0
 
 
@@ -288,7 +586,12 @@ def cmd_train(args) -> int:
 
     def on_event(event: dict):
         kind = event.get("type")
-        if kind == "started":
+        if kind == "loading":
+            # T108: the base load (a first run downloads it) is
+            # said before it starts, so the wait is not a mystery.
+            print(event.get("message", "Loading the base model."),
+                  flush=True)
+        elif kind == "started":
             print(
                 f"Training: {event['total_steps']} steps, "
                 f"LoRA rank {event['rank']} (CPU, batch 1. This is slow, "
@@ -328,7 +631,17 @@ def cmd_train(args) -> int:
     # The handler sets the flag ONLY — printing inside a signal
     # handler races with buffered stdout and crashed the pause
     # (audit #5 W1). The "paused" event prints.
+    # T108: the SECOND Ctrl+C exits immediately. Raising SystemExit
+    # from the handler interrupts even a blocking base download:
+    # a handler that raises aborts the syscall instead of retrying
+    # it, so the wait ends at once. Exit code 130 is the
+    # conventional "killed by Ctrl+C".
+    stops = {"count": 0}
+
     def _sigint(signum, frame):
+        stops["count"] += 1
+        if stops["count"] >= 2:
+            raise SystemExit(130)
         controller.request_stop()
 
     old_handler = signal.signal(signal.SIGINT, _sigint)
@@ -419,6 +732,18 @@ def cmd_export_gguf(args) -> int:
     print("Create the Ollama model with:")
     print(f"  {result['ollama_create']}")
     print(f"Then run it: ollama run {result['ollama_name']}")
+    if getattr(args, "create", False):
+        # T89: --create runs the command instead of leaving it to
+        # a copy-paste. The manual commands above are still printed.
+        from .gguf import create_in_ollama
+
+        output = create_in_ollama(
+            result["ollama_name"], result["modelfile"]
+        )
+        print()
+        print(f"Created in Ollama as {result['ollama_name']}.")
+        if output:
+            print(output)
     return 0
 
 
@@ -478,11 +803,31 @@ def cmd_probe(args) -> int:
 
 def cmd_create_project(args) -> int:
     store = _store()
+    kwargs: dict = {}
+    # T112: a template pre-fills the dataset, settings, and mode.
+    # Explicit flags win over the template, one field at a time.
+    if getattr(args, "template", None):
+        from .templates import load_template, template_project_kwargs
+
+        kwargs.update(
+            template_project_kwargs(load_template(args.template))
+        )
+    if args.dataset:
+        kwargs["dataset_ref"] = args.dataset
+    settings = _settings_from_args(args)
+    if settings:
+        merged = dict(kwargs.get("settings") or {})
+        merged.update(settings)
+        kwargs["settings"] = merged
+    if getattr(args, "metamorph", None):
+        kwargs["metamorph_mode"] = args.metamorph
+    if getattr(args, "metamorph_notes", None):
+        kwargs["metamorph_notes"] = args.metamorph_notes
     data = store.create_project(
         args.profile,
         args.name,
         display_name=args.display or "",
-        dataset_ref=args.dataset or "",
+        **kwargs,
     )
     print(f"Created project {data['name']!r} in profile {args.profile!r}")
     return 0
@@ -503,7 +848,12 @@ def cmd_sleep(args) -> int:
 
     def on_event(event: dict):
         kind = event.get("type")
-        if kind == "started":
+        if kind == "loading":
+            # T108: the base load is said before it starts (sleep
+            # forwards train events).
+            print(event.get("message", "Loading the base model."),
+                  flush=True)
+        elif kind == "started":
             resumed = " (resuming)" if event.get("resumed") else ""
             print(
                 f"Sleep cycle {event['cycle']}{resumed}: "
@@ -554,7 +904,13 @@ def cmd_sleep(args) -> int:
     # The handler sets the flag ONLY — printing inside a signal
     # handler races with buffered stdout and crashed the train
     # command's pause (audit #5 W1). The "paused" event prints.
+    # T108: the second Ctrl+C exits immediately (see cmd_train).
+    stops = {"count": 0}
+
     def _sigint(signum, frame):
+        stops["count"] += 1
+        if stops["count"] >= 2:
+            raise SystemExit(130)
         controller.request_stop()
 
     old_handler = signal.signal(signal.SIGINT, _sigint)
@@ -852,7 +1208,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="copy the project's dataset file into the package, so "
         "it trains on a PC that does not have the dataset.",
     )
+    p.add_argument(
+        "--force", action="store_true",
+        help="overwrite an existing export folder instead of "
+        "refusing (T117).",
+    )
     p.set_defaults(func=cmd_export)
+
+    p = _cmd("export-profile", "export a profile package",
+             "examples:\n"
+             "  stella export-profile lfm3-tool ~/exports\n"
+             "  stella export-profile lfm3-tool ~/exports --with-projects")
+    p.add_argument("profile", help="profile name, e.g. lfm3-tool")
+    p.add_argument("dir", help="folder to write the package into")
+    p.add_argument(
+        "--with-projects", action="store_true",
+        help="include every project in the profile, each with its "
+        "weights, checkpoints, and notes. Without it, the package "
+        "holds the profile alone.",
+    )
+    p.add_argument(
+        "--force", action="store_true",
+        help="overwrite an existing export folder instead of "
+        "refusing (T117).",
+    )
+    p.set_defaults(func=cmd_export_profile)
+
+    p = _cmd("verify", "check an export package without importing it",
+             "examples:\n  stella verify ~/exports/tool-calls-stella-export")
+    p.add_argument("dir", help="folder holding the package to check")
+    p.set_defaults(func=cmd_verify)
 
     p = _cmd("import", "import an export package",
              "examples:\n  stella import ~/exports/lfm3-tool-tool-calls\n"
@@ -870,6 +1255,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--preview", action="store_true",
         help="show what the package is and what it carries, and "
         "import nothing.",
+    )
+    p.add_argument(
+        "--as-copy", action="store_true",
+        help="when the project already exists, import it as a copy "
+        "under a new name (<name>-copy) instead of refusing (T117).",
+    )
+    p.add_argument(
+        "--replace", action="store_true",
+        help="when the project already exists, move the old project "
+        "to the trash and import over it (T117).",
     )
     p.set_defaults(func=cmd_import)
 
@@ -899,7 +1294,9 @@ def build_parser() -> argparse.ArgumentParser:
         "create-project", "create a project in a profile",
         "examples:\n"
         "  stella create-project lfm3-tool tool-calls "
-        "--dataset sample-tool-calls.jsonl",
+        "--dataset sample-tool-calls.jsonl\n"
+        "  stella create-project lfm3-tool tool-calls "
+        "--template lfm3-tool-format",
     )
     p.add_argument("profile", help="profile name, e.g. lfm3-tool")
     p.add_argument("name", help="project name, e.g. tool-calls")
@@ -909,7 +1306,103 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dataset", default="",
                    help="dataset file for this project (.jsonl, "
                    "e.g. sample-tool-calls.jsonl)")
+    p.add_argument("--template", default=None,
+                   help="start from a project template (e.g. "
+                   "lfm3-tool-format): its dataset, settings, and "
+                   "mode. Explicit flags win over the template.")
+    p.add_argument("--metamorph", default=None,
+                   choices=["morph", "compress", "both"],
+                   help="MetaMorphAi mode for this project "
+                   "(default morph)")
+    p.add_argument("--metamorph-notes", default=None,
+                   help="why this metamorph mode (shown with the "
+                   "project)")
+    _add_setting_flags(p)
     p.set_defaults(func=cmd_create_project)
+
+    # -- T87: rename, delete, update, show (profiles + projects) --
+    p = _cmd("rename-profile", "rename a profile",
+             "examples:\n  stella rename-profile lfm3 lfm3-tool")
+    p.add_argument("old", help="current profile name")
+    p.add_argument("new", help="new profile name")
+    p.set_defaults(func=cmd_rename_profile)
+
+    p = _cmd("delete-profile", "delete a profile (to the trash)",
+             "examples:\n"
+             "  stella delete-profile lfm3-tool\n"
+             "  stella delete-profile lfm3-tool --purge")
+    p.add_argument("name", help="profile name, e.g. lfm3-tool")
+    p.add_argument(
+        "--purge", action="store_true",
+        help="delete forever instead of moving to the trash.",
+    )
+    p.set_defaults(func=cmd_delete_profile)
+
+    p = _cmd("update-profile", "change a profile",
+             "examples:\n"
+             "  stella update-profile lfm3-tool --role fast "
+             "--tag lfm3:1.7b")
+    p.add_argument("name", help="profile name, e.g. lfm3-tool")
+    p.add_argument("--role", default=None,
+                   help="what this profile is for, in plain words")
+    p.add_argument("--tag", default=None,
+                   help="Ollama tag of the model this profile uses")
+    p.add_argument("--display", default=None,
+                   help="display name shown in the window")
+    p.add_argument("--base", default=None,
+                   help="Hugging Face repo or local folder of the base "
+                   "weights")
+    p.set_defaults(func=cmd_update_profile)
+
+    p = _cmd("show-profile", "show a profile's record",
+             "examples:\n  stella show-profile lfm3-tool")
+    p.add_argument("name", help="profile name, e.g. lfm3-tool")
+    p.set_defaults(func=cmd_show_profile)
+
+    p = _cmd("rename-project", "rename a project",
+             "examples:\n"
+             "  stella rename-project lfm3-tool tool-calls tool-calls-2")
+    p.add_argument("profile", help="profile name, e.g. lfm3-tool")
+    p.add_argument("old", help="current project name")
+    p.add_argument("new", help="new project name")
+    p.set_defaults(func=cmd_rename_project)
+
+    p = _cmd("delete-project", "delete a project (to the trash)",
+             "examples:\n"
+             "  stella delete-project lfm3-tool tool-calls\n"
+             "  stella delete-project lfm3-tool tool-calls --purge")
+    p.add_argument("profile", help="profile name, e.g. lfm3-tool")
+    p.add_argument("name", help="project name, e.g. tool-calls")
+    p.add_argument(
+        "--purge", action="store_true",
+        help="delete forever instead of moving to the trash.",
+    )
+    p.set_defaults(func=cmd_delete_project)
+
+    p = _cmd("update-project", "change a project",
+             "examples:\n"
+             "  stella update-project lfm3-tool tool-calls "
+             "--metamorph both --rank 16")
+    p.add_argument("profile", help="profile name, e.g. lfm3-tool")
+    p.add_argument("name", help="project name, e.g. tool-calls")
+    p.add_argument("--display", default=None,
+                   help="display name shown in the window")
+    p.add_argument("--dataset", default=None,
+                   help="dataset file for this project (.jsonl)")
+    p.add_argument("--metamorph", default=None,
+                   choices=["morph", "compress", "both"],
+                   help="MetaMorphAi mode for this project")
+    p.add_argument("--metamorph-notes", default=None,
+                   help="why this metamorph mode (shown with the "
+                   "project)")
+    _add_setting_flags(p)
+    p.set_defaults(func=cmd_update_project)
+
+    p = _cmd("show-project", "show a project's record and checkpoints",
+             "examples:\n  stella show-project lfm3-tool tool-calls")
+    p.add_argument("profile", help="profile name, e.g. lfm3-tool")
+    p.add_argument("name", help="project name, e.g. tool-calls")
+    p.set_defaults(func=cmd_show_project)
 
     p = _cmd(
         "train", "LoRA-tune a project on CPU",
@@ -957,6 +1450,11 @@ def build_parser() -> argparse.ArgumentParser:
                    "final adapter")
     p.add_argument("--force", action="store_true",
                    help="overwrite an existing GGUF at the output path")
+    p.add_argument("--create", action="store_true",
+                   help="also run `ollama create` with the exported "
+                   "name and Modelfile, instead of leaving it to a "
+                   "copy-paste (T89). The manual commands are still "
+                   "printed.")
     p.set_defaults(func=cmd_export_gguf)
 
     p = _cmd("probe", "refusal probe, before vs after tuning",

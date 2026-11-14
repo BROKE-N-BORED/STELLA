@@ -653,3 +653,177 @@ def test_rename_profile_skips_damaged_project(seeded):
     rows = seeded.list_projects("renamed")
     assert len(rows) == 1
     assert rows[0]["_damaged"] is True
+
+# -- T112: clone project ----------------------------------------------
+
+
+def _seeded_project_with_knobs(store):
+    """A profile + project with explicit settings, a dataset, and
+    a metamorph mode + notes — the clone's source."""
+    store.create_profile("p1", ollama_tag="lfm3:1.7b", role="fast")
+    store.create_project(
+        "p1", "orig",
+        display_name="Original",
+        dataset_ref="data.jsonl",
+        settings={"rank": 16, "epochs": 5},
+        metamorph_mode="compress",
+        metamorph_notes="squeeze it down",
+    )
+    return store
+
+
+def test_clone_project_copies_settings_dataset_mode(store):
+    """T112 Done: the clone has identical settings, dataset, and
+    metamorph mode under its own name, and a "cloned from" note."""
+    _seeded_project_with_knobs(store)
+    data = store.clone_project("p1", "orig", "second-try")
+    assert data["name"] == "second-try"
+    clone = store.get_project("p1", "second-try")
+    orig = store.get_project("p1", "orig")
+    assert clone["settings"] == orig["settings"]
+    assert clone["settings"]["rank"] == 16
+    assert clone["settings"]["epochs"] == 5
+    assert clone["dataset_ref"] == "data.jsonl"
+    from stella.model import metamorph_mode
+
+    assert metamorph_mode(clone) == "compress"
+    assert clone["metamorph"]["notes"] == "squeeze it down"
+    assert clone["status"] == "draft"
+    notes = store.read_notes("p1", "second-try")
+    assert "Cloned from orig." in notes
+    # The display name travels (it was custom).
+    assert clone["display_name"] == "Original"
+
+
+def test_clone_does_not_copy_checkpoints_or_adapter(store):
+    """T112 Done: zero checkpoints in the clone, no adapter."""
+    _seeded_project_with_knobs(store)
+    pdir = store.project_dir("p1", "orig")
+    (pdir / "checkpoints" / "step-10").mkdir(parents=True)
+    (pdir / "checkpoints" / "step-10" / "training_state.json").write_text(
+        '{"step": 10}'
+    )
+    adapter = pdir / "adapter"
+    adapter.mkdir()
+    (adapter / "adapter_config.json").write_text('{"r": 16}')
+    store.clone_project("p1", "orig", "second-try")
+    clone_dir = store.project_dir("p1", "second-try")
+    assert list((clone_dir / "checkpoints").iterdir()) == []
+    assert not (clone_dir / "adapter").exists()
+    # The original keeps its checkpoints and adapter.
+    assert (pdir / "checkpoints" / "step-10").is_dir()
+    assert (adapter / "adapter_config.json").is_file()
+
+
+def test_clone_name_collision_rejected(store):
+    """T112 Done: cloning onto an existing name is refused."""
+    _seeded_project_with_knobs(store)
+    store.create_project("p1", "taken")
+    with pytest.raises(StellaError, match="already exists"):
+        store.clone_project("p1", "orig", "taken")
+
+
+def test_clone_leaves_original_untouched(store):
+    """T112 Done: the original is untouched by the clone."""
+    _seeded_project_with_knobs(store)
+    store.write_notes("p1", "orig", "original notes\n")
+    before = store.get_project("p1", "orig")
+    store.clone_project("p1", "orig", "second-try")
+    assert store.get_project("p1", "orig") == before
+    assert store.read_notes("p1", "orig") == "original notes\n"
+
+
+def test_clone_copies_bundled_dataset_file(store):
+    """T112: when the dataset file lives inside the source project
+    (a bundled import), the file travels into the clone, so the
+    clone's ref still resolves."""
+    _seeded_project_with_knobs(store)
+    pdir = store.project_dir("p1", "orig")
+    (pdir / "data.jsonl").write_text(
+        '{"prompt": "a", "completion": "b"}\n'
+    )
+    store.clone_project("p1", "orig", "second-try")
+    clone_file = store.project_dir("p1", "second-try") / "data.jsonl"
+    assert clone_file.is_file()
+    assert clone_file.read_text() == '{"prompt": "a", "completion": "b"}\n'
+
+
+def test_clone_default_display_becomes_new_name(store):
+    """T112: a default display name (equal to the slug) becomes
+    the new slug, not the old one."""
+    store.create_profile("p1")
+    store.create_project("p1", "orig")
+    store.clone_project("p1", "orig", "second-try")
+    assert store.get_project("p1", "second-try")["display_name"] == (
+        "second-try"
+    )
+
+
+# -- T119: notes backup -----------------------------------------------
+
+
+def test_notes_backup_holds_previous_content(store):
+    """T119 Done: save notes twice; the previous version is
+    recoverable from notes.md.1."""
+    store.create_profile("p1")
+    store.create_project("p1", "proj")
+    store.write_notes("p1", "proj", "first version\n")
+    store.write_notes("p1", "proj", "second version\n")
+    assert store.read_notes("p1", "proj") == "second version\n"
+    backup = store.project_dir("p1", "proj") / "notes.md.1"
+    assert backup.is_file()
+    assert backup.read_text(encoding="utf-8") == "first version\n"
+
+
+def test_notes_backup_rotates_to_latest_previous(store):
+    """T119: the single backup always holds the version just
+    before the current one."""
+    store.create_profile("p1")
+    store.create_project("p1", "proj")
+    store.write_notes("p1", "proj", "v1\n")
+    store.write_notes("p1", "proj", "v2\n")
+    store.write_notes("p1", "proj", "v3\n")
+    backup = store.project_dir("p1", "proj") / "notes.md.1"
+    assert backup.read_text(encoding="utf-8") == "v2\n"
+
+
+# -- T118: timestamp restore ------------------------------------------
+
+
+def test_create_restores_given_timestamps(store):
+    """T118: create_profile / create_project with created/updated
+    store those stamps instead of "now"."""
+    store.create_profile(
+        "p1", created="2026-11-01T10:00:00+00:00",
+        updated="2026-11-02T11:00:00+00:00",
+    )
+    prof = store.get_profile("p1")
+    assert prof["created"] == "2026-11-01T10:00:00+00:00"
+    assert prof["updated"] == "2026-11-02T11:00:00+00:00"
+    store.create_project(
+        "p1", "proj", created="2026-11-03T12:00:00+00:00"
+    )
+    proj = store.get_project("p1", "proj")
+    assert proj["created"] == "2026-11-03T12:00:00+00:00"
+    assert "updated" not in proj
+
+
+# -- T87: purge --------------------------------------------------------
+
+
+def test_purge_profile_and_project_delete_forever(store):
+    """T87: --purge removes without the trash."""
+    store.create_profile("p1")
+    store.create_project("p1", "proj")
+    store.purge_project("p1", "proj")
+    with pytest.raises(StellaError):
+        store.get_project("p1", "proj")
+    assert store.list_trash() == []
+    store.purge_profile("p1")
+    with pytest.raises(StellaError):
+        store.get_profile("p1")
+    assert store.list_trash() == []
+    with pytest.raises(StellaError, match="no profile"):
+        store.purge_profile("ghost")
+    with pytest.raises(StellaError, match="no project"):
+        store.purge_project("p1", "ghost")

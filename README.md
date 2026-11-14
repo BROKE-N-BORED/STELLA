@@ -143,6 +143,17 @@ job, export it as a usable package.
   the printed `ollama create` command works with spaced
   paths; library warnings stay off stderr; and the mode a run
   trained with is recorded in its summary and adapter config.
+- v0.18.0 export/import/clone (2026-11-14): profiles export
+  and import whole (File > Export profile, `stella
+  export-profile`); packages carry checksums and timestamps
+  and are checked before import (`stella verify`, File >
+  Check package); export and import run on the job card with
+  progress and cancel; collisions are choices (overwrite
+  prompt, import as a copy, replace to trash); projects clone
+  and start from templates (first template: LFM3 tool-format);
+  the CLI can rename, delete, update, and show profiles and
+  projects; a second Ctrl+C exits a run at once; and project
+  notes keep a rotating backup (notes.md.1).
 
 ## Install
 
@@ -234,6 +245,14 @@ nothing trains silently and nothing downloads on its own.
 
 All Stella data lives in `~/.stella/` as plain JSON and Markdown, so
 you can read it or fix it by hand. Set `STELLA_HOME` to move it.
+
+Project notes keep one backup: every time notes are saved, the
+previous `notes.md` is copied to `notes.md.1` first, so a mistaken
+save loses nothing. To get the previous notes back, move the backup
+over the notes file: in the project's folder under `~/.stella/`
+(`profiles/<profile>/projects/<project>/`), rename `notes.md.1`
+to `notes.md`. Only the latest previous save is kept — each save
+replaces the backup.
 
 ## Training (v0.2)
 
@@ -395,17 +414,37 @@ After install, `stella` works in a terminal:
 
 `stella projects <profile>`
 
-`stella export <profile> <project> <dir>`
+`stella export <profile> <project> <dir> [--bundle-dataset] [--force]`
 
-`stella import <export-dir>`
+`stella export-profile <profile> <dir> [--with-projects] [--force]`
+
+`stella import <export-dir> [--profile-merge keep|take] [--preview] [--as-copy] [--replace]`
+
+`stella verify <export-dir>`
 
 `stella create-profile <name> [--tag <ollama-tag>] [--role <role>] [--display <name>] [--base <hf-repo>]`
 
-`stella create-project <profile> <name> [--display <name>] [--dataset <file>]`
+`stella create-project <profile> <name> [--display <name>] [--dataset <file>] [--template <name>] [--metamorph morph|compress|both] [--rank N] [--epochs N] [--learning-rate F] [--batch-size N]`
+
+`stella rename-profile <old> <new>`
+
+`stella delete-profile <name> [--purge]`
+
+`stella update-profile <name> [--role <role>] [--tag <tag>] [--display <name>] [--base <hf-repo>]`
+
+`stella show-profile <name>`
+
+`stella rename-project <profile> <old> <new>`
+
+`stella delete-project <profile> <name> [--purge]`
+
+`stella update-project <profile> <name> [--display <name>] [--dataset <file>] [--metamorph morph|compress|both] [--rank N] [--epochs N] [--learning-rate F] [--batch-size N]`
+
+`stella show-project <profile> <name>`
 
 `stella train <profile> <project> [--steps N] [--resume] [--force] [--dataset FILE] [--base REF] [--target-modules q_proj,k_proj]`
 
-`stella export-gguf <profile> <project> <dir> [--quant Q4_K_M] [--from-checkpoint N] [--force]`
+`stella export-gguf <profile> <project> <dir> [--quant Q4_K_M] [--from-checkpoint N] [--force] [--create]`
 
 `stella probe <profile> <project>`
 

@@ -1,5 +1,82 @@
 # Changelog
 
+## v0.18.0 — 2026-11-14
+
+The export/import/clone slice (audit tasks T86, T87, T88, T89,
+T104, T105, T106, T107, T108, T112, T117, T118, T119): profiles
+export and import whole, export packages carry checksums and
+timestamps and are checked before they are imported, export and
+import run on the job card with progress and cancel, collisions
+are choices, projects clone and start from templates, and the
+CLI can rename, delete, update, and show profiles and projects.
+
+- T86 — profile packages: `stella export-profile` (and File >
+  Export profile) writes a `<profile>-stella-profile-export`
+  package holding the profile, optionally with every project in
+  it (weights, checkpoints, notes); `stella import` brings a
+  profile package back whole. Datasets are referenced, never
+  bundled; a profile import refuses while any of its projects
+  already exist here, naming them.
+- T87 — CLI parity: rename, delete (to the trash, `--purge` for
+  forever), update, and show for profiles and projects
+  (`rename-profile`, `delete-profile`, `update-profile`,
+  `show-profile`, `rename-project`, `delete-project`,
+  `update-project`, `show-project`). `show-project` lists the
+  checkpoints, so the user can see what `train --resume` would
+  use; `create-project` and `update-project` take the training
+  settings as flags. `--processor` on `update-profile` is NOT
+  implemented: the processor field's meaning is undecided
+  (T128, gated on Joshua's decision).
+- T88 — `stella projects` on a nonexistent profile exits 1
+  naming it, instead of printing the empty message for a
+  profile that is not there.
+- T89 — Create in Ollama: the Train panel's new button runs
+  `ollama create` for the last GGUF export (its record lives in
+  the project dir), on the job card so a slow create can be
+  cancelled; `stella export-gguf --create` does the same from
+  the terminal. The manual commands are still printed.
+- T104 — checksums: every file in a package (except the
+  manifest itself) is listed in the manifest with its size and
+  SHA-256, and import refuses a package whose files do not
+  match, naming the file. Packages written before this version
+  import as before.
+- T105 — `stella verify` (and File > Check package) checks a
+  package without importing it: manifest present, kind known,
+  schema valid, files match their checksums — each check
+  reported, the first failure named.
+- T106 — export and import run on the job card with a
+  determinate progress bar and a Cancel button; a cancel leaves
+  no partial package and no partial import, and the lists
+  refresh when the job finishes either way.
+- T107 — the GGUF job's bar moves per phase (merge 1 of 3,
+  convert 2 of 3, quantize 3 of 3); the probe job's bar moves
+  per prompt. Both were already cancellable on the job card.
+- T108 — a second Ctrl+C during a train or sleep run exits at
+  once (130) instead of re-requesting the same graceful stop,
+  so a run stuck in a blocking base download can be ended; and
+  the base load prints a line first saying the first run
+  downloads it and Ctrl+C takes effect when the download
+  finishes.
+- T112 — clone and templates: the project window's Clone button
+  copies the dataset, settings, and metamorph mode under a new
+  name (no checkpoints, fresh notes with a "cloned from" line);
+  New Project offers a template picker, starting with the LFM3
+  tool-format preset (the audit's recommended defaults — no
+  approver was awake to confirm the values). The picker shows
+  names and plain-words descriptions only, never settings.
+- T117 — collisions are choices: a menu export over an existing
+  package asks before overwriting (`--force` on the CLI); an
+  import whose project already exists offers "import as a copy"
+  (new slug) or replace (the old project goes to the trash) —
+  `--as-copy` / `--replace` on the CLI.
+- T118 — the manifest carries each profile's and project's
+  created/updated stamps plus a top-level exported_at, and
+  import restores them.
+- T119 — project notes keep a rotating single backup: saving
+  notes copies the previous notes.md to notes.md.1 first, so a
+  mistaken save loses nothing. Restore by moving notes.md.1
+  back over notes.md (see the README).
+
 ## v0.17.0 — 2026-11-14
 
 The training-engine honesty slice (audit tasks T97, T98, T100, T101,

@@ -2569,6 +2569,7 @@ accounts for their findings.)
 - **Covers:** A1-G4; A3-W7, A3-G3
 - **Effort:** M
 - **Depends on:** T40 (package format defines the profile kind)
+- **Status:** DONE in v0.18.0 (2026-11-14) — profiles export on their own now (kind stella-profile-export, CLI export-profile, File menu).
 - **Problem:** Export is per-project; a profile with zero projects
   cannot be moved, backed up, or shared. Combined with A1-W5, the
   only copy of a profile is the live one. Audit #3 confirmed the
@@ -2600,6 +2601,7 @@ accounts for their findings.)
 - **Origin:** audit #1 T7 + audit #2 T11 (merged — one `cli.py` change); audit #5 T16 (G1–G3, merged — same commands)
 - **Covers:** A1-W9, A1-D11; A2-W11, A2-D13; A7-G7, A7-D15 (update half); A5-G1, A5-G2, A5-G3, A5-D15 (commands/show/settings half)
 - **Effort:** M
+- **Status:** DONE in v0.18.0 (2026-11-14) — the terminal gains rename, delete, update, and show for profiles and projects (all eight commands + settings flags on create/update-project; the CLI is a power path, not a screen). --processor deliberately NOT included: blocked on T128's undecided processor-field meaning, pinned by test_cli_update_profile_has_no_processor_flag.
 - **Problem:** The CLI can list and create profiles and projects but
   cannot rename, delete, or change either. Scripted management (bulk
   rename after the System Test run, for example) has to go through
@@ -2644,6 +2646,7 @@ accounts for their findings.)
 - **Origin:** audit #5 T9 (W8/D8 part)
 - **Covers:** A5-W8, A5-D8
 - **Effort:** S
+- **Status:** DONE in v0.18.0 (2026-11-14) — a ghost profile is refused, exit 1.
 - **Problem:** `stella projects ghost` → exit 0, `No projects in
   profile 'ghost'.` — byte-identical in shape to an empty real
   profile. `list_projects` returns `[]` when the directory is
@@ -2663,6 +2666,7 @@ accounts for their findings.)
 - **Origin:** repo-audit verdict (R26)
 - **Covers:** R26
 - **Effort:** S
+- **Status:** DONE in v0.18.0 (2026-11-14) — one-click Ollama create after GGUF export (create_in_ollama + GUI button + CLI --create).
 - **Problem:** After a GGUF export the user must copy the printed
   `ollama create` command and run it by hand in a terminal — the
   last step of the fine-tune loop is manual. The export already
@@ -3000,6 +3004,7 @@ accounts for their findings.)
 - **Origin:** audit #3 T9
 - **Covers:** A3-W9, A3-D8
 - **Effort:** M
+- **Status:** DONE in v0.18.0 (2026-11-14) — every package carries checksums (sha256 + size per file); import refuses a mismatch naming the file; legacy packages import unverified.
 - **Problem:** The manifest carries no checksums, sizes, or file
   list. Probed: a checkpoint truncated from 800 bytes to 4
   (`FAKE`) imported without complaint — the corrupted file now
@@ -3022,6 +3027,7 @@ accounts for their findings.)
 - **Covers:** A3-G5, A3-D12; A5-G4, A5-D15 (verify half)
 - **Effort:** S
 - **Depends on:** T1 (schema validation), T40 (version check), T104 (checksums)
+- **Status:** DONE in v0.18.0 (2026-11-14) — Check package verifies without importing (check_export + format_check_report + cmd_verify + File > Check package).
 - **Problem:** `verify_export` exists but no CLI command or GUI
   action exposes it — the only way to check a package is to
   import it. Audit #5 re-verified the gap on the CLI (A5-G4):
@@ -3042,6 +3048,7 @@ accounts for their findings.)
 - **Origin:** audit #3 T14
 - **Covers:** A3-U4, A3-U5
 - **Effort:** M
+- **Status:** DONE in v0.18.0 (2026-11-14) — export and import run in the background with progress and cancel; lists refresh on failure.
 - **Problem:** Export and import run synchronously in the
   button-click handler — no progress indicator, no cancel, no
   background thread. A v0.2-scale checkpoint copy will freeze the
@@ -3067,6 +3074,7 @@ accounts for their findings.)
 - **Covers:** A4-G4, A4-D21 (job part); R23
 - **Effort:** M
 - **Note:** Extended by T74 (Audit #9 R7).
+- **Status:** DONE in v0.18.0 (2026-11-14) — GGUF export shows real phase progress (merge/convert/quantize 1/2/3) and the probe shows per-prompt progress.
 - **Problem:** No progress or cancel for GGUF/probe jobs:
   `JobWorker` has no progress signal — a multi-minute GGUF
   export shows only log lines, and there is no way to stop it
@@ -3087,6 +3095,7 @@ accounts for their findings.)
 - **Origin:** audit #5 T10
 - **Covers:** A5-W11, A5-D9
 - **Effort:** S
+- **Status:** DONE in v0.18.0 (2026-11-14) — a second Ctrl+C quits at once (train + sleep), exit 130.
 - **Problem:** Code-grounded (`cli.py:121-124`, `train.py`): the
   handler only sets the stop flag and prints, every time —
   pressing Ctrl+C a second time does not force-quit, it just
@@ -3195,6 +3204,7 @@ accounts for their findings.)
 - **Origin:** audit #2 T10
 - **Covers:** A2-W13, A2-G5, A2-D9
 - **Effort:** M
+- **Status:** DONE in v0.18.0 (2026-11-14) — clone a project in one click (settings/dataset/mode, no checkpoints), or start from a template (templates as JSON; the LFM3 preset uses audit defaults — rank 8, lr 0.0002, epochs 3, mode "both" — unconfirmed by Joshua, noted in CHANGELOG).
 - **Problem:** Same dataset + settings, second try (different rank,
   different metamorph mode) means creating a fresh project and
   re-entering everything. The most common fine-tuning workflow —
@@ -3327,6 +3337,7 @@ accounts for their findings.)
 - **Origin:** audit #3 T10
 - **Covers:** A3-W11, A3-D9
 - **Effort:** M
+- **Status:** DONE in v0.18.0 (2026-11-14) — collisions are choices (overwrite prompt, --force, --as-copy, --replace with trash backup).
 - **Problem:** Export refuses an existing folder and import
   refuses an existing project, and that is the end of it: no
   `--force`, no "replace", no "import as a copy under a new name",
@@ -3348,6 +3359,7 @@ accounts for their findings.)
 - **Origin:** audit #3 T11
 - **Covers:** A3-W10, A3-D11
 - **Effort:** S
+- **Status:** DONE in v0.18.0 (2026-11-14) — created/updated + exported_at in the manifest, restored on import.
 - **Problem:** `created` and `updated` are not in the manifest
   (manifest keys are exactly `kind`, `profile`, `project`,
   `stella_version`). Import stamps fresh timestamps
@@ -3369,6 +3381,7 @@ accounts for their findings.)
 - **Origin:** audit #2 T14
 - **Covers:** A2-G7, A2-D11
 - **Effort:** S
+- **Status:** DONE in v0.18.0 (2026-11-14) — notes keep a backup of the previous version (rotating notes.md.1 + README restore docs).
 - **Problem:** `notes.md` is a single overwrite on every save; a
   mistaken save loses the previous notes with no backup.
 - **Fix:** On each notes save, keep the previous version: a rotating

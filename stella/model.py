@@ -29,7 +29,7 @@ from pathlib import Path
 
 from .autoconfig import compute_settings, measure_pc
 
-STELLA_VERSION = "0.17.0"
+STELLA_VERSION = "0.18.0"
 
 # Slug: lowercase letters, digits, dash, underscore. Must start alnum.
 # No dots, no slashes — a slug can never climb out of its directory.
@@ -516,6 +516,8 @@ class Store:
         config: dict | None = None,
         processor: str = "",
         dependencies: list | None = None,
+        created: str | None = None,
+        updated: str | None = None,
     ) -> dict:
         slug = validate_slug(slug, "profile name")
         pdir = self.profile_dir(slug)
@@ -532,8 +534,19 @@ class Store:
             "processor": processor or "",
             "config": dict(config or {}),
             "dependencies": list(dependencies or []),
-            "created": utc_now(),
+            # T118: an import restores the original timestamps
+            # instead of stamping fresh ones, so an imported
+            # profile keeps its history. Anything else creates
+            # with "now" — a non-text stamp is ignored, never
+            # stored, so a hand-edited manifest cannot plant a
+            # bad timestamp.
+            "created": (
+                created if isinstance(created, str) and created
+                else utc_now()
+            ),
         }
+        if isinstance(updated, str) and updated:
+            data["updated"] = updated
         (pdir / "projects").mkdir(parents=True, exist_ok=True)
         _write_json(pdir / "profile.json", data)
         return data
@@ -614,6 +627,15 @@ class Store:
             raise StellaError(f"no profile named {slug!r}")
         return self._move_to_trash(pdir, slug)
 
+    def purge_profile(self, slug: str) -> None:
+        """Delete a profile forever, no trash (T87 `--purge`):
+        the CLI's permanent removal. The profile must exist."""
+        slug = validate_slug(slug, "profile name")
+        pdir = self.profile_dir(slug)
+        if not (pdir / "profile.json").exists():
+            raise StellaError(f"no profile named {slug!r}")
+        self._destroy_profile(slug)
+
     # -- projects ---------------------------------------------------
     def list_projects(self, profile: str) -> list[dict]:
         slug = validate_slug(profile, "profile name")
@@ -681,6 +703,8 @@ class Store:
         settings: dict | None = None,
         metamorph_mode: str = "morph",
         metamorph_notes: str = "",
+        created: str | None = None,
+        updated: str | None = None,
     ) -> dict:
         profile = validate_slug(profile, "profile name")
         slug = validate_slug(slug, "project name")
@@ -720,8 +744,15 @@ class Store:
             "settings_source": settings_source,
             "metamorph": {"mode": metamorph_mode, "notes": metamorph_notes or ""},
             "status": "draft",
-            "created": utc_now(),
+            # T118: an import restores the original timestamps —
+            # see create_profile.
+            "created": (
+                created if isinstance(created, str) and created
+                else utc_now()
+            ),
         }
+        if isinstance(updated, str) and updated:
+            data["updated"] = updated
         (pdir / "checkpoints").mkdir(parents=True, exist_ok=True)
         _write_json(pdir / "project.json", data)
         (pdir / "notes.md").write_text(
@@ -843,6 +874,67 @@ class Store:
             f"{validate_slug(project, 'project name')}",
         )
 
+    def purge_project(self, profile: str, project: str) -> None:
+        """Delete a project forever, no trash (T87 `--purge`):
+        the CLI's permanent removal. The project must exist."""
+        pdir = self.project_dir(profile, project)
+        if not (pdir / "project.json").exists():
+            raise StellaError(f"no project named {project!r}")
+        self._destroy_project(profile, project)
+
+    def clone_project(
+        self, profile: str, project: str, new_slug: str
+    ) -> dict:
+        """Copy a project under a new name (T112): the same
+        dataset, settings, and metamorph mode (notes included —
+        they say why the mode was picked), zero checkpoints, no
+        adapter, and fresh notes with a "cloned from X" header
+        line. The original is untouched. A name that already
+        exists is refused, like any other create. When the
+        dataset file lives inside the source project (a bundled
+        import), the file is copied into the clone too, so the
+        clone's dataset ref still resolves."""
+        profile = validate_slug(profile, "profile name")
+        project = validate_slug(project, "project name")
+        new_slug = validate_slug(new_slug, "new project name")
+        src = self.get_project(profile, project)
+        block = src.get("metamorph")
+        metamorph_notes = (
+            block.get("notes", "")
+            if isinstance(block, dict)
+            else ""
+        )
+        # A custom display name travels; a default one (equal to
+        # the slug) becomes the new slug instead of lying about
+        # which project it is.
+        display = src.get("display_name", project)
+        if display == project:
+            display = ""
+        data = self.create_project(
+            profile,
+            new_slug,
+            display_name=display,
+            dataset_ref=src.get("dataset_ref", ""),
+            settings=dict(src.get("settings", {})),
+            metamorph_mode=metamorph_mode(src),
+            metamorph_notes=metamorph_notes,
+        )
+        ref = src.get("dataset_ref", "")
+        if ref and ref == Path(ref).name:
+            src_file = self.project_dir(profile, project) / ref
+            if src_file.is_file():
+                shutil.copy2(
+                    src_file,
+                    self.project_dir(profile, new_slug) / ref,
+                )
+        self.write_notes(
+            profile,
+            new_slug,
+            f"# {data.get('display_name', new_slug)}\n\n"
+            f"Cloned from {project}.\n",
+        )
+        return data
+
     # -- notes ------------------------------------------------------
     def read_notes(self, profile: str, project: str) -> str:
         pdir = self.project_dir(profile, project)
@@ -855,4 +947,12 @@ class Store:
         pdir = self.project_dir(profile, project)
         if not (pdir / "project.json").exists():
             raise StellaError(f"no project named {project!r}")
-        (pdir / "notes.md").write_text(text, encoding="utf-8")
+        notes = pdir / "notes.md"
+        # The rotating single backup (T119): the previous version
+        # is kept as notes.md.1, so a mistaken save loses nothing.
+        # Restore by moving notes.md.1 back over notes.md (the
+        # README documents it). No backup on the first save —
+        # there is nothing previous to keep.
+        if notes.is_file():
+            shutil.copy2(notes, pdir / "notes.md.1")
+        notes.write_text(text, encoding="utf-8")

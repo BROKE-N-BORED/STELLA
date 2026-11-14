@@ -1,0 +1,23 @@
+{
+  "base_ref": "LiquidAI/LFM3-1.7B",
+  "dataset_ref": "sample-tool-calls.jsonl",
+  "description": "Teach LFM3 to answer with tool calls, using the sample tool-call examples. A good first fine-tune: the model learns to shape its answers as calls like read_file and run_shell.",
+  "mode": "both",
+  "name": "lfm3-tool-format",
+  "settings": {
+    "batch_size": 1,
+    "checkpoint_steps": 50,
+    "epochs": 3,
+    "grad_accum": 8,
+    "learning_rate": 0.0002,
+    "max_seq_len": 1024,
+    "method": "lora",
+    "notes": "",
+    "rank": 8,
+    "seed": 42,
+    "target_modules": [],
+    "val_fraction": 0.1,
+    "warmup_steps": 5
+  },
+  "title": "LFM3 tool calls"
+}

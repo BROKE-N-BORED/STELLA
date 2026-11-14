@@ -22,10 +22,13 @@ def run_cli(home, *args):
 # -- T51: help text for every flag, examples in every command ----
 
 ALL_COMMANDS = [
-    "profiles", "projects", "export", "import",
-    "create-profile", "create-project", "train", "export-gguf",
-    "probe", "sleep", "sleep-status", "chat", "requant",
-    "pc-info", "distill", "doctor",
+    "profiles", "projects", "export", "export-profile", "import",
+    "verify", "create-profile", "create-project", "train",
+    "export-gguf", "probe", "sleep", "sleep-status", "chat",
+    "requant", "pc-info", "distill", "doctor",
+    "rename-profile", "delete-profile", "update-profile",
+    "show-profile", "rename-project", "delete-project",
+    "update-project", "show-project",
 ]
 
 
@@ -1332,3 +1335,462 @@ def test_cli_projects_survives_corrupt_metamorph(home, mutate, warns):
         assert "metamorph" in res.stdout
     else:
         assert "warning" not in res.stdout
+
+# -- T88: CLI `projects` refuses a nonexistent profile --------------
+
+
+def test_cli_projects_refuses_ghost_profile(home):
+    """T88 Done: `projects` on a nonexistent profile exits 1 with
+    a plain error."""
+    res = run_cli(home, "projects", "ghost")
+    assert res.returncode == 1
+    assert "no profile named 'ghost'" in res.stderr
+
+
+def test_cli_projects_empty_real_profile_is_clean(home):
+    """T88 Done: on an empty REAL profile it still prints the
+    empty message and exits 0."""
+    run_cli(home, "create-profile", "p1")
+    res = run_cli(home, "projects", "p1")
+    assert res.returncode == 0
+    assert "No projects in profile 'p1'." in res.stdout
+
+
+# -- T87: CLI parity — rename, delete, update, show ------------------
+
+
+def _seed_cli_home(home):
+    run_cli(home, "create-profile", "p1", "--tag", "lfm3:1.7b",
+            "--role", "fast")
+    run_cli(home, "create-project", "p1", "proj",
+            "--dataset", "sample-tool-calls.jsonl")
+
+
+def test_cli_rename_profile(home):
+    _seed_cli_home(home)
+    res = run_cli(home, "rename-profile", "p1", "p2")
+    assert res.returncode == 0
+    assert "Renamed profile 'p1' to 'p2'" in res.stdout
+    res = run_cli(home, "profiles")
+    assert "p2" in res.stdout
+    assert "p1" not in res.stdout
+
+
+def test_cli_rename_profile_bad_name(home):
+    _seed_cli_home(home)
+    res = run_cli(home, "rename-profile", "p1", "Bad Name!")
+    assert res.returncode == 1
+    assert "not valid" in res.stderr
+    res = run_cli(home, "rename-profile", "ghost", "p2")
+    assert res.returncode == 1
+    assert "no profile named 'ghost'" in res.stderr
+
+
+def test_cli_delete_profile_moves_to_trash(home):
+    """T87 Done: delete moves to trash (T23); --purge removes
+    forever."""
+    from stella.model import Store
+
+    _seed_cli_home(home)
+    res = run_cli(home, "delete-profile", "p1")
+    assert res.returncode == 0
+    assert "to the trash" in res.stdout
+    store = Store(home)
+    assert store.list_trash()
+    with pytest.raises(Exception):
+        store.get_profile("p1")
+    res = run_cli(home, "delete-profile", "ghost")
+    assert res.returncode == 1
+
+
+def test_cli_delete_profile_purge(home):
+    from stella.model import Store
+
+    _seed_cli_home(home)
+    res = run_cli(home, "delete-profile", "p1", "--purge")
+    assert res.returncode == 0
+    assert "forever" in res.stdout
+    assert Store(home).list_trash() == []
+
+
+def test_cli_update_profile(home):
+    _seed_cli_home(home)
+    res = run_cli(
+        home, "update-profile", "p1", "--role", "driver",
+        "--tag", "other:9b", "--display", "Driver Seat",
+    )
+    assert res.returncode == 0
+    res = run_cli(home, "show-profile", "p1")
+    assert "role: driver" in res.stdout
+    assert "tag: other:9b" in res.stdout
+    assert "Driver Seat" in res.stdout
+
+
+def test_cli_update_profile_no_flags_is_a_noop(home):
+    _seed_cli_home(home)
+    res = run_cli(home, "update-profile", "p1")
+    assert res.returncode == 0
+    assert "Nothing to change" in res.stdout
+
+
+def test_cli_update_profile_has_no_processor_flag(home):
+    """T87/T128: the processor field's meaning is undecided, so
+    there is no --processor option to invent it with."""
+    res = run_cli(home, "update-profile", "--help")
+    assert res.returncode == 0
+    assert "--processor" not in res.stdout
+
+
+def test_cli_show_profile(home):
+    _seed_cli_home(home)
+    res = run_cli(home, "show-profile", "p1")
+    assert res.returncode == 0
+    assert "Profile p1" in res.stdout
+    assert "role: fast" in res.stdout
+    assert "tag: lfm3:1.7b" in res.stdout
+    assert "projects (1): proj" in res.stdout
+    res = run_cli(home, "show-profile", "ghost")
+    assert res.returncode == 1
+    assert "no profile named 'ghost'" in res.stderr
+
+
+def test_cli_rename_project(home):
+    _seed_cli_home(home)
+    res = run_cli(home, "rename-project", "p1", "proj", "proj2")
+    assert res.returncode == 0
+    assert "Renamed project 'proj' to 'proj2'" in res.stdout
+    res = run_cli(home, "projects", "p1")
+    assert "proj2" in res.stdout
+
+
+def test_cli_delete_project_moves_to_trash(home):
+    from stella.model import Store
+
+    _seed_cli_home(home)
+    res = run_cli(home, "delete-project", "p1", "proj")
+    assert res.returncode == 0
+    assert "to the trash" in res.stdout
+    assert Store(home).list_trash()
+    res = run_cli(home, "delete-project", "p1", "proj", "--purge")
+    assert res.returncode == 1  # already gone
+
+
+def test_cli_delete_project_purge(home):
+    from stella.model import Store
+
+    _seed_cli_home(home)
+    res = run_cli(home, "delete-project", "p1", "proj", "--purge")
+    assert res.returncode == 0
+    assert "forever" in res.stdout
+    assert Store(home).list_trash() == []
+
+
+def test_cli_update_project(home):
+    """T87 Done: update-project changes display, dataset,
+    metamorph mode (A7-G7), and settings."""
+    from stella.model import Store, metamorph_mode
+
+    _seed_cli_home(home)
+    res = run_cli(
+        home, "update-project", "p1", "proj",
+        "--display", "Renamed", "--metamorph", "both",
+        "--rank", "16", "--epochs", "5",
+    )
+    assert res.returncode == 0
+    proj = Store(home).get_project("p1", "proj")
+    assert proj["display_name"] == "Renamed"
+    assert metamorph_mode(proj) == "both"
+    assert proj["settings"]["rank"] == 16
+    assert proj["settings"]["epochs"] == 5
+
+
+def test_cli_update_project_bad_setting_refused(home):
+    _seed_cli_home(home)
+    res = run_cli(home, "update-project", "p1", "proj", "--rank", "999")
+    assert res.returncode == 1
+    assert "rank" in res.stderr
+
+
+def test_cli_show_project_lists_checkpoints(home):
+    """T87 Done (A5-G2): show-project lists the checkpoints, so
+    the user can see what `train --resume` would use."""
+    from stella.model import Store
+
+    _seed_cli_home(home)
+    store = Store(home)
+    ckpt = (
+        store.project_dir("p1", "proj") / "checkpoints" / "step-10"
+    )
+    ckpt.mkdir(parents=True)
+    (ckpt / "training_state.json").write_text(
+        json.dumps({"step": 10, "epoch": 1, "loss": 0.5})
+    )
+    res = run_cli(home, "show-project", "p1", "proj")
+    assert res.returncode == 0
+    assert "Project proj" in res.stdout
+    assert "dataset: sample-tool-calls.jsonl" in res.stdout
+    assert "metamorph: morph" in res.stdout
+    assert "rank:" in res.stdout
+    assert "checkpoints (1):" in res.stdout
+    assert "step 10" in res.stdout
+    res = run_cli(home, "show-project", "p1", "ghost")
+    assert res.returncode == 1
+    assert "no project named 'ghost'" in res.stderr
+
+
+def test_cli_create_project_takes_settings_flags(home):
+    """T87: create-project takes the same settings flags as
+    update-project."""
+    from stella.model import Store
+
+    run_cli(home, "create-profile", "p1")
+    res = run_cli(
+        home, "create-project", "p1", "proj",
+        "--rank", "16", "--epochs", "2", "--metamorph", "compress",
+    )
+    assert res.returncode == 0
+    proj = Store(home).get_project("p1", "proj")
+    assert proj["settings"]["rank"] == 16
+    assert proj["settings"]["epochs"] == 2
+    from stella.model import metamorph_mode
+
+    assert metamorph_mode(proj) == "compress"
+
+
+def test_cli_create_project_from_template(home):
+    """T112: create-project --template pre-fills the preset."""
+    from stella.model import Store, metamorph_mode
+
+    run_cli(home, "create-profile", "p1")
+    res = run_cli(
+        home, "create-project", "p1", "tool-try",
+        "--template", "lfm3-tool-format",
+    )
+    assert res.returncode == 0
+    proj = Store(home).get_project("p1", "tool-try")
+    assert proj["dataset_ref"] == "sample-tool-calls.jsonl"
+    assert metamorph_mode(proj) == "both"
+    assert proj["settings"]["rank"] == 8
+    res = run_cli(
+        home, "create-project", "p1", "tool-try-2",
+        "--template", "no-such-template",
+    )
+    assert res.returncode == 1
+    assert "no template named" in res.stderr
+
+
+# -- T105: a verify command (CLI half) -------------------------------
+
+
+def test_cli_verify_good_package(home, tmp_path):
+    """T105 Done: `stella verify` on a good package reports all
+    checks pass; nothing is imported."""
+    from stella.model import Store
+
+    _seed_cli_home(home)
+    dest = tmp_path / "exports"
+    run_cli(home, "export", "p1", "proj", str(dest))
+    pkg = dest / "proj-stella-export"
+    res = run_cli(home, "verify", str(pkg))
+    assert res.returncode == 0
+    assert "OK: Manifest present" in res.stdout
+    assert "OK: Files match their checksums" in res.stdout
+    assert "All checks passed. Nothing was imported." in res.stdout
+
+
+def test_cli_verify_bad_package_names_the_check(home, tmp_path):
+    """T105 Done: on a bad package it names the failing check."""
+    _seed_cli_home(home)
+    dest = tmp_path / "exports"
+    run_cli(home, "export", "p1", "proj", str(dest))
+    pkg = dest / "proj-stella-export"
+    (pkg / "notes.md").write_bytes(b"tampered")
+    res = run_cli(home, "verify", str(pkg))
+    assert res.returncode == 1
+    assert "FAIL: Files match their checksums" in res.stdout
+    assert "notes.md" in res.stdout
+    assert "A check failed. Nothing was imported." in res.stdout
+
+
+# -- T86: export-profile (CLI half) ----------------------------------
+
+
+def test_cli_export_profile_round_trip(home, tmp_path):
+    """T86: export-profile + import brings a project-less profile
+    back."""
+    from stella.model import Store
+
+    run_cli(home, "create-profile", "solo", "--tag", "lfm3:1.7b",
+            "--role", "fast")
+    dest = tmp_path / "exports"
+    res = run_cli(home, "export-profile", "solo", str(dest))
+    assert res.returncode == 0
+    assert "solo-stella-profile-export" in res.stdout
+    run_cli(home, "delete-profile", "solo", "--purge")
+    res = run_cli(home, "import", str(dest / "solo-stella-profile-export"))
+    assert res.returncode == 0
+    assert "Imported profile 'solo' (no projects)." in res.stdout
+    assert Store(home).get_profile("solo")["role"] == "fast"
+
+
+def test_cli_export_profile_with_projects(home, tmp_path):
+    _seed_cli_home(home)
+    dest = tmp_path / "exports"
+    res = run_cli(
+        home, "export-profile", "p1", str(dest), "--with-projects"
+    )
+    assert res.returncode == 0
+    fresh = tmp_path / "fresh-home"
+    res = run_cli(
+        fresh, "import", str(dest / "p1-stella-profile-export")
+    )
+    assert res.returncode == 0
+    assert "Imported profile 'p1' with 1 project: proj." in res.stdout
+
+
+# -- T117: collision options (CLI half) ------------------------------
+
+
+def test_cli_export_force(home, tmp_path):
+    _seed_cli_home(home)
+    dest = tmp_path / "exports"
+    assert run_cli(home, "export", "p1", "proj", str(dest)).returncode == 0
+    res = run_cli(home, "export", "p1", "proj", str(dest))
+    assert res.returncode == 1
+    assert "already exists" in res.stderr
+    res = run_cli(home, "export", "p1", "proj", str(dest), "--force")
+    assert res.returncode == 0
+    assert "Exported to" in res.stdout
+
+
+def test_cli_import_as_copy_and_replace(home, tmp_path):
+    """T117: --as-copy imports under a new slug; --replace moves
+    the old project to the trash."""
+    from stella.model import Store
+
+    _seed_cli_home(home)
+    dest = tmp_path / "exports"
+    run_cli(home, "export", "p1", "proj", str(dest))
+    pkg = str(dest / "proj-stella-export")
+    res = run_cli(home, "import", pkg)
+    assert res.returncode == 1
+    assert "already exists" in res.stderr
+    res = run_cli(home, "import", pkg, "--as-copy")
+    assert res.returncode == 0
+    assert "a copy of 'proj'" in res.stdout
+    assert Store(home).get_project("p1", "proj-copy")
+    res = run_cli(home, "import", pkg, "--replace")
+    assert res.returncode == 0
+    assert "went to the trash" in res.stdout
+    assert Store(home).list_trash()
+
+
+# -- T108: second Ctrl+C force-quits ----------------------------------
+
+
+def test_cli_train_second_ctrl_c_exits_at_once(tmp_path):
+    """T108 Done: a second Ctrl+C during a run exits immediately
+    (130) instead of re-requesting the same graceful stop. The
+    stubborn driver ignores the first stop — the way a blocking
+    base download does — so only the second press can end it."""
+    import signal
+    import time
+
+    home = tmp_path / "home"
+    env = dict(os.environ)
+    env["STELLA_HOME"] = str(home)
+    proc = subprocess.Popen(
+        [sys.executable, str(ROOT / "tests" / "_ctrlc_driver.py"),
+         str(home), "stubborn"],
+        cwd=ROOT, env=env, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        time.sleep(2)
+        assert proc.poll() is None, "the fake run ended before Ctrl+C"
+        proc.send_signal(signal.SIGINT)
+        time.sleep(1)
+        assert proc.poll() is None, "the first Ctrl+C ended a stubborn run"
+        proc.send_signal(signal.SIGINT)
+        _out, err = proc.communicate(timeout=30)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate(timeout=10)
+    assert proc.returncode == 130
+    assert "Traceback" not in err
+
+
+def test_cli_train_prints_download_message(home, monkeypatch, capsys):
+    """T108 Done: the loading line is printed before the base
+    loads, so a Ctrl+C during the download is not a mystery."""
+    import stella.cli as cli_mod
+    import stella.train as train_mod
+
+    monkeypatch.setenv("STELLA_HOME", str(home))
+
+    def fake_train(*args, **kwargs):
+        kwargs["on_event"]({
+            "type": "loading",
+            "message": (
+                "Loading the base model. The first run downloads "
+                "it, and Ctrl+C takes effect when the download "
+                "finishes."
+            ),
+        })
+        return {
+            "steps": 1, "final_loss": 1.0, "trainable_params": 10,
+            "ram_estimate_gb": 0.1,
+        }
+
+    monkeypatch.setattr(train_mod, "train_project", fake_train)
+    run_cli(home, "create-profile", "p1", "--base", "test/tiny-model")
+    run_cli(home, "create-project", "p1", "proj")
+    code = cli_mod.main(["train", "p1", "proj"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "Loading the base model." in out
+    assert "Ctrl+C takes effect when the download finishes." in out
+
+
+# -- T89: --create on export-gguf (CLI half) --------------------------
+
+
+def test_cli_export_gguf_create_runs_ollama_create(
+        home, tmp_path, monkeypatch, capsys):
+    """T89: --create runs `ollama create` after the export, and
+    the manual commands are still printed."""
+    import stella.cli as cli_mod
+    import stella.gguf as gguf_mod
+
+    monkeypatch.setenv("STELLA_HOME", str(home))
+    run_cli(home, "create-profile", "p1", "--base", "test/tiny-model")
+    run_cli(home, "create-project", "p1", "proj")
+    modelfile = tmp_path / "Modelfile"
+    modelfile.write_text("FROM /tmp/model.gguf\n")
+    monkeypatch.setattr(
+        gguf_mod, "export_gguf",
+        lambda *a, **k: {
+            "merged_hf": "/tmp/merged",
+            "gguf": "/tmp/model.gguf", "quant": "Q4_K_M",
+            "gguf_bytes": 123,
+            "modelfile": str(modelfile),
+            "ollama_name": "p1-proj",
+            "ollama_create": (
+                f"ollama create p1-proj -f {modelfile}"
+            ),
+        },
+    )
+    seen = []
+    monkeypatch.setattr(
+        gguf_mod, "create_in_ollama",
+        lambda name, mf, **k: seen.append((name, str(mf))) or "created",
+    )
+    code = cli_mod.main(
+        ["export-gguf", "p1", "proj", str(tmp_path), "--create"]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "ollama create p1-proj" in out  # still printed
+    assert "Created in Ollama as p1-proj." in out
+    assert seen == [("p1-proj", str(modelfile))]

@@ -969,3 +969,100 @@ def test_subprocess_timeout_is_generous():
     from stella.gguf import SUBPROCESS_TIMEOUT_SECONDS
 
     assert SUBPROCESS_TIMEOUT_SECONDS >= 600
+
+# -- T89: one-click Ollama create after GGUF export ------------------
+
+
+def test_create_in_ollama_runs_the_command(tmp_path):
+    """T89 Done: create-after-export runs `ollama create` with the
+    exported name and Modelfile (verified against a fake Ollama)."""
+    from stella.gguf import create_in_ollama
+
+    modelfile = tmp_path / "Modelfile"
+    modelfile.write_text("FROM /tmp/model.gguf\n")
+    seen = []
+
+    def fake_ollama(cmd):
+        seen.append(cmd)
+        return "success"
+
+    out = create_in_ollama(
+        "lfm3-tool-tool-calls", modelfile, _runner=fake_ollama
+    )
+    assert out == "success"
+    assert seen == [[
+        "ollama", "create", "lfm3-tool-tool-calls",
+        "-f", str(modelfile),
+    ]]
+
+
+def test_create_in_ollama_failure_reports_the_error(tmp_path):
+    """T89 Done: a failed create shows the Ollama error plainly."""
+    from stella.gguf import create_in_ollama
+    from stella.model import StellaError
+
+    modelfile = tmp_path / "Modelfile"
+    modelfile.write_text("FROM /tmp/model.gguf\n")
+
+    def failing_ollama(cmd):
+        raise StellaError("ollama create failed: model not found")
+
+    with pytest.raises(StellaError, match="model not found"):
+        create_in_ollama(
+            "x-y", modelfile, _runner=failing_ollama
+        )
+
+
+def test_create_in_ollama_needs_a_modelfile(tmp_path):
+    """T89: no Modelfile means no create — the error says to
+    export first."""
+    from stella.gguf import create_in_ollama
+    from stella.model import StellaError
+
+    with pytest.raises(StellaError, match="no Modelfile"):
+        create_in_ollama("x-y", tmp_path / "Modelfile")
+
+
+def test_create_in_ollama_missing_binary_says_so(tmp_path, monkeypatch):
+    """T89: a missing `ollama` binary is a plain error, not a raw
+    FileNotFoundError."""
+    import shutil
+
+    from stella.gguf import create_in_ollama
+    from stella.model import StellaError
+
+    modelfile = tmp_path / "Modelfile"
+    modelfile.write_text("FROM /tmp/model.gguf\n")
+    monkeypatch.setattr(shutil, "which", lambda *a, **k: None)
+    with pytest.raises(StellaError, match="Ollama is not installed"):
+        create_in_ollama("x-y", modelfile)
+
+
+def test_create_in_ollama_cancel_kills_the_process(tmp_path):
+    """T89/T107: cancelling a create kills the Ollama process."""
+    import time
+
+    from stella.gguf import create_in_ollama
+    from stella.model import StellaError
+
+    modelfile = tmp_path / "Modelfile"
+    modelfile.write_text("FROM /tmp/model.gguf\n")
+    # A fake ollama that sleeps: the cancel must kill it promptly.
+    script = tmp_path / "ollama"
+    script.write_text(
+        "#!/bin/sh\nsleep 30\n"
+    )
+    script.chmod(0o755)
+    import os
+
+    env_path = os.environ.get("PATH", "")
+    monkeypatch_path = str(tmp_path) + os.pathsep + env_path
+    import unittest.mock as mock
+
+    with mock.patch.dict(os.environ, {"PATH": monkeypatch_path}):
+        start = time.monotonic()
+        with pytest.raises(StellaError, match="Cancelled"):
+            create_in_ollama(
+                "x-y", modelfile, should_stop=lambda: True
+            )
+    assert time.monotonic() - start < 10

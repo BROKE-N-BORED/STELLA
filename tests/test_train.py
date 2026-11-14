@@ -477,6 +477,30 @@ def _tiny_project(store, tmp_path, rows=4):
     return store
 
 
+def test_train_loading_event_names_the_download(need_torch, tmp_path):
+    """T108 Done: before the base model loads, train_project emits
+    a loading event naming the download and the Ctrl+C wait, so
+    the wait is not a mystery."""
+    from stella.model import Store
+
+    store = _tiny_project(Store(tmp_path / "home"), tmp_path)
+    events = []
+    train_project(
+        store, "tiny", "proof",
+        on_event=events.append,
+        _model_loader=tiny_model_and_tokenizer,
+        _dtype="float32",
+    )
+    loading = [e for e in events if e.get("type") == "loading"]
+    assert len(loading) == 1
+    assert "downloads it" in loading[0]["message"]
+    assert "Ctrl+C" in loading[0]["message"]
+    # It fires before the run starts.
+    assert events.index(loading[0]) < events.index(
+        next(e for e in events if e.get("type") == "started")
+    )
+
+
 def test_two_step_lora_run_saves_adapter(need_torch, tmp_path):
     from stella.model import Store
 

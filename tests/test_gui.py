@@ -39,6 +39,25 @@ def _select_session(window):
     window.set_session("lfm3-tool", "tool-calls")
 
 
+def _wait_for_job(window, qapp, timeout_ms=20000):
+    """Wait until the window's job-card worker finishes (T106:
+    export and import run off the GUI thread now, so a test that
+    asserts on the store after calling them must wait for the job
+    first). Processes events while waiting, so the finished slot
+    runs. A job that never started returns at once."""
+    from PySide6.QtTest import QTest
+
+    waited = 0
+    while True:
+        worker = window._job_worker
+        if worker is None or not worker.isRunning():
+            break
+        QTest.qWait(50)
+        waited += 50
+        assert waited < timeout_ms, "job did not finish in time"
+    qapp.processEvents()
+
+
 def _visible_texts(window):
     """Every user-visible string in the main window and every open
     dedicated window: widget text, tooltips, placeholders, window
@@ -152,7 +171,9 @@ def test_menu_bar_has_expected_menus_and_actions(window):
             "New profile...",
             "New project...",
             "Export project...",
+            "Export profile...",  # T86
             "Import package...",
+            "Check package...",  # T105
             "Run the picked job",
             "Settings...",
             "Trash...",  # T23: deleted things wait here, and are
@@ -1385,7 +1406,7 @@ def test_import_package_warns_and_refreshes_on_failure(
         QFileDialog, "getExistingDirectory", lambda *a, **k: str(pkg)
     )
     window.import_package()
-    qapp.processEvents()
+    _wait_for_job(window, qapp)
     assert warnings, "no warning dialog appeared for the bad import"
     assert "settings" in warnings[0]
     # The lists refreshed: the window still matches the disk.
@@ -3568,7 +3589,7 @@ def test_import_identical_profile_is_silent_and_says_existed(
     monkeypatch.setattr(
         QFileDialog, "getExistingDirectory", lambda *a, **k: str(pkg))
     window.import_package()
-    qapp.processEvents()
+    _wait_for_job(window, qapp)
     message = window.statusBar().currentMessage()
     assert "Imported tool-calls into lfm3-tool." in message
     assert "The profile already existed." in message
@@ -3605,7 +3626,7 @@ def test_import_differing_profile_asks_and_keeps(
         window, "_confirm_import_preview", lambda *a: (True, None)
     )
     window.import_package()
-    qapp.processEvents()
+    _wait_for_job(window, qapp)
     prof = seeded.get_profile("lfm3-tool")
     assert (prof["ollama_tag"], prof["role"]) == ("other:9b", "driver")
     message = window.statusBar().currentMessage()
@@ -3646,7 +3667,7 @@ def test_import_differing_profile_take_updates_profile(
 
     QTimer.singleShot(100, click_take)
     window.import_package()
-    qapp.processEvents()
+    _wait_for_job(window, qapp)
     prof = seeded.get_profile("lfm3-tool")
     assert (prof["ollama_tag"], prof["role"], prof["base_ref"]) == (
         "lfm3:1.7b", "fast", "lfm3:1.7b")
@@ -3914,7 +3935,7 @@ def test_import_warns_when_base_tag_not_installed(
         QFileDialog, "getExistingDirectory", lambda *a, **k: str(pkg)
     )
     window.import_package()
-    qapp.processEvents()
+    _wait_for_job(window, qapp)
     assert warnings, "no warning for the uninstalled base tag"
     assert "lfm3:1.7b" in warnings[0]
     assert "not installed" in warnings[0]
@@ -3945,7 +3966,7 @@ def test_import_silent_when_base_tag_installed(
         QFileDialog, "getExistingDirectory", lambda *a, **k: str(pkg)
     )
     window.import_package()
-    qapp.processEvents()
+    _wait_for_job(window, qapp)
     # No base warning; the only warning is the dataset's (T59).
     assert len(warnings) == 1
     assert "forge-traces.jsonl" in warnings[0]
@@ -4216,7 +4237,7 @@ def test_import_confirmation_survives_session_refresh(
         QFileDialog, "getExistingDirectory", lambda *a, **k: str(pkg)
     )
     window.import_package()
-    qapp.processEvents()
+    _wait_for_job(window, qapp)
     assert "Imported" in window.statusBar().currentMessage()
 
 
@@ -4250,7 +4271,7 @@ def test_export_offers_bundle_and_copies_dataset(
 
     QTimer.singleShot(100, click_copy)
     window.export_project()
-    qapp.processEvents()
+    _wait_for_job(window, qapp)
     pkg = dest / "tool-calls-stella-export"
     assert (pkg / "dataset" / "data.jsonl").is_file()
 
@@ -4281,7 +4302,7 @@ def test_export_reference_only_skips_dataset(
 
     QTimer.singleShot(100, click_reference)
     window.export_project()
-    qapp.processEvents()
+    _wait_for_job(window, qapp)
     pkg = dest / "tool-calls-stella-export"
     assert not (pkg / "dataset").exists()
 
@@ -4337,14 +4358,23 @@ def test_import_missing_dataset_locate_repair(
         window, "_confirm_import_preview", lambda *a: (True, None)
     )
 
+    # The locate dialog opens when the import job finishes (T106),
+    # not on a fixed delay — a repeating timer clicks it whenever
+    # it appears.
+    clicker = QTimer()
+    clicker.setInterval(50)
+
     def click_locate():
         dlg = QApplication.activeModalWidget()
-        assert dlg is not None
-        dlg._stella_locate_button.click()
+        if dlg is not None and hasattr(dlg, "_stella_locate_button"):
+            clicker.stop()
+            dlg._stella_locate_button.click()
 
-    QTimer.singleShot(100, click_locate)
+    clicker.timeout.connect(click_locate)
+    clicker.start()
     window.import_package()
-    qapp.processEvents()
+    _wait_for_job(window, qapp)
+    clicker.stop()
     assert seeded.get_project("lfm3-tool", "tool-calls")["dataset_ref"] == (
         str(data)
     )
@@ -4368,14 +4398,23 @@ def test_import_missing_dataset_not_now_keeps_ref(
         window, "_confirm_import_preview", lambda *a: (True, None)
     )
 
+    # The locate dialog opens when the import job finishes (T106),
+    # not on a fixed delay — a repeating timer clicks it whenever
+    # it appears.
+    clicker = QTimer()
+    clicker.setInterval(50)
+
     def click_later():
         dlg = QApplication.activeModalWidget()
-        assert dlg is not None
-        dlg._stella_later_button.click()
+        if dlg is not None and hasattr(dlg, "_stella_later_button"):
+            clicker.stop()
+            dlg._stella_later_button.click()
 
-    QTimer.singleShot(100, click_later)
+    clicker.timeout.connect(click_later)
+    clicker.start()
     window.import_package()
-    qapp.processEvents()
+    _wait_for_job(window, qapp)
+    clicker.stop()
     assert seeded.get_project("lfm3-tool", "tool-calls")["dataset_ref"] == (
         "forge-traces.jsonl"
     )
@@ -4482,7 +4521,7 @@ def test_import_preview_cancel_imports_nothing(
 
     QTimer.singleShot(100, click_cancel)
     window.import_package()
-    qapp.processEvents()
+    _wait_for_job(window, qapp)
     with pytest.raises(StellaError):
         seeded.get_project("lfm3-tool", "tool-calls")
 
@@ -4512,7 +4551,7 @@ def test_import_preview_confirm_imports(
 
     QTimer.singleShot(100, click_confirm)
     window.import_package()
-    qapp.processEvents()
+    _wait_for_job(window, qapp)
     assert seeded.get_project("lfm3-tool", "tool-calls")
 
 
@@ -4544,7 +4583,7 @@ def test_import_preview_take_uses_package_values(
 
     QTimer.singleShot(100, click_take_and_confirm)
     window.import_package()
-    qapp.processEvents()
+    _wait_for_job(window, qapp)
     prof = seeded.get_profile("lfm3-tool")
     assert (prof["ollama_tag"], prof["role"], prof["base_ref"]) == (
         "lfm3:1.7b", "fast", "lfm3:1.7b")
@@ -4576,7 +4615,7 @@ def test_import_preview_no_pick_keeps_local(
 
     QTimer.singleShot(100, click_confirm)
     window.import_package()
-    qapp.processEvents()
+    _wait_for_job(window, qapp)
     prof = seeded.get_profile("lfm3-tool")
     assert (prof["ollama_tag"], prof["role"]) == ("other:9b", "driver")
 
@@ -5695,3 +5734,721 @@ def test_project_window_survives_corrupt_metamorph(
     data = seeded.get_project("lfm3-tool", "tool-calls")
     assert data["metamorph"]["mode"] == "morph"
     win.close()
+
+# -- v0.18.0: export/import/clone --------------------------------------
+
+
+def test_export_runs_on_job_card_with_progress(
+    window, seeded, tmp_path, monkeypatch, qapp
+):
+    """T106 Done: the menu export runs on the job card with a
+    determinate progress bar, and the package lands."""
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QFileDialog, QMessageBox
+
+    import stella.export as export_mod
+
+    _select_session(window)
+    dest = tmp_path / "exports"
+    dest.mkdir()
+    monkeypatch.setattr(
+        QFileDialog, "getExistingDirectory", lambda *a, **k: str(dest)
+    )
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+    # A slow copy, so the card is visible mid-job.
+    real_copy = export_mod._copy_file_counted
+
+    def slow_copy(src, dst, progress):
+        import time as time_mod
+
+        time_mod.sleep(0.3)
+        return real_copy(src, dst, progress)
+
+    monkeypatch.setattr(export_mod, "_copy_file_counted", slow_copy)
+    window.export_project()
+    # The job card is visible mid-job, and the worker's progress
+    # signal reports real bytes (done > 0, total > 0).
+    seen = []
+    window._job_worker.progress.connect(
+        lambda done, total: seen.append((done, total))
+    )
+    assert window.job_card.isVisible()
+    assert window.job_card.title_label.text() == "Exporting project"
+    _wait_for_job(window, qapp)
+    assert (dest / "tool-calls-stella-export" / "manifest.json").is_file()
+    assert seen, "the export job never reported progress"
+    assert any(done > 0 and total > 0 for done, total in seen), seen
+    assert seen[-1][0] == seen[-1][1], "the bar never reached the end"
+
+
+def test_export_cancel_leaves_no_package(
+    window, seeded, tmp_path, monkeypatch, qapp
+):
+    """T106 Done: cancelling an export leaves no partial package."""
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QFileDialog, QMessageBox
+
+    import stella.export as export_mod
+
+    _select_session(window)
+    dest = tmp_path / "exports"
+    dest.mkdir()
+    monkeypatch.setattr(
+        QFileDialog, "getExistingDirectory", lambda *a, **k: str(dest)
+    )
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+    # The cancelled job warns on its finish path — a real modal
+    # would hang the test with nobody to click it.
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: None)
+    real_copy = export_mod._copy_file_counted
+
+    def slow_copy(src, dst, progress):
+        import time as time_mod
+
+        time_mod.sleep(0.5)
+        return real_copy(src, dst, progress)
+
+    monkeypatch.setattr(export_mod, "_copy_file_counted", slow_copy)
+    window.export_project()
+    # Cancel once the worker is actually running: a fixed-delay
+    # timer can fire before the thread starts under load, and the
+    # cancel would be lost. The slow copy keeps the job alive
+    # long after the worker starts.
+    for _ in range(100):
+        if window._job_worker is not None and window._job_worker.isRunning():
+            break
+        QTest.qWait(20)
+    assert window._job_worker is not None and window._job_worker.isRunning()
+    window._cancel_current_job()
+    _wait_for_job(window, qapp)
+    assert not (dest / "tool-calls-stella-export").exists()
+    assert list(dest.iterdir()) == []
+    assert "Cancelled" in window.train_log.toPlainText()
+
+
+def test_import_cancel_leaves_home_untouched(
+    window, seeded, tmp_path, monkeypatch, qapp, seed_models
+):
+    """T106 Done: cancelling an import leaves the home as it was."""
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QFileDialog, QMessageBox
+
+    import stella.export as export_mod
+    from stella.model import StellaError
+
+    seed_models(["lfm3:1.7b"])
+    # A checkpoint in the package, so the import has a real file
+    # copy to slow down: notes restore through write_notes, not
+    # the counted copy, and a payload-free package imports faster
+    # than the cancel timer.
+    ckpt = (
+        seeded.project_dir("lfm3-tool", "tool-calls")
+        / "checkpoints" / "step-10"
+    )
+    ckpt.mkdir(parents=True)
+    (ckpt / "training_state.json").write_text(
+        json.dumps({"step": 10, "epoch": 1, "loss": 0.5})
+    )
+    pkg = _source_package(tmp_path)
+    _clear_seeded_project(window, seeded)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: None)
+    monkeypatch.setattr(window, "_offer_locate_dataset", lambda *a: None)
+    monkeypatch.setattr(
+        window, "_confirm_import_preview", lambda *a: (True, None)
+    )
+    monkeypatch.setattr(
+        QFileDialog, "getExistingDirectory", lambda *a, **k: str(pkg)
+    )
+    real_copy = export_mod._copy_file_counted
+
+    def slow_copy(src, dst, progress):
+        import time as time_mod
+
+        time_mod.sleep(0.5)
+        return real_copy(src, dst, progress)
+
+    monkeypatch.setattr(export_mod, "_copy_file_counted", slow_copy)
+    window.import_package()
+    # Cancel once the worker is actually running: a fixed-delay
+    # timer can fire before the thread starts under load, and the
+    # cancel would be lost. The slow copy keeps the job alive
+    # long after the worker starts.
+    for _ in range(100):
+        if window._job_worker is not None and window._job_worker.isRunning():
+            break
+        QTest.qWait(20)
+    assert window._job_worker is not None and window._job_worker.isRunning()
+    window._cancel_current_job()
+    _wait_for_job(window, qapp)
+    with pytest.raises(StellaError):
+        seeded.get_project("lfm3-tool", "tool-calls")
+    assert "Cancelled" in window.train_log.toPlainText()
+
+
+def test_export_failure_refreshes_lists(
+    window, seeded, tmp_path, monkeypatch, qapp
+):
+    """T106 Done: a failed export warns and the window still
+    matches the disk."""
+    from PySide6.QtWidgets import QFileDialog, QMessageBox
+
+    import stella.export as export_mod
+    from stella.model import StellaError
+
+    _select_session(window)
+    dest = tmp_path / "exports"
+    dest.mkdir()
+    monkeypatch.setattr(
+        QFileDialog, "getExistingDirectory", lambda *a, **k: str(dest)
+    )
+    monkeypatch.setattr(
+        export_mod, "export_project",
+        lambda *a, **k: (_ for _ in ()).throw(
+            StellaError("disk full (test)")
+        ),
+    )
+    warnings = []
+    monkeypatch.setattr(window, "_warn", warnings.append)
+    window.export_project()
+    _wait_for_job(window, qapp)
+    assert warnings
+    assert "disk full (test)" in warnings[0]
+    assert window.tree.topLevelItemCount() == 1
+    assert window.tree.topLevelItem(0).childCount() == 1
+
+
+def test_export_overwrite_prompt_overwrites(
+    window, seeded, tmp_path, monkeypatch, qapp
+):
+    """T117 Done: exporting over an existing package asks first;
+    Overwrite replaces it."""
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import (
+        QApplication, QFileDialog, QMessageBox,
+    )
+
+    _select_session(window)
+    dest = tmp_path / "exports"
+    dest.mkdir()
+    monkeypatch.setattr(
+        QFileDialog, "getExistingDirectory", lambda *a, **k: str(dest)
+    )
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+    window.export_project()
+    _wait_for_job(window, qapp)
+    pkg = dest / "tool-calls-stella-export"
+    marker = pkg / "marker.txt"
+    marker.write_text("old package")
+    clicker = QTimer()
+    clicker.setInterval(50)
+
+    def click_overwrite():
+        dlg = QApplication.activeModalWidget()
+        if dlg is not None and hasattr(dlg, "_stella_overwrite_button"):
+            clicker.stop()
+            dlg._stella_overwrite_button.click()
+
+    clicker.timeout.connect(click_overwrite)
+    clicker.start()
+    window.export_project()
+    _wait_for_job(window, qapp)
+    clicker.stop()
+    assert (pkg / "manifest.json").is_file()
+    assert not marker.exists(), "the old package was not replaced"
+
+
+def test_export_overwrite_prompt_cancel_keeps_old(
+    window, seeded, tmp_path, monkeypatch, qapp
+):
+    """T117 Done: cancelling the overwrite prompt keeps the old
+    package and starts no job."""
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import (
+        QApplication, QFileDialog, QMessageBox,
+    )
+
+    _select_session(window)
+    dest = tmp_path / "exports"
+    dest.mkdir()
+    monkeypatch.setattr(
+        QFileDialog, "getExistingDirectory", lambda *a, **k: str(dest)
+    )
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+    window.export_project()
+    _wait_for_job(window, qapp)
+    pkg = dest / "tool-calls-stella-export"
+    marker = pkg / "marker.txt"
+    marker.write_text("old package")
+    clicker = QTimer()
+    clicker.setInterval(50)
+
+    def click_cancel():
+        dlg = QApplication.activeModalWidget()
+        if dlg is not None and hasattr(dlg, "_stella_cancel_button"):
+            clicker.stop()
+            dlg._stella_cancel_button.click()
+
+    clicker.timeout.connect(click_cancel)
+    clicker.start()
+    window.export_project()
+    qapp.processEvents()
+    clicker.stop()
+    assert marker.read_text() == "old package"
+    assert "cancelled" in window.statusBar().currentMessage().lower()
+
+
+def test_import_collision_copy(
+    window, seeded, tmp_path, monkeypatch, qapp, seed_models
+):
+    """T117 Done: importing a project that already exists offers
+    a copy; choosing it lands under a new slug."""
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import (
+        QApplication, QFileDialog, QMessageBox,
+    )
+
+    seed_models(["lfm3:1.7b"])
+    pkg = _source_package(tmp_path)
+    # The seeded project is still here: a collision.
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: None)
+    monkeypatch.setattr(window, "_offer_locate_dataset", lambda *a: None)
+    monkeypatch.setattr(
+        window, "_confirm_import_preview", lambda *a: (True, None)
+    )
+    monkeypatch.setattr(
+        QFileDialog, "getExistingDirectory", lambda *a, **k: str(pkg)
+    )
+    clicker = QTimer()
+    clicker.setInterval(50)
+
+    def click_copy():
+        dlg = QApplication.activeModalWidget()
+        if dlg is not None and hasattr(dlg, "_stella_copy_button"):
+            clicker.stop()
+            dlg._stella_copy_button.click()
+
+    clicker.timeout.connect(click_copy)
+    clicker.start()
+    window.import_package()
+    _wait_for_job(window, qapp)
+    clicker.stop()
+    assert seeded.get_project("lfm3-tool", "tool-calls-copy")
+    assert "copy of 'tool-calls'" in window.statusBar().currentMessage()
+
+
+def test_import_collision_replace_moves_old_to_trash(
+    window, seeded, tmp_path, monkeypatch, qapp, seed_models
+):
+    """T117 Done: Replace moves the old project to the trash."""
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import (
+        QApplication, QFileDialog, QMessageBox,
+    )
+
+    seed_models(["lfm3:1.7b"])
+    pkg = _source_package(tmp_path)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: None)
+    monkeypatch.setattr(window, "_offer_locate_dataset", lambda *a: None)
+    monkeypatch.setattr(
+        window, "_confirm_import_preview", lambda *a: (True, None)
+    )
+    monkeypatch.setattr(
+        QFileDialog, "getExistingDirectory", lambda *a, **k: str(pkg)
+    )
+    clicker = QTimer()
+    clicker.setInterval(50)
+
+    def click_replace():
+        dlg = QApplication.activeModalWidget()
+        if dlg is not None and hasattr(dlg, "_stella_replace_button"):
+            clicker.stop()
+            dlg._stella_replace_button.click()
+
+    clicker.timeout.connect(click_replace)
+    clicker.start()
+    window.import_package()
+    _wait_for_job(window, qapp)
+    clicker.stop()
+    assert seeded.get_project("lfm3-tool", "tool-calls")
+    assert seeded.list_trash()
+    assert "went to the trash" in window.statusBar().currentMessage()
+
+
+def test_import_collision_cancel_imports_nothing(
+    window, seeded, tmp_path, monkeypatch, qapp, seed_models
+):
+    """T117 Done: cancelling the collision dialog imports
+    nothing and starts no job."""
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import (
+        QApplication, QFileDialog, QMessageBox,
+    )
+
+    from stella.model import StellaError
+
+    seed_models(["lfm3:1.7b"])
+    pkg = _source_package(tmp_path)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: None)
+    monkeypatch.setattr(
+        window, "_confirm_import_preview", lambda *a: (True, None)
+    )
+    monkeypatch.setattr(
+        QFileDialog, "getExistingDirectory", lambda *a, **k: str(pkg)
+    )
+    clicker = QTimer()
+    clicker.setInterval(50)
+
+    def click_cancel():
+        dlg = QApplication.activeModalWidget()
+        if dlg is not None and hasattr(dlg, "_stella_cancel_button"):
+            clicker.stop()
+            dlg._stella_cancel_button.click()
+
+    clicker.timeout.connect(click_cancel)
+    clicker.start()
+    window.import_package()
+    qapp.processEvents()
+    clicker.stop()
+    assert window._job_worker is None
+    with pytest.raises(StellaError):
+        seeded.get_project("lfm3-tool", "tool-calls-copy")
+    assert "cancelled" in window.statusBar().currentMessage().lower()
+
+
+def test_export_profile_menu_includes_projects(
+    window, seeded, tmp_path, monkeypatch, qapp
+):
+    """T86 Done: Export profile with "Include projects" writes a
+    profile package carrying the project."""
+    import json as json_mod
+
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import (
+        QApplication, QFileDialog, QMessageBox,
+    )
+
+    _select_session(window)
+    assert window._menu_action_export_profile.isEnabled()
+    dest = tmp_path / "exports"
+    dest.mkdir()
+    monkeypatch.setattr(
+        QFileDialog, "getExistingDirectory", lambda *a, **k: str(dest)
+    )
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+    clicker = QTimer()
+    clicker.setInterval(50)
+
+    def click_include():
+        dlg = QApplication.activeModalWidget()
+        if dlg is not None and hasattr(dlg, "_stella_include_button"):
+            clicker.stop()
+            dlg._stella_include_button.click()
+
+    clicker.timeout.connect(click_include)
+    clicker.start()
+    window.export_profile()
+    _wait_for_job(window, qapp)
+    clicker.stop()
+    pkg = dest / "lfm3-tool-stella-profile-export"
+    manifest = json_mod.loads((pkg / "manifest.json").read_text())
+    assert manifest["kind"] == "stella-profile-export"
+    assert [p["name"] for p in manifest["projects"]] == ["tool-calls"]
+    assert (pkg / "projects" / "tool-calls").is_dir()
+
+
+def test_import_profile_package_via_gui(
+    window, seeded, tmp_path, monkeypatch, qapp, seed_models
+):
+    """T86 Done: importing a profile package through the window
+    lands the profile and its projects."""
+    from PySide6.QtWidgets import QFileDialog, QMessageBox
+
+    import stella.export as export_mod
+
+    seed_models(["lfm3:1.7b"])
+    pkg = export_mod.export_profile(
+        seeded, "lfm3-tool", tmp_path / "exports",
+        include_projects=True,
+    )
+    seeded._destroy_profile("lfm3-tool")
+    window.refresh_tree()
+    window.set_session(None, None)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: None)
+    monkeypatch.setattr(window, "_offer_locate_dataset", lambda *a: None)
+    monkeypatch.setattr(
+        window, "_confirm_import_preview", lambda *a: (True, None)
+    )
+    monkeypatch.setattr(
+        QFileDialog, "getExistingDirectory", lambda *a, **k: str(pkg)
+    )
+    window.import_package()
+    _wait_for_job(window, qapp)
+    assert seeded.get_profile("lfm3-tool")
+    assert seeded.get_project("lfm3-tool", "tool-calls")
+    assert "Imported profile lfm3-tool" in (
+        window.statusBar().currentMessage()
+    )
+
+
+def test_check_package_reports_good_and_bad(
+    window, seeded, tmp_path, monkeypatch, qapp
+):
+    """T105 Done: Check package reports the checks and imports
+    nothing."""
+    from PySide6.QtWidgets import QFileDialog, QMessageBox
+
+    import stella.export as export_mod
+
+    pkg = export_mod.export_project(
+        seeded, "lfm3-tool", "tool-calls", tmp_path / "exports"
+    )
+    seen = []
+    monkeypatch.setattr(
+        QMessageBox, "exec",
+        lambda self: seen.append(
+            (self.text(), self.informativeText())
+        ) or 0,
+    )
+    monkeypatch.setattr(
+        QFileDialog, "getExistingDirectory", lambda *a, **k: str(pkg)
+    )
+    window.check_package()
+    qapp.processEvents()
+    assert len(seen) == 1
+    assert "All checks passed" in seen[0][0]
+    assert "OK: Manifest present" in seen[0][1]
+    (pkg / "notes.md").write_bytes(b"tampered")
+    window.check_package()
+    qapp.processEvents()
+    assert len(seen) == 2
+    assert "A check failed" in seen[1][0]
+    assert "FAIL: Files match their checksums" in seen[1][1]
+    assert "notes.md" in seen[1][1]
+
+
+def test_clone_button_copies_project(
+    window, seeded, monkeypatch, qapp
+):
+    """T112 Done: the Clone button in the project window copies
+    the settings and dataset, no checkpoints, and the session
+    moves to the clone."""
+    from PySide6.QtWidgets import QInputDialog
+
+    _select_session(window)
+    win = window.open_project_window()
+    qapp.processEvents()
+    monkeypatch.setattr(
+        QInputDialog, "getText", lambda *a, **k: ("cloned-one", True)
+    )
+    clone_btn = next(
+        b for b in win.findChildren(QPushButton) if b.text() == "Clone"
+    )
+    clone_btn.click()
+    qapp.processEvents()
+    clone = seeded.get_project("lfm3-tool", "cloned-one")
+    assert clone["settings"] == seeded.get_project(
+        "lfm3-tool", "tool-calls"
+    )["settings"]
+    assert window._current_project == "cloned-one"
+    assert "Cloned tool-calls as cloned-one." in (
+        window.statusBar().currentMessage()
+    )
+    win.close()
+
+
+def test_new_project_template_picker(
+    window, seeded, monkeypatch, qapp
+):
+    """T112 Done: the New Project dialog's template picker starts
+    a project from the LFM3 tool-format template — and shows no
+    training settings (T16)."""
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QApplication, QDialog
+
+    from stella.model import metamorph_mode
+
+    _select_session(window)
+
+    def fill_and_accept():
+        dlg = QApplication.activeModalWidget()
+        assert dlg is not None
+        assert dlg.template_combo.itemText(0).startswith("No template")
+        # No settings anywhere in the picker: names and plain
+        # words only.
+        texts = [
+            dlg.template_combo.itemText(i)
+            for i in range(dlg.template_combo.count())
+        ]
+        assert not any(
+            "rank" in t or "learning" in t for t in texts
+        )
+        dlg.name_edit.setText("tool-try")
+        index = dlg.template_combo.findData("lfm3-tool-format")
+        assert index > 0
+        dlg.template_combo.setCurrentIndex(index)
+        assert "tool call" in dlg.description_label.text().lower()
+        dlg.accept()
+
+    QTimer.singleShot(100, fill_and_accept)
+    window.new_project()
+    qapp.processEvents()
+    proj = seeded.get_project("lfm3-tool", "tool-try")
+    assert proj["dataset_ref"] == "sample-tool-calls.jsonl"
+    assert metamorph_mode(proj) == "both"
+    assert proj["settings"]["rank"] == 8
+
+
+def test_new_project_blank_start_still_works(
+    window, seeded, monkeypatch, qapp
+):
+    """T112: "No template: start blank" creates a plain project,
+    as before."""
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QApplication
+
+    _select_session(window)
+
+    def fill_and_accept():
+        dlg = QApplication.activeModalWidget()
+        assert dlg is not None
+        assert dlg.template_combo.currentData() is None
+        dlg.name_edit.setText("blank-one")
+        dlg.accept()
+
+    QTimer.singleShot(100, fill_and_accept)
+    window.new_project()
+    qapp.processEvents()
+    proj = seeded.get_project("lfm3-tool", "blank-one")
+    assert proj["dataset_ref"] == ""
+
+
+def test_gguf_job_shows_phase_progress(
+    window, seeded, tmp_path, monkeypatch, qapp
+):
+    """T107 Done: the GGUF job's bar moves per phase (merge 1 of
+    3, convert 2 of 3, quantize 3 of 3)."""
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QFileDialog
+
+    import stella.gguf as gguf_mod
+
+    _select_session(window)
+    dest = tmp_path / "gguf"
+    dest.mkdir()
+    monkeypatch.setattr(
+        QFileDialog, "getExistingDirectory", lambda *a, **k: str(dest)
+    )
+    seen = []
+
+    def fake_export(store, profile, project, out, **kwargs):
+        import time as time_mod
+
+        on_event = kwargs.get("on_event")
+        for phase in ("merge", "convert", "quantize"):
+            on_event(
+                {"type": "phase", "phase": phase,
+                 "message": f"{phase}..."}
+            )
+            time_mod.sleep(0.2)
+        return {
+            "gguf": str(dest / "model.gguf"), "gguf_bytes": 123,
+            "ollama_create": "ollama create x -f Modelfile",
+        }
+
+    monkeypatch.setattr(gguf_mod, "export_gguf", fake_export)
+    window.export_gguf_gui()
+    for _ in range(100):
+        QTest.qWait(50)
+        value = window.job_card.progress.value()
+        if value and value not in seen:
+            seen.append(value)
+        if window._job_worker is not None and not window._job_worker.isRunning():
+            break
+    _wait_for_job(window, qapp)
+    assert window.job_card.progress.maximum() == 3
+    assert 1 in seen and 2 in seen and 3 in seen, seen
+
+
+def test_probe_job_shows_per_prompt_progress(
+    window, seeded, monkeypatch, qapp
+):
+    """T107 Done: the probe job's bar moves per prompt."""
+    from PySide6.QtTest import QTest
+
+    import stella.probe as probe_mod
+    from stella.gui import ProbeResultsDialog
+
+    seeded.create_profile("probe-seat", role="vision",
+                          base_ref="test/tiny-model")
+    seeded.create_project("probe-seat", "proj")
+    window.set_session("probe-seat", "proj")
+    qapp.processEvents()
+    monkeypatch.setattr(
+        ProbeResultsDialog, "exec", lambda self: 0
+    )
+
+    def fake_probe(store, profile, project, **kwargs):
+        import time as time_mod
+
+        on_event = kwargs.get("on_event")
+        for phase in ("before", "after"):
+            for done in (1, 2):
+                on_event(
+                    {"type": "prompt", "phase": phase,
+                     "done": done, "total": 2}
+                )
+                time_mod.sleep(0.15)
+        result = _probe_result(mode="informational")
+        result["profile"] = profile
+        result["project"] = project
+        return result
+
+    monkeypatch.setattr(probe_mod, "probe_project", fake_probe)
+    window.run_probe_gui()
+    seen = []
+    for _ in range(100):
+        QTest.qWait(50)
+        value = window.job_card.progress.value()
+        if value and value not in seen:
+            seen.append(value)
+        if window._job_worker is not None and not window._job_worker.isRunning():
+            break
+    _wait_for_job(window, qapp)
+    assert seen, "the probe job never moved the bar"
+
+
+def test_create_in_ollama_button(
+    window, seeded, tmp_path, monkeypatch, qapp
+):
+    """T89 Done: Create in Ollama is greyed out with no export,
+    live with one, and runs `ollama create` on the job card."""
+    import json as json_mod
+
+    from PySide6.QtWidgets import QFileDialog
+
+    import stella.gguf as gguf_mod
+
+    _select_session(window)
+    window._refresh_go()
+    assert window.train_create_ollama_btn.isEnabled() is False
+    modelfile = tmp_path / "Modelfile"
+    modelfile.write_text("FROM /tmp/model.gguf\n")
+    (
+        seeded.project_dir("lfm3-tool", "tool-calls") / "gguf-export.json"
+    ).write_text(json_mod.dumps({
+        "ollama_name": "lfm3-tool-tool-calls",
+        "modelfile": str(modelfile),
+    }))
+    window._refresh_go()
+    assert window.train_create_ollama_btn.isEnabled() is True
+    seen = []
+    monkeypatch.setattr(
+        gguf_mod, "create_in_ollama",
+        lambda name, mf, **k: seen.append((name, str(mf))) or "created",
+    )
+    window.train_create_ollama_btn.click()
+    _wait_for_job(window, qapp)
+    assert seen == [("lfm3-tool-tool-calls", str(modelfile))]
+    assert "Created in Ollama as lfm3-tool-tool-calls." in (
+        window.statusBar().currentMessage()
+    )

@@ -434,6 +434,76 @@ def convert_to_gguf(
     }
 
 
+def create_in_ollama(
+    name: str,
+    modelfile: str | Path,
+    *,
+    should_stop=None,
+    timeout: float | None = None,
+    _runner=None,
+) -> str:
+    """Run `ollama create <name> -f <Modelfile>` (T89): the last
+    step of the fine-tune loop, one click instead of a copy-paste
+    into a terminal. Returns Ollama's output on success. A failed
+    create raises StellaError with Ollama's own error, plainly —
+    and a missing `ollama` binary says so instead of failing as a
+    raw FileNotFoundError. `should_stop` cancels a long create
+    (the process is killed); `timeout` bounds the wait like the
+    converter timeout. `_runner` is the test hook: (cmd) -> output.
+    """
+    import time
+
+    modelfile = Path(modelfile).expanduser()
+    if not modelfile.is_file():
+        raise StellaError(
+            f"no Modelfile at {modelfile}. Export to GGUF again "
+            "first."
+        )
+    cmd = ["ollama", "create", name, "-f", str(modelfile)]
+    if _runner is not None:
+        return _runner(cmd)
+    if shutil.which("ollama") is None:
+        raise StellaError(
+            "Ollama is not installed, or not on PATH. Install it "
+            "first, then create the model again."
+        )
+    deadline = None if timeout is None else time.monotonic() + timeout
+    try:
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True,
+        )
+    except OSError as exc:
+        raise StellaError(f"could not run ollama: {exc}") from exc
+    try:
+        while True:
+            try:
+                out, err = proc.communicate(timeout=0.2)
+                break
+            except subprocess.TimeoutExpired:
+                if should_stop is not None and should_stop():
+                    proc.kill()
+                    proc.wait()
+                    raise StellaError("Cancelled.")
+                if deadline is not None and time.monotonic() >= deadline:
+                    proc.kill()
+                    proc.wait()
+                    raise StellaError(
+                        "ollama create timed out after "
+                        f"{_timeout_text(timeout)}. Try again."
+                    )
+    except KeyboardInterrupt:
+        proc.kill()
+        proc.wait()
+        raise
+    if proc.returncode != 0:
+        detail = ((err or out) or "").strip()
+        raise StellaError(
+            f"ollama create failed: {detail or 'no error reported'}"
+        )
+    return (out or "").strip()
+
+
 def write_modelfile(
     gguf_path: str | Path,
     out_path: str | Path,
@@ -635,25 +705,29 @@ def export_gguf(
         _modelfile, command = write_modelfile(
             gguf_path, dest / "Modelfile", name=model_name
         )
+        record = {
+            "profile": profile,
+            "project": project,
+            "base_ref": base_ref,
+            "adapter": str(adapter_dir),
+            "merged_hf": str(merged_dir),
+            "gguf": str(gguf_path),
+            "quant": quant,
+            "gguf_bytes": result["bytes"],
+            "warnings": warnings,
+            "ollama_name": model_name,
+            "ollama_create": command,
+            "modelfile": str(dest / "Modelfile"),
+        }
         (dest / "gguf-export.json").write_text(
-            json.dumps(
-                {
-                    "profile": profile,
-                    "project": project,
-                    "base_ref": base_ref,
-                    "adapter": str(adapter_dir),
-                    "merged_hf": str(merged_dir),
-                    "gguf": str(gguf_path),
-                    "quant": quant,
-                    "gguf_bytes": result["bytes"],
-                    "warnings": warnings,
-                    "ollama_name": model_name,
-                    "ollama_create": command,
-                },
-                indent=2,
-                sort_keys=True,
-            )
-            + "\n",
+            json.dumps(record, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        # The same record in the project dir (T89): the window's
+        # "Create in Ollama" button reads it, so the last export's
+        # Modelfile is one click away without re-picking a folder.
+        (project_dir / "gguf-export.json").write_text(
+            json.dumps(record, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
         store.update_project(profile, project, status="exported")

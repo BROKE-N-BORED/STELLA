@@ -230,25 +230,25 @@ def test_export_missing_metamorph_key(seeded, tmp_path):
 
 
 def test_export_failure_leaves_no_partial_package(seeded, tmp_path, monkeypatch):
-    import shutil
-
     # A checkpoint file exists, so the copy step runs — and fails.
     ckpt = seeded.project_dir("lfm3-tool", "tool-calls") / "checkpoints"
     (ckpt / "step-1.safetensors").write_bytes(b"fake-weights")
     dest = tmp_path / "exports"
     dest.mkdir()
-    real_copy2 = shutil.copy2
+    # T106: copies go through the counted copy seam, so the
+    # failure is injected there (it used to be shutil.copy2).
+    real_copy = export_mod._copy_file_counted
 
     def boom(*args, **kwargs):
         raise OSError("disk went away")
 
-    monkeypatch.setattr(shutil, "copy2", boom)
+    monkeypatch.setattr(export_mod, "_copy_file_counted", boom)
     with pytest.raises(OSError):
         export_mod.export_project(seeded, "lfm3-tool", "tool-calls", dest)
     # No package folder, no staging dir left behind — and a retry
     # works once the disk is back.
     assert list(dest.iterdir()) == []
-    monkeypatch.setattr(shutil, "copy2", real_copy2)
+    monkeypatch.setattr(export_mod, "_copy_file_counted", real_copy)
     out = export_mod.export_project(seeded, "lfm3-tool", "tool-calls", dest)
     assert (out / "checkpoints" / "step-1.safetensors").is_file()
 
@@ -353,27 +353,24 @@ def test_import_normalizes_uppercase_names(seeded, tmp_path):
 def test_import_rolls_back_on_late_failure(seeded, tmp_path, monkeypatch):
     # Even a failure AFTER the profile is created (here: the
     # checkpoints copy dies) rolls the home back to how it was.
-    import shutil
-
     out = export_mod.export_project(seeded, "lfm3-tool", "tool-calls", tmp_path)
     fresh = Store(tmp_path / "fresh-home")
-    real_copy2 = shutil.copy2
-    calls = {"n": 0}
+    # T106: copies go through the counted copy seam, so the
+    # failure is injected there (it used to be shutil.copy2).
+    real_copy = export_mod._copy_file_counted
 
     def boom_once(*args, **kwargs):
-        calls["n"] += 1
         raise OSError("disk went away")
 
-    # Let the first copy (notes) through, fail on checkpoints? The
-    # import copies checkpoints before notes — fail everything and
-    # the rollback still has to remove the created profile.
-    monkeypatch.setattr(shutil, "copy2", boom_once)
+    # The import copies checkpoints before notes — fail the copy
+    # and the rollback still has to remove the created profile.
+    monkeypatch.setattr(export_mod, "_copy_file_counted", boom_once)
     (out / "checkpoints" / "step-1.bin").write_bytes(b"x")
     with pytest.raises(OSError):
         export_mod.import_export(fresh, out)
     assert fresh.list_profiles() == []
     assert _home_snapshot(fresh) == {}
-    monkeypatch.setattr(shutil, "copy2", real_copy2)
+    monkeypatch.setattr(export_mod, "_copy_file_counted", real_copy)
 
 
 # -- T40: versioned format + named kinds -----------------------------
@@ -429,12 +426,14 @@ def test_package_kinds_are_defined_in_one_place():
 
 
 def test_verify_names_a_known_but_unimportable_kind(seeded, tmp_path):
+    # T86: the profile kind IS importable now — the recipe kind is
+    # the one this Stella cannot import yet.
     out = export_mod.export_project(seeded, "lfm3-tool", "tool-calls", tmp_path)
-    _rewrite_manifest(out, lambda m: m.update(kind="stella-profile-export"))
+    _rewrite_manifest(out, lambda m: m.update(kind="stella-recipe-export"))
     with pytest.raises(StellaError) as exc:
         export_mod.verify_export(out)
-    assert "profile package" in str(exc.value)
-    assert "only import project packages" in str(exc.value)
+    assert "recipe package" in str(exc.value)
+    assert "only import project and profile packages" in str(exc.value)
 
 
 def test_verify_rejects_unknown_kind(seeded, tmp_path):
@@ -1017,3 +1016,569 @@ def test_verify_rejects_wrong_type_metamorph(seeded, tmp_path, bad):
     _corrupt_manifest(out, lambda m: m["project"].update(metamorph=bad))
     with pytest.raises(StellaError, match="must be an object"):
         export_mod.verify_export(out)
+
+# -- T104: checksums + sizes in the manifest -------------------------
+
+
+def test_manifest_lists_hash_and_size_per_file(seeded, tmp_path):
+    """T104 Done: the manifest lists a hash + size per file."""
+    import hashlib
+
+    _plant_adapter(seeded)
+    ckpt = seeded.project_dir("lfm3-tool", "tool-calls") / "checkpoints"
+    (ckpt / "step-100.safetensors").write_bytes(b"fake-weights")
+    out = export_mod.export_project(seeded, "lfm3-tool", "tool-calls", tmp_path)
+    manifest = json.loads((out / "manifest.json").read_text())
+    files = manifest["files"]
+    assert files["checkpoints/step-100.safetensors"]["size"] == 12
+    assert files["checkpoints/step-100.safetensors"]["sha256"] == (
+        hashlib.sha256(b"fake-weights").hexdigest()
+    )
+    assert files["weights/adapter_model.safetensors"]["size"] == (
+        len(b"fake-adapter-bytes")
+    )
+    assert "notes.md" in files
+    assert "README.md" in files
+    # The manifest cannot hash itself.
+    assert "manifest.json" not in files
+    for entry in files.values():
+        assert len(entry["sha256"]) == 64
+        assert isinstance(entry["size"], int) and entry["size"] >= 0
+
+
+def test_import_refuses_truncated_checkpoint(seeded, tmp_path):
+    """T104 Done: a checkpoint truncated from 800 bytes to 4 is
+    refused on import, naming the file — and the home is untouched."""
+    ckpt = seeded.project_dir("lfm3-tool", "tool-calls") / "checkpoints"
+    (ckpt / "step-100.safetensors").write_bytes(b"x" * 800)
+    out = export_mod.export_project(seeded, "lfm3-tool", "tool-calls", tmp_path)
+    (out / "checkpoints" / "step-100.safetensors").write_bytes(b"FAKE")
+    fresh = Store(tmp_path / "fresh-home")
+    with pytest.raises(StellaError) as exc:
+        export_mod.import_export(fresh, out)
+    assert "step-100.safetensors" in str(exc.value)
+    assert _home_snapshot(fresh) == {}
+
+
+def test_import_refuses_missing_listed_file(seeded, tmp_path):
+    """T104: a file the manifest lists but the package lost is
+    refused, naming the file."""
+    out = export_mod.export_project(seeded, "lfm3-tool", "tool-calls", tmp_path)
+    (out / "notes.md").unlink()
+    fresh = Store(tmp_path / "fresh-home")
+    with pytest.raises(StellaError) as exc:
+        export_mod.import_export(fresh, out)
+    assert "notes.md" in str(exc.value)
+    assert "incomplete" in str(exc.value)
+
+
+def test_import_accepts_legacy_package_without_files(seeded, tmp_path):
+    """T104: a package with no file list (made before v0.18)
+    still imports — there is just nothing to check."""
+    out = export_mod.export_project(seeded, "lfm3-tool", "tool-calls", tmp_path)
+    _rewrite_manifest(out, lambda m: m.pop("files"))
+    fresh = Store(tmp_path / "fresh-home")
+    result = export_mod.import_export(fresh, out)
+    assert result["project"] == "tool-calls"
+
+
+def test_bundled_dataset_is_hashed(seeded, tmp_path):
+    """T104: the bundled dataset (T59) is covered too — corrupting
+    it refuses the import."""
+    pdir = seeded.project_dir("lfm3-tool", "tool-calls")
+    data = pdir / "my-data.jsonl"
+    data.write_text('{"prompt": "a", "completion": "b"}\n', encoding="utf-8")
+    seeded.update_project(
+        "lfm3-tool", "tool-calls", dataset_ref="my-data.jsonl"
+    )
+    out = export_mod.export_project(
+        seeded, "lfm3-tool", "tool-calls", tmp_path, bundle_dataset=True
+    )
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert "dataset/my-data.jsonl" in manifest["files"]
+    (out / "dataset" / "my-data.jsonl").write_bytes(b"corrupt")
+    fresh = Store(tmp_path / "fresh-home")
+    with pytest.raises(StellaError) as exc:
+        export_mod.import_export(fresh, out)
+    assert "my-data.jsonl" in str(exc.value)
+
+
+# -- T105: a verify command (engine half) ----------------------------
+
+
+def test_check_export_good_package_reports_all_pass(seeded, tmp_path):
+    """T105 Done: a good package reports all checks pass."""
+    out = export_mod.export_project(seeded, "lfm3-tool", "tool-calls", tmp_path)
+    report = export_mod.check_export(out)
+    assert report["ok"] is True
+    assert report["kind"] == "stella-export"
+    assert report["manifest"]["project"]["name"] == "tool-calls"
+    assert report["checks"]
+    assert all(c["passed"] for c in report["checks"])
+    names = [c["name"] for c in report["checks"]]
+    assert names == [
+        "Manifest present",
+        "Manifest is valid JSON",
+        "Package kind is known",
+        "Format is supported",
+        "Manifest shape is valid",
+        "Files match their checksums",
+    ]
+
+
+def test_check_export_bad_package_names_failing_check(seeded, tmp_path):
+    """T105 Done: a bad package names the failing check."""
+    ckpt = seeded.project_dir("lfm3-tool", "tool-calls") / "checkpoints"
+    (ckpt / "step-1.bin").write_bytes(b"real-bytes")
+    out = export_mod.export_project(seeded, "lfm3-tool", "tool-calls", tmp_path)
+    (out / "checkpoints" / "step-1.bin").write_bytes(b"FAKE")
+    report = export_mod.check_export(out)
+    assert report["ok"] is False
+    failed = [c for c in report["checks"] if not c["passed"]]
+    assert len(failed) == 1
+    assert failed[0]["name"] == "Files match their checksums"
+    assert "step-1.bin" in failed[0]["detail"]
+    # The earlier checks passed: the report shows where it stopped.
+    assert report["checks"][0]["passed"] is True
+
+
+def test_check_export_no_manifest_names_the_check(tmp_path):
+    """T105: a folder with no manifest fails the first check."""
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    report = export_mod.check_export(empty)
+    assert report["ok"] is False
+    assert report["checks"][0]["name"] == "Manifest present"
+    assert report["checks"][0]["passed"] is False
+    assert report["manifest"] is None
+
+
+def test_check_export_imports_nothing(seeded, tmp_path):
+    """T105 Done: verify never imports, good package or bad."""
+    out = export_mod.export_project(seeded, "lfm3-tool", "tool-calls", tmp_path)
+    fresh = Store(tmp_path / "fresh-home")
+    assert export_mod.check_export(out)["ok"] is True
+    assert _home_snapshot(fresh) == {}
+
+
+def test_check_export_legacy_package_passes_with_a_note(seeded, tmp_path):
+    """T105: a package with no checksums passes, with the
+    checksum step noting there was nothing to check."""
+    out = export_mod.export_project(seeded, "lfm3-tool", "tool-calls", tmp_path)
+    _rewrite_manifest(out, lambda m: m.pop("files"))
+    report = export_mod.check_export(out)
+    assert report["ok"] is True
+    last = report["checks"][-1]
+    assert last["name"] == "Files match their checksums"
+    assert last["passed"] is True
+    assert "before checksums" in last["detail"]
+
+
+def test_format_check_report_lines(seeded, tmp_path):
+    """T105: the shared report text is one line per check, and
+    says nothing was imported either way."""
+    out = export_mod.export_project(seeded, "lfm3-tool", "tool-calls", tmp_path)
+    text = export_mod.format_check_report(export_mod.check_export(out))
+    assert "OK: Manifest present" in text
+    assert "OK: Files match their checksums" in text
+    assert "All checks passed. Nothing was imported." in text
+    (out / "notes.md").write_bytes(b"tampered")
+    text = export_mod.format_check_report(export_mod.check_export(out))
+    assert "FAIL: Files match their checksums" in text
+    assert "A check failed. Nothing was imported." in text
+    assert "\u2014" not in text
+
+
+# -- T86: export a profile on its own --------------------------------
+
+
+def test_export_profile_without_projects_round_trip(tmp_path):
+    """T86 Done: export a project-less profile, delete it, import
+    the package: the profile returns with tag, role, base, and
+    settings intact."""
+    src = Store(tmp_path / "src-home")
+    src.create_profile(
+        "solo", ollama_tag="lfm3:1.7b", role="fast",
+        display_name="Solo Seat", base_ref="LiquidAI/LFM3-1.7B",
+        config={"ctx": 8192}, dependencies=["torch"],
+    )
+    out = export_mod.export_profile(src, "solo", tmp_path)
+    assert out.name == "solo-stella-profile-export"
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert manifest["kind"] == "stella-profile-export"
+    assert manifest["projects"] == []
+    assert manifest["profile"]["ollama_tag"] == "lfm3:1.7b"
+    assert manifest["profile"]["role"] == "fast"
+    src.delete_profile("solo")
+    with pytest.raises(StellaError):
+        src.get_profile("solo")
+    result = export_mod.import_export(src, out)
+    assert result["profile"] == "solo"
+    assert result["projects"] == []
+    prof = src.get_profile("solo")
+    assert prof["ollama_tag"] == "lfm3:1.7b"
+    assert prof["role"] == "fast"
+    assert prof["base_ref"] == "LiquidAI/LFM3-1.7B"
+    assert prof["display_name"] == "Solo Seat"
+    assert prof["config"] == {"ctx": 8192}
+    assert prof["dependencies"] == ["torch"]
+
+
+def test_export_profile_with_projects_round_trip(seeded, tmp_path):
+    """T86 Done: export with projects includes them — settings,
+    mode, dataset, notes, and checkpoints all come back."""
+    _plant_adapter(seeded)
+    ckpt = seeded.project_dir("lfm3-tool", "tool-calls") / "checkpoints"
+    (ckpt / "step-1").mkdir()
+    (ckpt / "step-1" / "training_state.json").write_text('{"step": 1}')
+    seeded.write_notes("lfm3-tool", "tool-calls", "first run notes\n")
+    out = export_mod.export_profile(
+        seeded, "lfm3-tool", tmp_path, include_projects=True
+    )
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert manifest["kind"] == "stella-profile-export"
+    assert [p["name"] for p in manifest["projects"]] == ["tool-calls"]
+    assert manifest["projects"][0]["metamorph"]["mode"] == "both"
+    fresh = Store(tmp_path / "fresh-home")
+    result = export_mod.import_export(fresh, out)
+    assert result["projects"] == ["tool-calls"]
+    proj = fresh.get_project("lfm3-tool", "tool-calls")
+    src_proj = seeded.get_project("lfm3-tool", "tool-calls")
+    assert proj["settings"] == src_proj["settings"]
+    assert proj["dataset_ref"] == "forge-traces.jsonl"
+    from stella.model import metamorph_mode
+
+    assert metamorph_mode(proj) == "both"
+    assert fresh.read_notes("lfm3-tool", "tool-calls") == "first run notes\n"
+    assert (
+        fresh.project_dir("lfm3-tool", "tool-calls")
+        / "checkpoints" / "step-1" / "training_state.json"
+    ).is_file()
+    assert (
+        fresh.project_dir("lfm3-tool", "tool-calls")
+        / "adapter" / "adapter_model.safetensors"
+    ).is_file()
+
+
+def test_export_profile_refuses_existing_dir(seeded, tmp_path):
+    export_mod.export_profile(seeded, "lfm3-tool", tmp_path)
+    with pytest.raises(StellaError, match="already exists"):
+        export_mod.export_profile(seeded, "lfm3-tool", tmp_path)
+
+
+def test_export_profile_force_overwrites(seeded, tmp_path):
+    """T117: --force works for profile exports too."""
+    export_mod.export_profile(seeded, "lfm3-tool", tmp_path)
+    out = export_mod.export_profile(
+        seeded, "lfm3-tool", tmp_path, force=True
+    )
+    assert (out / "manifest.json").is_file()
+
+
+def test_corrupt_profile_package_refused(seeded, tmp_path):
+    """T86 Done: a corrupt profile package is refused with a
+    readable error."""
+    ckpt = seeded.project_dir("lfm3-tool", "tool-calls") / "checkpoints"
+    (ckpt / "step-1.bin").write_bytes(b"real-bytes")
+    out = export_mod.export_profile(
+        seeded, "lfm3-tool", tmp_path, include_projects=True
+    )
+    payload = out / "projects" / "tool-calls" / "checkpoints" / "step-1.bin"
+    payload.write_bytes(b"FAKE")
+    fresh = Store(tmp_path / "fresh-home")
+    with pytest.raises(StellaError) as exc:
+        export_mod.import_export(fresh, out)
+    assert "step-1.bin" in str(exc.value)
+    assert _home_snapshot(fresh) == {}
+
+
+def test_import_profile_refuses_existing_project(seeded, tmp_path):
+    """T86/T117: a profile import refuses while one of its
+    projects already exists, naming it — and changes nothing."""
+    out = export_mod.export_profile(
+        seeded, "lfm3-tool", tmp_path, include_projects=True
+    )
+    before = _home_snapshot(seeded)
+    with pytest.raises(StellaError) as exc:
+        export_mod.import_export(seeded, out)
+    assert "tool-calls" in str(exc.value)
+    assert _home_snapshot(seeded) == before
+
+
+def test_import_profile_export_rejects_project_package(seeded, tmp_path):
+    """import_profile_export on a project package says so plainly."""
+    out = export_mod.export_project(seeded, "lfm3-tool", "tool-calls", tmp_path)
+    fresh = Store(tmp_path / "fresh-home")
+    with pytest.raises(StellaError, match="project package"):
+        export_mod.import_profile_export(fresh, out)
+
+
+def test_preview_profile_package(seeded, tmp_path):
+    """T86: the preview covers a profile package: kind, projects,
+    contents, and which projects already exist here."""
+    _plant_adapter(seeded)
+    out = export_mod.export_profile(
+        seeded, "lfm3-tool", tmp_path, include_projects=True
+    )
+    fresh = Store(tmp_path / "fresh-home")
+    summary = export_mod.preview_export(fresh, out)
+    assert summary["kind"] == "stella-profile-export"
+    assert summary["profile"] == "lfm3-tool"
+    assert summary["projects"] == ["tool-calls"]
+    assert summary["project_count"] == 1
+    assert summary["weights"] is True
+    assert summary["existing_projects"] == []
+    text = export_mod.format_preview(summary)
+    assert "Profile lfm3-tool." in text
+    assert "Projects in this package (1): tool-calls." in text
+    assert "\u2014" not in text
+    # Against the seeded home the project already exists.
+    summary2 = export_mod.preview_export(seeded, out)
+    assert summary2["existing_projects"] == ["tool-calls"]
+    assert "Already here" in export_mod.format_preview(summary2)
+
+
+# -- T117: collision options -----------------------------------------
+
+
+def test_export_force_overwrites(seeded, tmp_path):
+    """T117 Done: export over an existing folder with --force
+    replaces it."""
+    out = export_mod.export_project(seeded, "lfm3-tool", "tool-calls", tmp_path)
+    assert (out / "manifest.json").is_file()
+    out2 = export_mod.export_project(
+        seeded, "lfm3-tool", "tool-calls", tmp_path, force=True
+    )
+    assert out2 == out
+    assert (out2 / "manifest.json").is_file()
+
+
+def test_import_as_copy(seeded, tmp_path):
+    """T117 Done: import of an existing project as a copy lands
+    under a new slug, with the same settings — the original is
+    untouched."""
+    out = export_mod.export_project(seeded, "lfm3-tool", "tool-calls", tmp_path)
+    result = export_mod.import_export(seeded, out, collision="copy")
+    assert result["project"] == "tool-calls-copy"
+    assert result["collision"] == "copy"
+    assert result["copy_of"] == "tool-calls"
+    copy = seeded.get_project("lfm3-tool", "tool-calls-copy")
+    orig = seeded.get_project("lfm3-tool", "tool-calls")
+    assert copy["settings"] == orig["settings"]
+    assert copy["dataset_ref"] == orig["dataset_ref"]
+    assert copy["display_name"] == "tool-calls-copy"
+    # The original is untouched.
+    assert orig["display_name"] == "tool-calls"
+
+
+def test_import_as_copy_numbers_further_copies(seeded, tmp_path):
+    out = export_mod.export_project(seeded, "lfm3-tool", "tool-calls", tmp_path)
+    export_mod.import_export(seeded, out, collision="copy")
+    result = export_mod.import_export(seeded, out, collision="copy")
+    assert result["project"] == "tool-calls-copy-2"
+
+
+def test_suggest_copy_name(seeded):
+    assert export_mod.suggest_copy_name(
+        seeded, "lfm3-tool", "tool-calls"
+    ) == "tool-calls-copy"
+    seeded.create_project("lfm3-tool", "tool-calls-copy")
+    assert export_mod.suggest_copy_name(
+        seeded, "lfm3-tool", "tool-calls"
+    ) == "tool-calls-copy-2"
+
+
+def test_import_replace_backs_up_to_trash(seeded, tmp_path):
+    """T117 Done: replace moves the old project to the trash, so
+    it is recoverable after the replace."""
+    seeded.write_notes("lfm3-tool", "tool-calls", "old notes\n")
+    out = export_mod.export_project(seeded, "lfm3-tool", "tool-calls", tmp_path)
+    # The package now holds "old notes"; change the live project
+    # so the replace is visible.
+    seeded.write_notes("lfm3-tool", "tool-calls", "newer notes\n")
+    result = export_mod.import_export(seeded, out, collision="replace")
+    assert result["project"] == "tool-calls"
+    assert result["collision"] == "replace"
+    assert "replaced_trash" in result
+    assert seeded.read_notes("lfm3-tool", "tool-calls") == "old notes\n"
+    trash = seeded.list_trash()
+    assert len(trash) == 1
+    assert trash[0]["kind"] == "project"
+    assert trash[0]["project"] == "tool-calls"
+    from pathlib import Path as _Path
+
+    assert _Path(result["replaced_trash"]).is_dir()
+
+
+def test_import_replace_failure_restores_old(seeded, tmp_path, monkeypatch):
+    """T117: a replace that fails midway puts the old project back
+    — a failed replace loses nothing."""
+    # A checkpoint file, so the restore has a copy to fail on.
+    ckpt = seeded.project_dir("lfm3-tool", "tool-calls") / "checkpoints"
+    (ckpt / "step-1.bin").write_bytes(b"weights")
+    out = export_mod.export_project(seeded, "lfm3-tool", "tool-calls", tmp_path)
+    real_copy = export_mod._copy_file_counted
+
+    def boom(*args, **kwargs):
+        raise OSError("disk went away")
+
+    monkeypatch.setattr(export_mod, "_copy_file_counted", boom)
+    with pytest.raises(OSError):
+        export_mod.import_export(seeded, out, collision="replace")
+    monkeypatch.setattr(export_mod, "_copy_file_counted", real_copy)
+    # The old project is back in place, and nothing lingers in trash.
+    assert seeded.get_project("lfm3-tool", "tool-calls")
+    assert seeded.list_trash() == []
+
+
+def test_import_collision_refused_without_choice(seeded, tmp_path):
+    """T117: with no choice, a collision is still refused — but
+    the refusal names the choices."""
+    out = export_mod.export_project(seeded, "lfm3-tool", "tool-calls", tmp_path)
+    with pytest.raises(StellaError) as exc:
+        export_mod.import_export(seeded, out)
+    assert "already exists" in str(exc.value)
+    assert "as a copy" in str(exc.value)
+    assert "replace" in str(exc.value)
+
+
+def test_import_collision_callback_decides(seeded, tmp_path):
+    """T117: the conflict callback's answer decides the import."""
+    out = export_mod.export_project(seeded, "lfm3-tool", "tool-calls", tmp_path)
+    seen = []
+    result = export_mod.import_export(
+        seeded, out,
+        on_project_conflict=lambda s, p: seen.append((s, p)) or "copy",
+    )
+    assert seen == [("lfm3-tool", "tool-calls")]
+    assert result["project"] == "tool-calls-copy"
+    with pytest.raises(StellaError, match="cancelled"):
+        export_mod.import_export(
+            seeded, out, on_project_conflict=lambda s, p: "cancel"
+        )
+
+
+def test_import_rejects_bad_collision(seeded, tmp_path):
+    out = export_mod.export_project(seeded, "lfm3-tool", "tool-calls", tmp_path)
+    with pytest.raises(StellaError, match="collision must be"):
+        export_mod.import_export(seeded, out, collision="merge")
+
+
+def test_preview_reports_project_existed(seeded, tmp_path):
+    """T117: the preview says whether the project is already here,
+    so the import can offer the choice before it starts."""
+    out = export_mod.export_project(seeded, "lfm3-tool", "tool-calls", tmp_path)
+    assert export_mod.preview_export(seeded, out)["project_existed"] is True
+    fresh = Store(tmp_path / "fresh-home")
+    assert export_mod.preview_export(fresh, out)["project_existed"] is False
+
+
+# -- T118: preserve timestamps ---------------------------------------
+
+
+def test_timestamps_round_trip(seeded, tmp_path):
+    """T118 Done: export then import keeps created / updated."""
+    import json as json_mod
+
+    prof_path = (
+        seeded.profile_dir("lfm3-tool") / "profile.json"
+    )
+    prof_data = json_mod.loads(prof_path.read_text())
+    prof_data["created"] = "2026-11-01T10:00:00+00:00"
+    prof_data["updated"] = "2026-11-02T11:00:00+00:00"
+    prof_path.write_text(json_mod.dumps(prof_data))
+    proj_path = (
+        seeded.project_dir("lfm3-tool", "tool-calls") / "project.json"
+    )
+    proj_data = json_mod.loads(proj_path.read_text())
+    proj_data["created"] = "2026-11-03T12:00:00+00:00"
+    proj_data["updated"] = "2026-11-04T13:00:00+00:00"
+    proj_path.write_text(json_mod.dumps(proj_data))
+    out = export_mod.export_project(seeded, "lfm3-tool", "tool-calls", tmp_path)
+    fresh = Store(tmp_path / "fresh-home")
+    export_mod.import_export(fresh, out)
+    prof = fresh.get_profile("lfm3-tool")
+    assert prof["created"] == "2026-11-01T10:00:00+00:00"
+    assert prof["updated"] == "2026-11-02T11:00:00+00:00"
+    proj = fresh.get_project("lfm3-tool", "tool-calls")
+    assert proj["created"] == "2026-11-03T12:00:00+00:00"
+    assert proj["updated"] == "2026-11-04T13:00:00+00:00"
+
+
+def test_exported_at_present(seeded, tmp_path):
+    """T118 Done: the manifest stamps when the package was made."""
+    out = export_mod.export_project(seeded, "lfm3-tool", "tool-calls", tmp_path)
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert manifest["exported_at"]
+    assert manifest["exported_at"].startswith("2026-")
+
+
+# -- T106: progress, cancel, and refresh on failure (engine half) ----
+
+
+def test_export_progress_reports_bytes(seeded, tmp_path):
+    """T106: an export reports (done, total) bytes as it copies."""
+    _plant_adapter(seeded)
+    ckpt = seeded.project_dir("lfm3-tool", "tool-calls") / "checkpoints"
+    (ckpt / "step-1.bin").write_bytes(b"x" * 5000)
+    seen = []
+    export_mod.export_project(
+        seeded, "lfm3-tool", "tool-calls", tmp_path,
+        on_progress=lambda done, total: seen.append((done, total)),
+    )
+    assert seen
+    totals = {total for _done, total in seen}
+    assert len(totals) == 1
+    total = totals.pop()
+    assert total > 5000
+    assert seen[-1][0] == total
+    dones = [done for done, _ in seen]
+    assert dones == sorted(dones)
+
+
+def test_export_cancel_leaves_no_partial_package(seeded, tmp_path):
+    """T106 Done: cancelling mid-copy leaves no partial package —
+    no export folder, no staging dir."""
+    _plant_adapter(seeded)
+    ckpt = seeded.project_dir("lfm3-tool", "tool-calls") / "checkpoints"
+    (ckpt / "step-1.bin").write_bytes(b"x" * 5000)
+    dest = tmp_path / "exports"
+    dest.mkdir()
+    state = {"calls": 0}
+
+    def stop_after_first(*_a):
+        state["calls"] += 1
+        return state["calls"] > 1
+
+    with pytest.raises(StellaError, match="Cancelled"):
+        export_mod.export_project(
+            seeded, "lfm3-tool", "tool-calls", dest,
+            should_stop=stop_after_first,
+        )
+    assert list(dest.iterdir()) == []
+
+
+def test_import_cancel_leaves_home_untouched(seeded, tmp_path):
+    """T106 Done: cancelling an import rolls it back — the home
+    is exactly as it was."""
+    _plant_adapter(seeded)
+    out = export_mod.export_project(seeded, "lfm3-tool", "tool-calls", tmp_path)
+    fresh = Store(tmp_path / "fresh-home")
+    with pytest.raises(StellaError, match="Cancelled"):
+        export_mod.import_export(fresh, out, should_stop=lambda: True)
+    assert _home_snapshot(fresh) == {}
+
+
+def test_import_progress_reports_bytes(seeded, tmp_path):
+    """T106: an import reports (done, total) bytes as it copies."""
+    _plant_adapter(seeded)
+    out = export_mod.export_project(seeded, "lfm3-tool", "tool-calls", tmp_path)
+    fresh = Store(tmp_path / "fresh-home")
+    seen = []
+    export_mod.import_export(
+        fresh, out,
+        on_progress=lambda done, total: seen.append((done, total)),
+    )
+    assert seen
+    assert seen[-1][0] == seen[-1][1]
+    assert seen[-1][1] > 0

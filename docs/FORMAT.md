@@ -50,7 +50,7 @@ export never become two formats:
 | `kind` | What it is | Status |
 |---|---|---|
 | `stella-export` | Project package: one profile block + one project | Importable now |
-| `stella-profile-export` | Profile package: a profile with all its projects (T86) | Defined, not importable yet |
+| `stella-profile-export` | Profile package: a profile with all its projects (T86) | Importable since v0.18.0 |
 | `stella-recipe-export` | Recipe package: a reusable training recipe (T170) | Defined, not importable yet |
 
 Importing a known kind this Stella cannot import yet says what the
@@ -62,9 +62,10 @@ export.
 
 ```json
 {
-  "stella_version": "0.13.0",
+  "stella_version": "0.18.0",
   "format": 1,
   "kind": "stella-export",
+  "exported_at": "2026-11-14T11:00:00Z",
   "profile": {
     "name": "lfm3-tool",
     "display_name": "LFM3 Tool Seat",
@@ -73,7 +74,9 @@ export.
     "base_ref": "LiquidAI/LFM3-1.7B",
     "processor": "",
     "config": {},
-    "dependencies": []
+    "dependencies": [],
+    "created": "2026-11-12T09:00:00Z",
+    "updated": "2026-11-14T10:00:00Z"
   },
   "project": {
     "name": "tool-calls",
@@ -81,7 +84,13 @@ export.
     "dataset_ref": "forge-traces.jsonl",
     "settings": {"rank": 8, "learning_rate": 0.0002, "...": "..."},
     "metamorph": {"mode": "morph", "notes": ""},
-    "status": "draft"
+    "status": "draft",
+    "created": "2026-11-12T09:05:00Z",
+    "updated": "2026-11-14T10:00:00Z"
+  },
+  "files": {
+    "README.md": {"size": 512, "sha256": "…"},
+    "notes.md": {"size": 40, "sha256": "…"}
   }
 }
 ```
@@ -98,6 +107,32 @@ export.
 - `project.settings` holds the training settings; the model
   validates their values on import, before anything is created,
   so a bad value cannot strand a half-created profile behind it.
+- `exported_at` (v0.18.0, T118) is when the package was made, in
+  UTC ISO form. `profile.created` / `profile.updated` and
+  `project.created` / `project.updated` are the records' own
+  stamps, restored on import; a package without them imports as
+  before, with fresh stamps.
+- `files` (v0.18.0, T104) lists every file in the package except
+  `manifest.json` itself, each with its size in bytes and its
+  SHA-256 hex digest — the adapter, checkpoints, notes, probe
+  results, sleep cycles, and the bundled dataset when one
+  travels with the package. Import verifies every listed file:
+  a missing file refuses the import as incomplete, a changed
+  file refuses it as damaged, both naming the file. Extra files
+  not in the list are ignored. A package with no `files` list
+  (written before v0.18.0) imports as before, unverified.
+
+## Profile packages (v0.18.0, T86)
+
+A profile package is a folder `<profile>-stella-profile-export/`
+with the same manifest shape, except the `project` block is
+replaced by a `projects` list of project blocks, and each
+project's payload (weights, checkpoints, notes, probe results,
+sleep) lives under `projects/<slug>/`. Datasets are referenced,
+never bundled. A profile package with no projects carries an
+empty list. Import restores the profile and every project in
+one atomic step; it refuses while any of the package's projects
+already exist in that profile, naming them.
 
 ## Import rules
 
@@ -106,7 +141,11 @@ export.
   compared with the local one (tag, role, base): identical blocks
   import silently; differing blocks ask (keep local, or take the
   package's) instead of silently dropping the package's values.
-- The project must not already exist in that profile.
+- The project must not already exist in that profile — unless the
+  user chooses otherwise (v0.18.0, T117): import as a copy under
+  a new slug (`<name>-copy`, then `-copy-2`, ...), or replace,
+  moving the old project to the trash first. With no choice the
+  import refuses, naming the options.
 - Import is atomic: a failure anywhere leaves the home exactly as
   it was (a profile created by a failed import is removed again).
 - `weights/` and `probe_results.json` round-trip: the adapter and
