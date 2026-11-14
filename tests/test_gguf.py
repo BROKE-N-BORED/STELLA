@@ -1066,3 +1066,97 @@ def test_create_in_ollama_cancel_kills_the_process(tmp_path):
                 "x-y", modelfile, should_stop=lambda: True
             )
     assert time.monotonic() - start < 10
+
+
+# -- v0.20.0: T153 (export estimate) + T152 (merge loading event) ------
+
+
+def _estimable_export_project(tmp_path, total_size=3_460_000_000):
+    """A project with a trained adapter on a local fake model —
+    the export estimate runs entirely offline against it."""
+    from stella.model import Store
+
+    model_dir = tmp_path / "model"
+    model_dir.mkdir(parents=True)
+    (model_dir / "config.json").write_text(json.dumps({
+        "hidden_size": 2048, "num_hidden_layers": 24,
+        "intermediate_size": 8192, "torch_dtype": "bfloat16",
+    }))
+    (model_dir / "model.safetensors.index.json").write_text(json.dumps({
+        "metadata": {"total_size": total_size},
+    }))
+    store = Store(tmp_path / "home")
+    store.create_profile("p1", base_ref=str(model_dir))
+    store.create_project("p1", "proj")
+    adapter = store.project_dir("p1", "proj") / "adapter"
+    adapter.mkdir()
+    (adapter / "adapter_config.json").write_text("{}\n")
+    return store
+
+
+def test_estimate_export_names_merged_output_and_time(tmp_path):
+    # T153 Done: the estimate names the merged size, the output
+    # size, and a rough time — from metadata only, no model load.
+    from stella.gguf import estimate_export, format_export_estimate
+
+    store = _estimable_export_project(tmp_path)
+    estimate = estimate_export(store, "p1", "proj")
+    assert estimate["merged_bytes"] == 3_460_000_000
+    # 1.73B params at Q4_K_M's 4.85 bits per weight.
+    assert estimate["gguf_bytes"] == int(1_730_000_000 * 4.85 / 8)
+    assert estimate["disk_bytes"] == (
+        estimate["merged_bytes"] + estimate["gguf_bytes"]
+    )
+    assert estimate["quant"] == "Q4_K_M"
+    assert estimate["time_note"]
+    text = format_export_estimate(estimate)
+    assert "3.2 GB" in text  # merged
+    assert "1000 MB" in text  # GGUF output
+    assert "Q4_K_M" in text
+    assert "roughly" in text.lower()
+
+
+def test_estimate_export_refuses_without_adapter(tmp_path):
+    # T153: with nothing trained there is nothing to estimate.
+    from stella.gguf import estimate_export
+    from stella.model import Store
+
+    store = Store(tmp_path / "home")
+    store.create_profile("p1", base_ref="somewhere/model")
+    store.create_project("p1", "proj")
+    with pytest.raises(StellaError, match="no trained adapter"):
+        estimate_export(store, "p1", "proj")
+
+
+def test_merge_adapter_emits_loading_with_model_name(tmp_path):
+    # T152: the merge says which model it is loading, before it
+    # loads it.
+    pytest.importorskip("torch", reason="training stack not installed")
+    from test_train import FakeTokenizer, tiny_model_and_tokenizer
+
+    adapter_dir = tmp_path / "adapter"
+    adapter_dir.mkdir()
+    (adapter_dir / "adapter_config.json").write_text("{}\n")
+
+    def loader(base_ref, adapter):
+        fresh, tok = tiny_model_and_tokenizer()
+        from peft import LoraConfig, get_peft_model
+
+        wrapped = get_peft_model(
+            fresh,
+            LoraConfig(
+                r=2, lora_alpha=4, target_modules=["c_attn", "c_proj"],
+                task_type="CAUSAL_LM",
+            ),
+        )
+        return wrapped, tok
+
+    events = []
+    merge_adapter(
+        "test/tiny-model", adapter_dir, tmp_path / "merged",
+        _model_loader=loader, _dtype="float32", on_event=events.append,
+    )
+    loading = [e for e in events if e.get("type") == "loading"]
+    assert len(loading) == 1
+    assert loading[0]["model"] == "test/tiny-model"
+    assert "test/tiny-model" in loading[0]["message"]

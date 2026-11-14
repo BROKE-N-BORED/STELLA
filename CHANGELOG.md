@@ -1,5 +1,77 @@
 # Changelog
 
+## v0.20.0 — 2026-11-14
+
+The training-engine + checkpoints slice (audit tasks T150, T151,
+T152, T153, T155, T156, T157, T158, T159; T154 stays superseded
+by T16 — settings stay under the hood): checkpoints are managed
+(resume from a picked one, delete, prune, disk usage), past runs
+have a history with their loss curves, the window says which
+model it is loading, the export button shows what the export
+will cost, the val split is stable under dataset growth,
+multi-turn rows train every assistant turn, tool results fit
+the dataset format, big datasets are streamed and sized before
+they tokenize, and the final checkpoint is saved once.
+
+- T150 — checkpoint management: the list shows step, loss, size,
+  and date per row, with total disk usage underneath; clicking
+  one fills a detail view (step, loss, size, date). Resume from
+  selected continues from that checkpoint (`train_project`
+  takes `from_checkpoint`; the CLI's `train --from-checkpoint`
+  matches the GGUF flag). Delete and prune are permanent — the
+  point is freeing disk, and the trash does not free disk — and
+  both confirm first with the size shown, defaulting to No.
+  Prune keeps the newest N (spinbox, default 3) and reports
+  the size before and after plus the space freed.
+- T151 — run history: the log now opens each run with a
+  run_started record (settings snapshot stored, never
+  displayed — T16) and closes it with run_finished, so
+  `list_runs` rebuilds past runs (date, steps, final loss)
+  from the log; older logs split on a step that goes down, as
+  before. The Train panel's Past runs list shows one row per
+  run, and picking one draws that run's loss curve in the
+  chart. The log view renders the run records as friendly
+  lines, never raw JSON.
+- T152 — loading feedback: the training loading event names
+  the model ("Loading <base>..."), and the same shape covers
+  the probe's two loads (before, then after with the adapter)
+  and the export merge — the window and the terminal both say
+  which model is loading, from Start until the first step.
+- T153 — the export estimate: `estimate_export` (metadata
+  only, no model load) names the merged size, the GGUF output
+  size for the quant, and a rough time band. It shows beside
+  the Export GGUF button once a project has an adapter, in the
+  export preview dialog at the commit point, and in the log
+  line that starts the job.
+- T155 — stable val sets: `split_dataset` assigns val
+  membership by hashing each row's content (SHA-256, seed
+  salted, namespaced), so adding rows never moves an old row
+  between train and val. The at-least-one-val / at-least-one-
+  train guards stay (the one exception to stability: a dataset
+  with no row under the threshold validates on its lowest-hash
+  row, and a new lower-hash row can take that slot).
+- T156 — every assistant turn trains: `tokenize_example`
+  segments a multi-turn row per turn (through the chat template
+  when it segments cleanly, through the plain renderer
+  otherwise) and unmasks each assistant turn, each user /
+  system / tool turn masked. Single-turn rows take the original
+  path, unchanged. Truncation cuts from the left, keeping the
+  most recent turns and the final turn's end tokens.
+- T157 — the "tool" role validates in messages rows and renders
+  as masked prompt content: the model learns from the assistant
+  turns around the tool results, not from the results.
+- T158 — dataset-size awareness: validation streams line by
+  line (`iter_dataset_rows`, `stream_dataset_info`), so the
+  health check never holds the file; a dataset over 10 MB or
+  5,000 rows warns before tokenization with its size; and a
+  dataset that would not fit alongside the model is refused
+  with both numbers named (`check_dataset_fit`, reusing the
+  RAM estimator).
+- T159 — the final checkpoint is saved once: when the last step
+  is a checkpoint step, the in-loop save already wrote it, so
+  the final save (and its event) is skipped — 3 steps with
+  checkpoint_steps=1 emits exactly 3 checkpoint events.
+
 ## v0.19.0 — 2026-11-14
 
 The profiles/roles/chrome slice (audit tasks T114, T115, T116,

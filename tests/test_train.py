@@ -177,8 +177,10 @@ def test_check_dataset_ok_counts_split_and_previews(seeded, tmp_path):
     check = check_dataset(seeded, "lfm3-tool", "tool-calls", str(path))
     assert check["status"] == "ok"
     assert check["count"] == 10
-    assert check["train"] == 9
-    assert check["val"] == 1
+    # The content-hash split (T155): 2 of these 10 rows hash under
+    # the 10% threshold, so 8 train and 2 validate.
+    assert check["train"] == 8
+    assert check["val"] == 2
     assert check["format"] == "messages"
     assert check["preview"] == ["Question 0?", "Question 1?", "Question 2?"]
     assert check["error"] is None
@@ -233,11 +235,15 @@ def test_sample_dataset_validates():
 # -- splits ---------------------------------------------------------
 
 def test_split_deterministic_and_sized():
+    # T155: the split is by content hash now, not a shuffle — the
+    # same rows always split the same way, and the counts follow
+    # from the hashes (3 of these 20 rows fall under 10%), not
+    # from a rounded quota.
     examples = prompt_rows(20)
     train_a, val_a = split_dataset(examples, 0.1, 42)
     train_b, val_b = split_dataset(examples, 0.1, 42)
-    assert len(train_a) == 18
-    assert len(val_a) == 2
+    assert len(train_a) == 17
+    assert len(val_a) == 3
     assert train_a == train_b
     assert val_a == val_b
     assert len({id(e) for e in train_a + val_a}) == 20
@@ -1719,12 +1725,12 @@ def test_estimate_run_fits_small_model(tmp_path):
     estimate = estimate_run(store, "p1", "proj")
     assert estimate["fits"] is True
     assert estimate["ram_gb"] < 8.0
-    # 20 rows, 2 held out: 18 train, batch 1, grad_accum 8 ->
-    # 3 steps/epoch x 3 epochs.
+    # 20 rows, 3 held out by the content-hash split (T155):
+    # 17 train, batch 1, grad_accum 8 -> 3 steps/epoch x 3 epochs.
     assert estimate["steps"] == 9
     assert estimate["dataset_count"] == 20
-    assert estimate["train_examples"] == 18
-    assert estimate["val_examples"] == 2
+    assert estimate["train_examples"] == 17
+    assert estimate["val_examples"] == 3
     assert estimate["disk_bytes"] > estimate["base_bytes"]
     assert estimate["time_note"]
 
@@ -2180,3 +2186,543 @@ def test_training_artifacts_record_default_mode(need_torch, tmp_path):
         (adapter_dir / "training_summary.json").read_text()
     )
     assert saved["metamorph_mode"] == "morph"
+
+
+# -- v0.20.0: T150-T159 (training-engine + checkpoints slice) --------
+
+
+def _norm_rows(rows):
+    """prompt_rows normalized the way load_dataset normalizes them."""
+    return [
+        {"messages": [
+            {"role": "user", "content": r["prompt"]},
+            {"role": "assistant", "content": r["completion"]},
+        ]}
+        for r in rows
+    ]
+
+
+def test_split_stable_when_rows_added():
+    # T155 Done: growth from n=20 to n=30 never changes the val
+    # membership of the existing rows.
+    rows = _norm_rows(prompt_rows(30))
+    _, val_20 = split_dataset(rows[:20], 0.1, 42)
+    _, val_30 = split_dataset(rows, 0.1, 42)
+    assert {id(e) for e in val_20} <= {id(e) for e in val_30}
+    _, val_25 = split_dataset(rows[:25], 0.1, 42)
+    assert {id(e) for e in val_20} <= {id(e) for e in val_25}
+
+
+def test_split_same_row_same_side_regardless_of_position():
+    # T155: membership depends on the row's content, not where it
+    # sits in the file — shuffling the order keeps every row on
+    # its side.
+    rows = _norm_rows(prompt_rows(20))
+    train_a, val_a = split_dataset(rows, 0.1, 42)
+    train_b, val_b = split_dataset(list(reversed(rows)), 0.1, 42)
+    assert {id(e) for e in val_a} == {id(e) for e in val_b}
+    assert {id(e) for e in train_a} == {id(e) for e in train_b}
+
+
+def test_tool_role_validates(tmp_path):
+    # T157: a messages row with a tool turn validates.
+    rows = [
+        {
+            "messages": [
+                {"role": "user", "content": "What is 2+2?"},
+                {"role": "assistant", "content": "Let me compute."},
+                {"role": "tool", "content": "4"},
+                {"role": "assistant", "content": "It is 4."},
+            ]
+        },
+        {
+            "messages": [
+                {"role": "user", "content": "And 3+3?"},
+                {"role": "assistant", "content": "6."},
+            ]
+        },
+    ]
+    path = write_dataset(tmp_path / "d.jsonl", rows)
+    examples, info = load_dataset(path)
+    assert info["count"] == 2
+    assert examples[0]["messages"][2]["role"] == "tool"
+
+
+def _trained_ids(out):
+    """The unmasked (trained) token ids of a tokenized example,
+    in order."""
+    return [t for t in out["labels"] if t != -100]
+
+
+def _contains(sub, seq):
+    """True when `sub` appears as a contiguous run inside `seq`."""
+    if not sub:
+        return True
+    return any(seq[i:i + len(sub)] == sub for i in range(len(seq) - len(sub) + 1))
+
+
+def test_tokenize_multi_turn_trains_every_assistant_turn():
+    # T156 Done: a 2-turn conversation trains both assistant turns
+    # (plain tokenizer, no chat template).
+    from stella.train import tokenize_example
+
+    example = {
+        "messages": [
+            {"role": "user", "content": "Question one?"},
+            {"role": "assistant", "content": "Answer one."},
+            {"role": "user", "content": "Question two?"},
+            {"role": "assistant", "content": "Answer two."},
+        ]
+    }
+    tok = FakeTokenizer()
+    out = tokenize_example(tok, example, 256)
+    trained = _trained_ids(out)
+    # Both assistant turns train, neither user turn does. (The
+    # fake tokenizer's decode shifts characters, so the checks
+    # run on token ids, not decoded text.)
+    assert _contains(tok.encode(" Answer one."), trained)
+    assert _contains(tok.encode(" Answer two."), trained)
+    assert not _contains(tok.encode("Question one?"), trained)
+    assert not _contains(tok.encode("Question two?"), trained)
+    assert out["truncated"] is False
+
+
+def test_tokenize_multi_turn_with_template_trains_both_turns():
+    # T156 through a chat template: both assistant turns unmasked,
+    # both user turns masked, each turn ending with the template's
+    # terminator.
+    from stella.train import tokenize_example
+
+    example = {
+        "messages": [
+            {"role": "user", "content": "Question one?"},
+            {"role": "assistant", "content": "Answer one."},
+            {"role": "user", "content": "Question two?"},
+            {"role": "assistant", "content": "Answer two."},
+        ]
+    }
+    tok = TemplateTokenizer()
+    out = tokenize_example(tok, example, 256)
+    # Both turn ends are trained tokens (labels, not -100).
+    ends = [
+        i for i, t in enumerate(out["input_ids"])
+        if t == TemplateTokenizer.IM_END
+    ]
+    assert len(ends) == 4  # user ends + assistant ends
+    trained_ends = [
+        i for i in ends if out["labels"][i] != -100
+    ]
+    assert len(trained_ends) == 2  # the two assistant turns only
+    # The row ends with the last turn's terminator plus the
+    # template's turn separator newline.
+    assert out["input_ids"][-2] == TemplateTokenizer.IM_END
+    assert out["truncated"] is False
+
+
+def test_tokenize_tool_trace_masks_tool_turn():
+    # T156 + T157: a tool trace trains the assistant turns around
+    # the tool result, never the result itself.
+    from stella.train import tokenize_example
+
+    example = {
+        "messages": [
+            {"role": "user", "content": "What is 2+2?"},
+            {"role": "assistant", "content": "Let me compute."},
+            {"role": "tool", "content": "TOOLRESULT4"},
+            {"role": "assistant", "content": "It is 4."},
+        ]
+    }
+    tok = FakeTokenizer()
+    out = tokenize_example(tok, example, 256)
+    trained = _trained_ids(out)
+    assert _contains(tok.encode(" Let me compute."), trained)
+    assert _contains(tok.encode(" It is 4."), trained)
+    assert not _contains(tok.encode("TOOLRESULT4"), trained)
+
+
+def test_tokenize_single_turn_unchanged():
+    # T156: a single-turn row tokenizes exactly as before — the
+    # prompt is masked, the completion (plus EOS) is trained.
+    from stella.train import tokenize_example
+
+    example = {
+        "messages": [
+            {"role": "user", "content": "Question?"},
+            {"role": "assistant", "content": "Answer."},
+        ]
+    }
+    tok = FakeTokenizer()
+    out = tokenize_example(tok, example, 64)
+    assert out["input_ids"][-1] == tok.eos_token_id
+    assert out["labels"][-1] == tok.eos_token_id
+    trained = _trained_ids(out)
+    assert trained == tok.encode(" Answer.") + [tok.eos_token_id]
+    assert out["truncated"] is False
+
+
+def test_tokenize_multi_turn_truncation_keeps_last_turn():
+    # T156: an over-long multi-turn row keeps the most recent
+    # turn and reports the cut.
+    from stella.train import tokenize_example
+
+    example = {
+        "messages": [
+            {"role": "user", "content": "Q1?"},
+            {"role": "assistant", "content": "A" * 100},
+            {"role": "user", "content": "Q2?"},
+            {"role": "assistant", "content": "Last answer."},
+        ]
+    }
+    tok = FakeTokenizer()
+    out = tokenize_example(tok, example, 32)
+    assert len(out["input_ids"]) == 32
+    assert out["truncated"] is True
+    trained = _trained_ids(out)
+    assert _contains(tok.encode(" Last answer."), trained)
+    assert trained[-1] == tok.eos_token_id
+
+
+def test_stream_dataset_info_matches_load_dataset(tmp_path):
+    # T158: the streaming check reports the same shape as the
+    # whole-file load — counts, split, preview, tokens.
+    from stella.train import stream_dataset_info
+
+    path = write_dataset(tmp_path / "d.jsonl", message_rows(10))
+    examples, info = load_dataset(path)
+    streamed = stream_dataset_info(path)
+    assert streamed["count"] == info["count"] == 10
+    assert streamed["format"] == info["format"] == "messages"
+    assert streamed["train"] == 8
+    assert streamed["val"] == 2
+    assert streamed["preview"] == [
+        "Question 0?", "Question 1?", "Question 2?",
+    ]
+    assert streamed["est_tokens"] == (
+        (info["avg_prompt_chars"] + info["avg_completion_chars"])
+        * len(examples)
+    ) // 4
+    assert streamed["bytes"] == path.stat().st_size
+
+
+def test_stream_dataset_info_names_bad_line(tmp_path):
+    # T158: streaming validation still names the bad line.
+    from stella.train import stream_dataset_info
+
+    path = tmp_path / "d.jsonl"
+    path.write_text(
+        '{"prompt": "a", "completion": "b"}\nnot json\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(StellaError, match="line 2"):
+        stream_dataset_info(path)
+
+
+def test_stream_dataset_info_low_memory(tmp_path):
+    # T158 Done: a multi-MB dataset validates without holding the
+    # file — tracemalloc peak stays far under the file size.
+    import tracemalloc
+
+    from stella.train import stream_dataset_info
+
+    path = tmp_path / "big.jsonl"
+    with path.open("w", encoding="utf-8") as fh:
+        for i in range(2000):
+            fh.write(json.dumps({
+                "prompt": f"Question {i}? " + "x" * 1000,
+                "completion": f"Answer {i}.",
+            }) + "\n")
+    file_bytes = path.stat().st_size
+    assert file_bytes > 2 * 1024 * 1024
+    tracemalloc.start()
+    try:
+        info = stream_dataset_info(path)
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert info["count"] == 2000
+    assert peak < file_bytes // 4
+
+
+def test_dataset_fit_refuses_when_it_wont_fit():
+    # T158: training + dataset over the ceiling is refused with
+    # both numbers named; under it passes.
+    from stella.train import RAM_LIMIT_BYTES, check_dataset_fit
+
+    with pytest.raises(StellaError, match="would not fit alongside"):
+        check_dataset_fit(7 * 1024**3, 2 * 1024**3)
+    check_dataset_fit(1 * 1024**3, 2 * 1024**3)
+    assert RAM_LIMIT_BYTES == 8 * 1024**3
+
+
+def test_large_dataset_warns_before_training(need_torch, tmp_path):
+    # T158: a dataset over the row warning line warns (event)
+    # before tokenization runs.
+    from stella.model import Store
+    from stella.train import DATASET_WARN_ROWS
+
+    store = _tiny_project(Store(tmp_path / "home"), tmp_path)
+    rows = prompt_rows(DATASET_WARN_ROWS + 1)
+    data = write_dataset(tmp_path / "big.jsonl", rows)
+    store.update_project("tiny", "proof", dataset_ref=str(data))
+    events = []
+    train_project(
+        store, "tiny", "proof",
+        max_steps=1,
+        on_event=events.append,
+        _model_loader=tiny_model_and_tokenizer,
+        _dtype="float32",
+    )
+    warnings = [
+        e for e in events
+        if e.get("type") == "warning"
+        and "large" in e.get("message", "")
+    ]
+    assert len(warnings) == 1
+    assert f"{DATASET_WARN_ROWS + 1:,}" in warnings[0]["message"]
+
+
+def test_final_checkpoint_not_double_saved(need_torch, tmp_path):
+    # T159 Done: a 3-step run with checkpoint_steps=1 emits exactly
+    # 3 checkpoint events, one per step, and 3 dirs on disk.
+    from stella.model import Store
+
+    store = _tiny_project(Store(tmp_path / "home"), tmp_path)
+    events = []
+    train_project(
+        store, "tiny", "proof",
+        on_event=events.append,
+        _model_loader=tiny_model_and_tokenizer,
+        _dtype="float32",
+    )
+    steps = [
+        e["step"] for e in events if e.get("type") == "checkpoint"
+    ]
+    assert steps == [1, 2, 3]
+    checkpoints = list_checkpoints(store, "tiny", "proof")
+    assert [c["step"] for c in checkpoints] == [1, 2, 3]
+
+
+def test_list_checkpoints_reports_size_and_date(tmp_path):
+    # T150: each checkpoint carries its disk size and save date.
+    import time
+
+    from stella.model import Store
+    from stella.train import _dir_size_bytes
+
+    store = Store(tmp_path / "home")
+    store.create_profile("p1")
+    store.create_project("p1", "proj")
+    ckpt = (
+        store.project_dir("p1", "proj") / "checkpoints" / "step-5"
+    )
+    ckpt.mkdir(parents=True)
+    (ckpt / "training_state.json").write_text(
+        json.dumps({"step": 5, "epoch": 1, "loss": 1.5})
+    )
+    (ckpt / "adapter_model.safetensors").write_bytes(b"x" * 1000)
+    (ckpt / "optimizer.pt").write_bytes(b"y" * 500)
+    before = time.time()
+    checkpoints = list_checkpoints(store, "p1", "proj")
+    assert len(checkpoints) == 1
+    ck = checkpoints[0]
+    assert ck["step"] == 5
+    assert ck["loss"] == 1.5
+    assert ck["size_bytes"] == _dir_size_bytes(ckpt)
+    assert ck["size_bytes"] >= 1500
+    assert 0 < ck["modified"] <= before + 1
+
+
+def test_delete_checkpoint_frees_disk(tmp_path):
+    # T150: delete removes the dir and reports the freed bytes.
+    from stella.model import Store
+    from stella.train import delete_checkpoint
+
+    store = Store(tmp_path / "home")
+    store.create_profile("p1")
+    store.create_project("p1", "proj")
+    ckpt = (
+        store.project_dir("p1", "proj") / "checkpoints" / "step-5"
+    )
+    ckpt.mkdir(parents=True)
+    (ckpt / "training_state.json").write_text(
+        json.dumps({"step": 5, "epoch": 1})
+    )
+    (ckpt / "adapter_model.safetensors").write_bytes(b"x" * 1000)
+    result = delete_checkpoint(store, "p1", "proj", 5)
+    assert result["step"] == 5
+    assert result["freed_bytes"] >= 1000
+    assert not ckpt.exists()
+    with pytest.raises(StellaError, match="no checkpoint step-5"):
+        delete_checkpoint(store, "p1", "proj", 5)
+
+
+def test_prune_checkpoints_keeps_newest_n(tmp_path):
+    # T150: pruning keeps the newest N and reports the size
+    # before and after plus the space freed.
+    from stella.model import Store
+    from stella.train import prune_checkpoints
+
+    store = Store(tmp_path / "home")
+    store.create_profile("p1")
+    store.create_project("p1", "proj")
+    base = store.project_dir("p1", "proj") / "checkpoints"
+    for step in (1, 2, 3, 4, 5):
+        d = base / f"step-{step}"
+        d.mkdir(parents=True)
+        (d / "training_state.json").write_text(
+            json.dumps({"step": step, "epoch": 1})
+        )
+        (d / "adapter_model.safetensors").write_bytes(b"x" * 100)
+    result = prune_checkpoints(store, "p1", "proj", keep=3)
+    assert result["kept"] == [3, 4, 5]
+    assert result["deleted"] == [1, 2]
+    assert result["freed_bytes"] > 0
+    assert result["total_after"] == result["total_before"] - result["freed_bytes"]
+    assert not (base / "step-1").exists()
+    assert (base / "step-5").exists()
+    assert list_checkpoints(store, "p1", "proj")[0]["step"] == 3
+
+
+def test_prune_checkpoints_refuses_keep_zero(tmp_path):
+    # T150: pruning to zero would destroy every resume point.
+    from stella.model import Store
+    from stella.train import prune_checkpoints
+
+    store = Store(tmp_path / "home")
+    store.create_profile("p1")
+    store.create_project("p1", "proj")
+    with pytest.raises(StellaError, match="at least 1"):
+        prune_checkpoints(store, "p1", "proj", keep=0)
+
+
+def test_resume_from_selected_checkpoint(need_torch, tmp_path):
+    # T150: resume from a SELECTED checkpoint continues from that
+    # step, not the latest one.
+    from stella.model import Store
+
+    store = _tiny_project(Store(tmp_path / "home"), tmp_path)
+    store.update_project("tiny", "proof", settings={"epochs": 3})
+    summary = train_project(
+        store, "tiny", "proof",
+        _model_loader=tiny_model_and_tokenizer,
+        _dtype="float32",
+    )
+    assert summary["steps"] == 9
+    # Resume from step 3: the run continues from 3 to 9.
+    resumed = train_project(
+        store, "tiny", "proof",
+        resume=True, from_checkpoint=3,
+        _model_loader=tiny_model_and_tokenizer,
+        _dtype="float32",
+    )
+    assert resumed["steps"] == 9
+    assert resumed["stopped"] is False
+
+
+def test_resume_from_missing_checkpoint_names_what_exists(tmp_path):
+    # T150: a missing step is refused before anything loads,
+    # naming the checkpoints that do exist.
+    from stella.model import Store
+
+    store = _tiny_project(Store(tmp_path / "home"), tmp_path)
+    ckpt = (
+        store.project_dir("tiny", "proof") / "checkpoints" / "step-3"
+    )
+    ckpt.mkdir(parents=True)
+    (ckpt / "training_state.json").write_text(
+        json.dumps({"step": 3, "epoch": 1})
+    )
+    with pytest.raises(StellaError, match="no checkpoint step-9") as exc:
+        train_project(
+            store, "tiny", "proof",
+            resume=True, from_checkpoint=9,
+            _model_loader=tiny_model_and_tokenizer,
+            _dtype="float32",
+        )
+    assert "step-3" in str(exc.value)
+
+
+def test_loading_event_names_the_model(need_torch, tmp_path):
+    # T152: the loading event carries the model name, so the
+    # window shows "Loading <base>..." from Start.
+    from stella.model import Store
+
+    store = _tiny_project(Store(tmp_path / "home"), tmp_path)
+    events = []
+    train_project(
+        store, "tiny", "proof",
+        on_event=events.append,
+        _model_loader=tiny_model_and_tokenizer,
+        _dtype="float32",
+    )
+    loading = [e for e in events if e.get("type") == "loading"]
+    assert len(loading) == 1
+    assert loading[0]["model"] == "test/tiny-model"
+    assert "test/tiny-model" in loading[0]["message"]
+    assert "downloads it" in loading[0]["message"]
+    assert "Ctrl+C" in loading[0]["message"]
+
+
+def test_list_runs_groups_steps_by_run(tmp_path):
+    # T151: the run history splits the log into runs — explicit
+    # run records for new logs, the step going down for old ones.
+    from stella.train import list_runs
+
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    lines = [
+        {"event": "run_started", "run_id": "2026-11-14T00:00:00",
+         "started_at": "2026-11-14T00:00:00", "total_steps": 3,
+         "settings": {"rank": 8}},
+        {"step": 1, "total_steps": 3, "epoch": 1, "loss": 2.5, "lr": 0.0002},
+        {"step": 2, "total_steps": 3, "epoch": 1, "loss": 2.1, "lr": 0.0002},
+        {"step": 3, "total_steps": 3, "epoch": 1, "loss": 1.9, "lr": 0.0002},
+        {"event": "run_finished", "run_id": "2026-11-14T00:00:00",
+         "steps": 3, "final_loss": 1.9, "stopped": False},
+        # An old-style run, no records: the step going down splits it.
+        {"step": 1, "total_steps": 2, "epoch": 1, "loss": 1.8, "lr": 0.0002},
+        {"step": 2, "total_steps": 2, "epoch": 1, "loss": 1.6, "lr": 0.0002},
+    ]
+    (project_dir / "train_log.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in lines) + "\n"
+    )
+    runs = list_runs(project_dir)
+    assert len(runs) == 2
+    assert runs[0]["steps"] == 3
+    assert runs[0]["final_loss"] == 1.9
+    assert runs[0]["started_at"] == "2026-11-14T00:00:00"
+    assert runs[0]["finished"] is True
+    assert runs[0]["points"] == [(1, 2.5), (2, 2.1), (3, 1.9)]
+    assert runs[1]["steps"] == 2
+    assert runs[1]["final_loss"] == 1.6
+    assert runs[1]["points"] == [(1, 1.8), (2, 1.6)]
+
+
+def test_run_records_written_by_a_real_run(need_torch, tmp_path):
+    # T151: a real run writes its run_started / run_finished
+    # records, and the history reads them back.
+    from stella.model import Store
+    from stella.train import list_runs
+
+    store = _tiny_project(Store(tmp_path / "home"), tmp_path)
+    train_project(
+        store, "tiny", "proof",
+        _model_loader=tiny_model_and_tokenizer,
+        _dtype="float32",
+    )
+    runs = list_runs(store.project_dir("tiny", "proof"))
+    assert len(runs) == 1
+    assert runs[0]["steps"] == 3
+    assert runs[0]["finished"] is True
+    assert runs[0]["final_loss"] is not None
+    assert len(runs[0]["points"]) == 3
+    # The settings snapshot is stored in the log record...
+    lines = (
+        store.project_dir("tiny", "proof") / "train_log.jsonl"
+    ).read_text().splitlines()
+    started = [
+        json.loads(line) for line in lines
+        if json.loads(line).get("event") == "run_started"
+    ]
+    assert len(started) == 1
+    assert started[0]["settings"]["rank"] == 2

@@ -454,6 +454,24 @@ def probe_project(
             if on_event is not None:
                 on_event({"type": "phase", "phase": phase})
 
+        def _loading(phase):
+            # T152: the probe loads the base twice (before, then
+            # after with the adapter) — each load is said before
+            # it starts, with the model name, so the wait is not
+            # a mystery.
+            if on_event is not None:
+                which = (
+                    "to probe before tuning"
+                    if phase == "before"
+                    else "with the tuned adapter, to probe after tuning"
+                )
+                on_event({
+                    "type": "loading",
+                    "model": base_ref,
+                    "phase": phase,
+                    "message": f"Loading {base_ref} {which}...",
+                })
+
         def _before_event(event):
             if on_event is not None:
                 on_event({
@@ -470,6 +488,7 @@ def probe_project(
                 })
 
         if _model_loader is not None:
+            _loading("before")
             base_model, tokenizer = _model_loader(base_ref, None)
             _phase("before")
             before = run_probe(
@@ -479,6 +498,7 @@ def probe_project(
             )
             del base_model
             gc.collect()
+            _loading("after")
             tuned_model, _ = _model_loader(base_ref, adapter_dir)
             _phase("after")
             after = run_probe(
@@ -491,6 +511,7 @@ def probe_project(
         else:
             from peft import PeftModel
 
+            _loading("before")
             base_model, tokenizer = load_base_model(base_ref)
             _phase("before")
             before = run_probe(
@@ -500,6 +521,7 @@ def probe_project(
             )
             del base_model
             gc.collect()
+            _loading("after")
             tuned_model = PeftModel.from_pretrained(
                 load_base_model(base_ref)[0], str(adapter_dir)
             )

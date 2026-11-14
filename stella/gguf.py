@@ -224,13 +224,16 @@ def merge_adapter(
     _model_loader=None,
     _dtype: str = "bfloat16",
     _base_bytes: int | None = None,
+    on_event=None,
 ) -> Path:
     """Merge a LoRA adapter into its base and save HF weights.
 
     `_model_loader` is a test hook: (base_ref, adapter_dir) -> model,
     so tests can merge a tiny model with no downloads. `_base_bytes`
     is a test hook for the merge guard: the base size in bytes,
-    used instead of reading the model's metadata.
+    used instead of reading the model's metadata. `on_event`
+    (T152) gets a loading event before the base loads, naming the
+    model — the merge is minutes of silence otherwise.
     """
     from .train import load_base_model, require_training_deps
 
@@ -250,6 +253,14 @@ def merge_adapter(
             _base_bytes = load_model_metadata(base_ref)["base_bytes"]
         check_merge_fit(_base_bytes)
     require_training_deps()
+    if on_event is not None:
+        on_event({
+            "type": "loading",
+            "model": base_ref,
+            "message": (
+                f"Loading {base_ref} to merge the adapter..."
+            ),
+        })
     if _model_loader is not None:
         model, tokenizer = _model_loader(base_ref, adapter_dir)
     else:
@@ -262,6 +273,98 @@ def merge_adapter(
     merged.save_pretrained(str(out_dir))
     tokenizer.save_pretrained(str(out_dir))
     return out_dir
+
+
+# -- up-front export estimate (T153) -------------------------------
+# The export button shows what the export will cost before the
+# user commits — merged size, output size, rough time — from
+# metadata only, the same no-load rule as the dry-run estimate
+# (T85). The merged weights are a full copy of the base; the
+# GGUF size is params x bits-per-weight for the quant.
+
+
+def _export_time_note(merged_bytes: int) -> str:
+    """A rough time band for an export, in plain words (T153).
+
+    Orders of magnitude, not a promise: merge + convert +
+    quantize on this PC runs minutes for a small base, tens of
+    minutes for a 1.7B one, longer for anything bigger. The
+    label says "roughly" so nobody reads it as a schedule."""
+    if merged_bytes < 1 * 1024**3:
+        return "roughly minutes"
+    if merged_bytes < 4 * 1024**3:
+        return "roughly tens of minutes"
+    return "roughly an hour or more"
+
+
+def estimate_export(
+    store: Store,
+    profile: str,
+    project: str,
+    *,
+    quant: str = DEFAULT_QUANT,
+) -> dict:
+    """The export estimate (T153), from metadata only.
+
+    Merged size, output GGUF size, the disk the export needs
+    (both at once — the merged weights stay on disk after a
+    successful export), and a rough time band. Raises StellaError
+    when the answer cannot be found out (no trained adapter, no
+    base ref, unreadable model metadata) — the caller reports it
+    plainly instead of guessing.
+
+    Returns: merged_bytes, gguf_bytes, disk_bytes, time_note,
+    quant, params, base_bytes.
+    """
+    from .requant import bits_per_weight, validate_quant
+    from .train import LFM3_HF_REPO, load_model_metadata
+
+    quant = validate_quant(quant)
+    prof = store.get_profile(profile)
+    store.get_project(profile, project)
+    project_dir = store.project_dir(profile, project)
+    if not (project_dir / "adapter" / "adapter_config.json").is_file():
+        raise StellaError(
+            f"project {project!r} has no trained adapter yet. "
+            "run training first, then export"
+        )
+    base_ref = prof.get("base_ref") or ""
+    if not base_ref:
+        raise StellaError(
+            f"profile {profile!r} has no base_ref. Set it to the "
+            f"Hugging Face repo of the base model (e.g. {LFM3_HF_REPO!r})"
+        )
+    meta = load_model_metadata(base_ref)
+    merged_bytes = meta["base_bytes"]
+    gguf_bytes = int(meta["params"] * bits_per_weight(quant) / 8)
+    return {
+        "merged_bytes": merged_bytes,
+        "gguf_bytes": gguf_bytes,
+        "disk_bytes": merged_bytes + gguf_bytes,
+        "time_note": _export_time_note(merged_bytes),
+        "quant": quant,
+        "params": meta["params"],
+        "base_bytes": meta["base_bytes"],
+    }
+
+
+def _fmt_size(n: int) -> str:
+    if n >= 1024**3:
+        return f"{n / 1024**3:.1f} GB"
+    if n >= 1024**2:
+        return f"{n / 1024**2:.0f} MB"
+    return f"{n:,} bytes"
+
+
+def format_export_estimate(estimate: dict) -> str:
+    """The one-line export estimate for the button label (T153):
+    merged size, output size, rough time — no settings (T16)."""
+    return (
+        f"Export merges about {_fmt_size(estimate['merged_bytes'])}, "
+        f"then writes about a {_fmt_size(estimate['gguf_bytes'])} "
+        f"GGUF file ({estimate['quant']}). "
+        f"{estimate['time_note'].capitalize()}."
+    )
 
 
 def _timeout_text(seconds: float) -> str:
@@ -681,6 +784,7 @@ def export_gguf(
             merge_adapter(
                 base_ref, adapter_dir, merged_dir,
                 _model_loader=_model_loader, _dtype=_dtype,
+                on_event=on_event,
             )
             if gguf_path.exists():
                 # --force: the deliberate overwrite (T24).

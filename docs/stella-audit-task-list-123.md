@@ -4038,6 +4038,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Origin:** audit #2 T18 + audit #4 T22 (checkpoint part; merged — one fix); extended by the repo-audit verdict (R30)
 - **Covers:** A2-W15, A2-G3; A4-G3, A4-D21 (checkpoint part); R30
 - **Effort:** M
+- **Status:** DONE in v0.20.0 (2026-11-14) — checkpoint rows carry step + loss + size + date, the disk label totals, detail on click, the keep-newest spinbox defaults to 3, delete/prune confirms default to No with the size shown, resume-from-selected via train_project(from_checkpoint=N) with a missing step refused naming what exists.
 - **Problem:** `checkpoints/` is created empty and nothing in v0.1 lists, names, or manages it — no list, resume picker, or disk usage. v0.2 (Item 3) has now landed, and audit #4 verified what its Train panel does and does not do (A4-G3): the panel lists checkpoints (`step N loss x.xxxx` per row) but clicking one does nothing — no resume-from-checkpoint, no delete, no disk usage, no detail. The verification this task was waiting on is done; the missing parts are now concrete work. Audit #8 measured
   checkpoint sizes: a tiny checkpoint is 71,440 bytes with
   optimizer.pt 65% of it; an LFM3 rank-8 checkpoint is ≈ 81 MB —
@@ -4052,6 +4053,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Covers:** R29
 - **Effort:** M
 - **Note:** Extended by T20 (Audit #9 R6). The loss chart is elevated to P0 there; this task keeps the run-history half.
+- **Status:** DONE in v0.20.0 (2026-11-14) — past runs list with their final losses and a click draws the run's loss curve; history rows show date/steps/final loss with NO settings words; the settings snapshot is stored in the run record and never displayed.
 - **Problem:** Training progress is a log of lines — there is no
   loss chart, and no history of past runs. The user cannot see
   whether the loss is falling smoothly or spiking, and cannot
@@ -4073,6 +4075,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Origin:** audit #8 T28
 - **Covers:** A8-U6
 - **Effort:** S
+- **Status:** DONE in v0.20.0 (2026-11-14) — the window says "Loading <model>..." instead of sitting silent while the base loads (the loading event carries the model name in train/probe/gguf).
 - **Problem:** `train_project` loads the model before emitting
   its first event, so between "Starting training..." and the
   first step, the window shows nothing happening — minutes on a
@@ -4092,6 +4095,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Origin:** audit #8 T27
 - **Covers:** A8-U5
 - **Effort:** S
+- **Status:** DONE in v0.20.0 (2026-11-14) — the export button shows what the export will cost before you commit (estimate_export is metadata-only and refuses honestly without an adapter: "has no trained adapter yet").
 - **Problem:** A 1.7B export merges ~3.4 GB, converts, and
   quantizes — minutes of disk churn. The button offers no
   estimate up front and the job has no progress signal
@@ -4139,6 +4143,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Origin:** audit #8 T24
 - **Covers:** A8-W18, A8-D15
 - **Effort:** S
+- **Status:** DONE in v0.20.0 (2026-11-14) — the train/check split stays stable as rows are added (content-hash split; the val set is stable across n=20 to 30; the at-least-one-val guard is the one documented exception to strict stability).
 - **Problem:** `split_dataset` re-shuffles the whole list, so
   adding rows reassigns val membership. Probed (seed 42, 10%):
   n=20 val `[ex19, ex5]`; n=21 same; n=22 keeps 1/2; n=25 keeps
@@ -4161,6 +4166,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Origin:** audit #8 T25
 - **Covers:** A8-W19
 - **Effort:** M
+- **Status:** DONE in v0.20.0 (2026-11-14) — training learns from every assistant turn, not just the last (multi-turn tokenization; the single-turn path is unchanged).
 - **Problem:** In a multi-turn `messages` row, only the last
   assistant message is unmasked; earlier assistant turns are
   masked prompt text. Probed: a 2-turn conversation tokenizes
@@ -4183,6 +4189,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Origin:** audit #8 T31
 - **Covers:** A8-G10
 - **Effort:** S
+- **Status:** DONE in v0.20.0 (2026-11-14) — the "tool" role validates in message rows (tool-call traces accepted).
 - **Problem:** `DATASET_ROLES` is `(system, user, assistant)` —
   a `messages` row with role `tool` fails validation. Multi-turn
   tool-use traces (user → assistant tool call → tool result →
@@ -4204,6 +4211,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Origin:** audit #8 T30
 - **Covers:** A8-G9
 - **Effort:** M
+- **Status:** DONE in v0.20.0 (2026-11-14) — big datasets are validated without loading the whole file into RAM (streaming validation + 10 MB / 5,000-row warning thresholds + fit refusal).
 - **Problem:** `load_dataset` reads the entire file
   (`read_text().splitlines()`, `train.py:207`) — a 100 MB JSONL
   loads whole, then tokenizes whole (`train.py:645`), while the
@@ -4224,6 +4232,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Origin:** audit #8 T26
 - **Covers:** A8-W20
 - **Effort:** S
+- **Status:** DONE in v0.20.0 (2026-11-14) — the final checkpoint is not double-saved or double-emitted (last_saved_step guard).
 - **Problem:** When the last step is a checkpoint step, the loop
   saves it in-loop and then saves it again as the "final
   checkpoint" (`train.py:739-747`) — same directory, same

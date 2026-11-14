@@ -37,6 +37,7 @@ import json
 import os
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -90,6 +91,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QRadioButton,
     QScrollArea,
+    QSpinBox,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -259,6 +261,25 @@ def _confirm_tag(parent, warnings):
     )
 
 
+def _fmt_bytes(n: int) -> str:
+    """Bytes as plain words (T150/T153): 81 MB, 3.4 GB."""
+    if n >= 1024**3:
+        return f"{n / 1024**3:.1f} GB"
+    if n >= 1024**2:
+        return f"{n / 1024**2:.0f} MB"
+    if n >= 1024:
+        return f"{n / 1024:.0f} KB"
+    return f"{n:,} bytes"
+
+
+def _fmt_date(timestamp: float) -> str:
+    """A Unix timestamp as a plain date (T150): 2026-11-14."""
+    try:
+        return datetime.fromtimestamp(float(timestamp)).strftime("%Y-%m-%d")
+    except (TypeError, ValueError, OSError, OverflowError):
+        return "unknown date"
+
+
 def _friendly_log_line(line: str) -> str:
     """One train_log.jsonl record as the friendly line the live log
     showed ("step 3/4 loss 2.1000"), never raw JSON (T13). A record
@@ -274,6 +295,28 @@ def _friendly_log_line(line: str) -> str:
         # A resume warning (T98: changed settings, missing
         # optimizer) renders as its message, not raw JSON.
         return f"Warning: {record.get('message', '')}"
+    if record.get("event") == "run_started":
+        # A run boundary (T151): the run's total, not raw JSON.
+        total = record.get("total_steps")
+        if total:
+            return f"Run started: {total} steps."
+        return "Run started."
+    if record.get("event") == "run_finished":
+        # A run's finish line (T151): steps + final loss, or the
+        # pause it stopped at.
+        steps = record.get("steps")
+        final = record.get("final_loss")
+        if record.get("stopped"):
+            return f"Run paused at step {steps}."
+        if final is not None:
+            try:
+                return (
+                    f"Run finished: {steps} steps, "
+                    f"final loss {float(final):.4f}."
+                )
+            except (TypeError, ValueError):
+                pass
+        return f"Run finished: {steps} steps."
     if "val_loss" in record:
         try:
             return (
@@ -551,7 +594,7 @@ class TrainWorker(QThread):
     finished = Signal(bool, str)  # ok, message
 
     def __init__(self, store, profile, project, resume=False, force=False,
-                 max_steps=None, parent=None):
+                 max_steps=None, from_checkpoint=None, parent=None):
         super().__init__(parent)
         self._store = store
         self._profile = profile
@@ -559,6 +602,7 @@ class TrainWorker(QThread):
         self._resume = resume
         self._force = force
         self._max_steps = max_steps
+        self._from_checkpoint = from_checkpoint
         self._controller = TrainController()
 
     def request_stop(self):
@@ -569,6 +613,10 @@ class TrainWorker(QThread):
         if kind == "loading":
             # T108: the base load (a first run downloads it) is
             # said before it starts, so the wait is not a mystery.
+            # T152: the message names the model, and the log line
+            # reaches the job card's status (the log signal feeds
+            # it), so the window shows "Loading <base>..." from
+            # Start until the first step.
             self.log.emit(event.get("message", "Loading the base model."))
         elif kind == "started":
             self.progress.emit(0, event["total_steps"], 0.0, 0)
@@ -619,6 +667,7 @@ class TrainWorker(QThread):
                 resume=self._resume,
                 force=self._force,
                 max_steps=self._max_steps,
+                from_checkpoint=self._from_checkpoint,
                 on_event=self._event,
                 controller=self._controller,
             )
@@ -3302,7 +3351,8 @@ class ProbeResultsDialog(QDialog):
     v0.16 has no mode key and reads as a gate run — every probe
     before v0.16 was one."""
 
-    def __init__(self, parent, result: dict, *, export_mode: bool = False):
+    def __init__(self, parent, result: dict, *, export_mode: bool = False,
+                 estimate_text: str | None = None):
         super().__init__(parent)
         self.setWindowTitle(
             "Before you export: what the tune changed"
@@ -3340,6 +3390,13 @@ class ProbeResultsDialog(QDialog):
             )
             note.setWordWrap(True)
             layout.addWidget(note)
+            if estimate_text:
+                # The export estimate (T153), at the commit point:
+                # what the export will cost, next to the Export
+                # button itself.
+                self.estimate_label = QLabel(estimate_text)
+                self.estimate_label.setWordWrap(True)
+                layout.addWidget(self.estimate_label)
         before_details = before.get("details") or []
         after_details = after.get("details") or []
         rows = max(len(before_details), len(after_details))
@@ -3554,6 +3611,10 @@ class MainWindow(QMainWindow):
         self._current_profile: str | None = None
         self._current_project: str | None = None
         self._train_panel_project: tuple | None = None
+        # The past runs the history list shows (T151): list_runs
+        # output for the panel's project, so a click can find its
+        # run's curve without re-reading the log.
+        self._run_history: list = []
         # The project a train/sleep run belongs to (T47): while a
         # run is live, the Train panel stays pinned to it even when
         # the session moves on. (profile, project), or None.
@@ -4097,7 +4158,52 @@ class MainWindow(QMainWindow):
         checkpoints_section = CollapsibleSection("Checkpoints")
         self.train_checkpoints = QListWidget()
         self.train_checkpoints.setMaximumHeight(90)
+        self.train_checkpoints.itemClicked.connect(
+            self._on_checkpoint_selected
+        )
         checkpoints_section.content_layout.addWidget(self.train_checkpoints)
+        # The detail view (T150): step, loss, size, date for the
+        # picked checkpoint. Nothing is selected by default.
+        self.checkpoint_detail_label = QLabel(
+            "Pick a checkpoint to see its details."
+        )
+        self.checkpoint_detail_label.setWordWrap(True)
+        checkpoints_section.content_layout.addWidget(
+            self.checkpoint_detail_label
+        )
+        # Disk usage (T150): what all the checkpoints cost.
+        self.checkpoint_disk_label = QLabel("")
+        self.checkpoint_disk_label.setWordWrap(True)
+        checkpoints_section.content_layout.addWidget(
+            self.checkpoint_disk_label
+        )
+        # Checkpoint actions (T150): resume from the picked one,
+        # delete it, or prune down to the newest N. Delete and
+        # prune are permanent (the point is freeing disk) and
+        # both confirm first, defaulting to No.
+        ckpt_btns = QHBoxLayout()
+        self.checkpoint_resume_btn = QPushButton("Resume from selected")
+        self.checkpoint_resume_btn.clicked.connect(
+            self._resume_from_checkpoint
+        )
+        self.checkpoint_delete_btn = QPushButton("Delete checkpoint")
+        self.checkpoint_delete_btn.clicked.connect(self._delete_checkpoint)
+        ckpt_btns.addWidget(self.checkpoint_resume_btn)
+        ckpt_btns.addWidget(self.checkpoint_delete_btn)
+        ckpt_btns.addWidget(QLabel("Keep newest"))
+        self.checkpoint_keep_spin = QSpinBox()
+        self.checkpoint_keep_spin.setRange(1, 99)
+        self.checkpoint_keep_spin.setValue(3)
+        self.checkpoint_keep_spin.setToolTip(
+            "How many of the newest checkpoints pruning keeps. "
+            "The rest are deleted for good."
+        )
+        ckpt_btns.addWidget(self.checkpoint_keep_spin)
+        self.checkpoint_prune_btn = QPushButton("Prune")
+        self.checkpoint_prune_btn.clicked.connect(self._prune_checkpoints)
+        ckpt_btns.addWidget(self.checkpoint_prune_btn)
+        ckpt_btns.addStretch(1)
+        checkpoints_section.content_layout.addLayout(ckpt_btns)
         export_btns = QHBoxLayout()
         self.train_export_gguf_btn = QPushButton("Export GGUF")
         self.train_export_gguf_btn.clicked.connect(self.export_gguf_gui)
@@ -4118,8 +4224,31 @@ class MainWindow(QMainWindow):
         export_btns.addWidget(self.train_view_probe_btn)
         export_btns.addStretch(1)
         checkpoints_section.content_layout.addLayout(export_btns)
+        # The export estimate (T153): what the export will cost,
+        # beside the button, before the user commits.
+        self.export_estimate_label = QLabel("")
+        self.export_estimate_label.setWordWrap(True)
+        checkpoints_section.content_layout.addWidget(
+            self.export_estimate_label
+        )
         layout.addWidget(checkpoints_section)
         self.checkpoints_section = checkpoints_section
+
+        # Past runs (T151): one row per finished (or paused) run —
+        # date, steps, final loss. Picking one shows its loss curve
+        # in the chart above. No settings anywhere here (T16).
+        runs_section = CollapsibleSection("Past runs")
+        self.run_history_list = QListWidget()
+        self.run_history_list.setMaximumHeight(90)
+        self.run_history_list.itemClicked.connect(self._on_run_selected)
+        runs_section.content_layout.addWidget(self.run_history_list)
+        self.run_history_hint = QLabel(
+            "Pick a run to see its loss curve."
+        )
+        self.run_history_hint.setWordWrap(True)
+        runs_section.content_layout.addWidget(self.run_history_hint)
+        layout.addWidget(runs_section)
+        self.runs_section = runs_section
 
         log_section = CollapsibleSection("Training log")
         self.train_log = QPlainTextEdit()
@@ -4175,8 +4304,12 @@ class MainWindow(QMainWindow):
             self.dataset_section.header_btn,
             self.train_pick_dataset_btn, self.train_sample_btn,
             self.checkpoints_section.header_btn,
-            self.train_checkpoints, self.train_export_gguf_btn,
+            self.train_checkpoints,
+            self.checkpoint_resume_btn, self.checkpoint_delete_btn,
+            self.checkpoint_keep_spin, self.checkpoint_prune_btn,
+            self.train_export_gguf_btn,
             self.train_probe_btn, self.train_view_probe_btn,
+            self.runs_section.header_btn, self.run_history_list,
             self.log_section.header_btn, self.train_log,
             self.sleep_section.header_btn,
             self.sleep_dream_check, self.sleep_cycles,
@@ -6577,6 +6710,7 @@ class MainWindow(QMainWindow):
             return
         self.train_pin_label.setVisible(False)
         self.train_checkpoints.clear()
+        self.run_history_list.clear()
         self.sleep_cycles.clear()
         if not self._current_profile or not self._current_project:
             self.train_loss.setText("Pick a project to train.")
@@ -6585,6 +6719,11 @@ class MainWindow(QMainWindow):
             self._reset_run_stats()
             self.train_progress.setMaximum(1)
             self.train_progress.setValue(0)
+            self.checkpoint_detail_label.setText(
+                "Pick a checkpoint to see its details."
+            )
+            self.checkpoint_disk_label.setText("")
+            self.export_estimate_label.setText("")
             return
         # A new project gets a fresh loss line; the same project
         # keeps its last progress (a finished run's final step/loss
@@ -6602,16 +6741,69 @@ class MainWindow(QMainWindow):
             points, total = self._last_run_curve(*key)
             self.loss_curve.set_points(points, total)
             self._reset_run_stats()
-        from .train import list_checkpoints
+        from .train import list_checkpoints, list_runs
 
-        for ck in list_checkpoints(
+        checkpoints = list_checkpoints(
             self.store, self._current_profile, self._current_project
-        ):
+        )
+        total_bytes = 0
+        for ck in checkpoints:
             loss = ck.get("loss")
             label = f"step {ck['step']}"
             if loss is not None:
                 label += f"  loss {loss:.4f}"
-            self.train_checkpoints.addItem(label)
+            size = ck.get("size_bytes") or 0
+            total_bytes += size
+            label += f"  {_fmt_bytes(size)}"
+            modified = ck.get("modified")
+            if modified:
+                label += f"  {_fmt_date(modified)}"
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, ck["step"])
+            self.train_checkpoints.addItem(item)
+        # Disk usage (T150): what all the checkpoints cost.
+        if checkpoints:
+            self.checkpoint_disk_label.setText(
+                f"Checkpoints use {_fmt_bytes(total_bytes)} on disk "
+                f"({len(checkpoints)} checkpoint"
+                f"{'s' if len(checkpoints) != 1 else ''})."
+            )
+        else:
+            self.checkpoint_disk_label.setText("No checkpoints yet.")
+        # The detail label follows the selection; a refresh clears
+        # the list, so it goes back to the resting line.
+        self.checkpoint_detail_label.setText(
+            "Pick a checkpoint to see its details."
+        )
+        # Past runs (T151): date, steps, final loss per run. The
+        # run's curve is shown on click; nothing is selected by
+        # default.
+        self._run_history = list_runs(
+            self.store.project_dir(
+                self._current_profile, self._current_project
+            )
+        )
+        for run in self._run_history:
+            started = run.get("started_at") or ""
+            date = started[:10] if started else "unknown date"
+            final = run.get("final_loss")
+            if run.get("finished") and not run.get("stopped"):
+                state = ""
+            elif run.get("stopped"):
+                state = ", paused"
+            else:
+                state = ", unfinished"
+            loss_text = (
+                f", final loss {final:.4f}"
+                if final is not None
+                else ", no loss recorded"
+            )
+            item = QListWidgetItem(
+                f"{date}: {run['steps']} steps{loss_text}{state}"
+            )
+            item.setData(Qt.UserRole, run["run_id"])
+            self.run_history_list.addItem(item)
+        self._refresh_export_estimate()
         from .sleep import list_sleep_cycles
 
         for c in list_sleep_cycles(
@@ -6699,6 +6891,236 @@ class MainWindow(QMainWindow):
             self.dataset_health_label.setText(
                 f"Dataset problem: {check['error']}"
             )
+
+    # -- checkpoints (T150) -----------------------------------------
+
+    def _selected_checkpoint_step(self) -> int | None:
+        """The checkpoint step picked in the list, or None."""
+        item = self.train_checkpoints.currentItem()
+        if item is None:
+            return None
+        step = item.data(Qt.UserRole)
+        return int(step) if step is not None else None
+
+    def _on_checkpoint_selected(self, item):
+        """A checkpoint click fills the detail view (T150): step,
+        loss, size, date — in plain words."""
+        step = item.data(Qt.UserRole)
+        if step is None:
+            return
+        from .train import list_checkpoints
+
+        for ck in list_checkpoints(
+            self.store, self._current_profile, self._current_project
+        ):
+            if ck["step"] != step:
+                continue
+            loss = ck.get("loss")
+            loss_text = (
+                f"loss {loss:.4f}" if loss is not None else "no loss recorded"
+            )
+            self.checkpoint_detail_label.setText(
+                f"Step {ck['step']}, {loss_text}, "
+                f"{_fmt_bytes(ck.get('size_bytes') or 0)}, "
+                f"saved {_fmt_date(ck.get('modified') or 0)}."
+            )
+            return
+
+    def _resume_from_checkpoint(self):
+        """Resume training from the picked checkpoint (T150), not
+        the latest one."""
+        step = self._selected_checkpoint_step()
+        if step is None:
+            self._warn("Pick a checkpoint first.")
+            return
+        self.start_training(resume=True, from_checkpoint=step)
+
+    def _delete_checkpoint(self):
+        """Delete the picked checkpoint (T150).
+
+        Permanent: the point is freeing disk, and the trash does
+        not free disk. Confirms first with the size shown,
+        defaulting to No (the T24 destructive-paths rule).
+        Modal audit: this confirm opens only from the Delete
+        button. No existing test clicks it; the new tests stub
+        QMessageBox.question.
+        """
+        step = self._selected_checkpoint_step()
+        if step is None:
+            self._warn("Pick a checkpoint first.")
+            return
+        from .train import delete_checkpoint, list_checkpoints
+
+        size = 0
+        for ck in list_checkpoints(
+            self.store, self._current_profile, self._current_project
+        ):
+            if ck["step"] == step:
+                size = ck.get("size_bytes") or 0
+                break
+        answer = QMessageBox.question(
+            self,
+            "Delete checkpoint?",
+            f"Delete checkpoint step {step} ({_fmt_bytes(size)})? "
+            "This frees the disk space for good. It cannot be "
+            "undone.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            self._say("Checkpoint kept.")
+            return
+        try:
+            result = delete_checkpoint(
+                self.store, self._current_profile, self._current_project,
+                step,
+            )
+        except StellaError as exc:
+            self._warn(str(exc))
+            return
+        self._say(
+            f"Deleted checkpoint step {step}, "
+            f"freed {_fmt_bytes(result['freed_bytes'])}."
+        )
+        self.refresh_train_panel()
+
+    def _prune_checkpoints(self):
+        """Delete all but the newest N checkpoints (T150).
+
+        N comes from the spinbox (default 3). The confirm shows
+        the total size before and after plus the space freed,
+        and defaults to No — the deletion is permanent.
+        Modal audit: this confirm opens only from the Prune
+        button. No existing test clicks it; the new tests stub
+        QMessageBox.question.
+        """
+        keep = self.checkpoint_keep_spin.value()
+        from .train import list_checkpoints, prune_checkpoints
+
+        checkpoints = list_checkpoints(
+            self.store, self._current_profile, self._current_project
+        )
+        if len(checkpoints) <= keep:
+            self._say(
+                f"Nothing to prune: {len(checkpoints)} checkpoint"
+                f"{'s' if len(checkpoints) != 1 else ''} kept, "
+                f"keeping the newest {keep}."
+            )
+            return
+        doomed = checkpoints[:-keep]
+        freed = sum(c.get("size_bytes") or 0 for c in doomed)
+        total = sum(c.get("size_bytes") or 0 for c in checkpoints)
+        answer = QMessageBox.question(
+            self,
+            "Prune checkpoints?",
+            f"Delete {len(doomed)} older checkpoint"
+            f"{'s' if len(doomed) != 1 else ''} and keep the newest "
+            f"{keep}? Checkpoints use {_fmt_bytes(total)} now, "
+            f"{_fmt_bytes(total - freed)} after, freeing "
+            f"{_fmt_bytes(freed)}. This cannot be undone.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            self._say("Checkpoints kept.")
+            return
+        try:
+            result = prune_checkpoints(
+                self.store, self._current_profile, self._current_project,
+                keep=keep,
+            )
+        except StellaError as exc:
+            self._warn(str(exc))
+            return
+        self._say(
+            f"Pruned {len(result['deleted'])} checkpoint"
+            f"{'s' if len(result['deleted']) != 1 else ''}, "
+            f"freed {_fmt_bytes(result['freed_bytes'])}. "
+            f"Checkpoints now use {_fmt_bytes(result['total_after'])}."
+        )
+        self.refresh_train_panel()
+
+    # -- past runs (T151) -------------------------------------------
+
+    def _on_run_selected(self, item):
+        """A past run's click shows its loss curve in the chart
+        (T151): the finished run's curve, from the log. No
+        settings are shown anywhere here (T16)."""
+        run_id = item.data(Qt.UserRole)
+        for run in self._run_history:
+            if run["run_id"] != run_id:
+                continue
+            self.loss_curve.set_points(
+                run["points"], run.get("total_steps") or 0
+            )
+            final = run.get("final_loss")
+            loss_text = (
+                f"final loss {final:.4f}"
+                if final is not None
+                else "no loss recorded"
+            )
+            started = run.get("started_at") or ""
+            date = started[:10] if started else "unknown date"
+            self.train_loss.setText(
+                f"Run from {date}: {run['steps']} steps, {loss_text}."
+            )
+            return
+
+    # -- export estimate (T153) -------------------------------------
+
+    def _refresh_export_estimate(self):
+        """The export estimate label (T153): merged size, output
+        size, rough time — beside the Export button, before the
+        user commits. Same metadata gate as the pre-train
+        estimate: a remote base ref never fetches on a refresh,
+        so the estimate only computes for a local folder or
+        downloaded weights. No adapter yet means no estimate
+        (there is nothing to export)."""
+        if not self._current_profile or not self._current_project:
+            self.export_estimate_label.setText("")
+            return
+        project_dir = self.store.project_dir(
+            self._current_profile, self._current_project
+        )
+        if not (project_dir / "adapter" / "adapter_config.json").is_file():
+            self.export_estimate_label.setText("")
+            return
+        try:
+            prof = self.store.get_profile(self._current_profile)
+        except StellaError:
+            self.export_estimate_label.setText("")
+            return
+        base_ref = (prof.get("base_ref") or "").strip()
+        if not base_ref:
+            self.export_estimate_label.setText("")
+            return
+        local = Path(base_ref).expanduser().is_dir()
+        ready = False
+        if not local:
+            try:
+                ready = (
+                    provision.weights_status(
+                        self.store, self._current_profile
+                    )["state"]
+                    == "ready"
+                )
+            except StellaError:
+                ready = False
+        if not local and not ready:
+            self.export_estimate_label.setText("")
+            return
+        from .gguf import estimate_export, format_export_estimate
+
+        try:
+            estimate = estimate_export(
+                self.store, self._current_profile, self._current_project
+            )
+        except StellaError:
+            self.export_estimate_label.setText("")
+            return
+        self.export_estimate_label.setText(
+            format_export_estimate(estimate)
+        )
 
     def pick_dataset(self):
         if not self._current_profile or not self._current_project:
@@ -6845,7 +7267,8 @@ class MainWindow(QMainWindow):
         return True
 
     def start_training(self, resume: bool = False,
-                       max_steps: int | None = None):
+                       max_steps: int | None = None,
+                       from_checkpoint: int | None = None):
         profile = self._selected_profile()
         project = self._selected_project()
         if not profile or not project:
@@ -6926,7 +7349,7 @@ class MainWindow(QMainWindow):
             return
         self._train_worker = TrainWorker(
             self.store, profile, project, resume=resume, force=force,
-            max_steps=max_steps,
+            max_steps=max_steps, from_checkpoint=from_checkpoint,
         )
         self._train_worker.progress.connect(self._on_train_progress)
         self._train_worker.log.connect(self._train_log_line)
@@ -7231,10 +7654,25 @@ class MainWindow(QMainWindow):
         # exist for the project. No existing test has any (the
         # export tests refuse the start or have no results file),
         # so no existing test reaches it; the new tests stub it.
+        # T153: the export estimate, best effort — what the export
+        # will cost, shown in the preview dialog (when there is
+        # one) and in the log line that starts the job. A metadata
+        # read that fails just leaves it out; the export itself
+        # still runs.
+        estimate_text = None
+        try:
+            from .gguf import estimate_export, format_export_estimate
+
+            estimate_text = format_export_estimate(
+                estimate_export(self.store, profile, project)
+            )
+        except StellaError:
+            estimate_text = None
         probe_result = self._load_probe_results(profile, project)
         if probe_result is not None:
             dialog = ProbeResultsDialog(
-                self, probe_result, export_mode=True
+                self, probe_result, export_mode=True,
+                estimate_text=estimate_text,
             )
             if dialog.exec() != QDialog.Accepted:
                 self._say("Export cancelled.")
@@ -7253,7 +7691,11 @@ class MainWindow(QMainWindow):
             phases = {"merge": 1, "convert": 2, "quantize": 3}
 
             def on_event(event):
-                if event.get("type") == "phase":
+                # T152: the merge's base load is said before it
+                # starts, with the model name.
+                if event.get("type") == "loading":
+                    ctx.log(event.get("message", "Loading the base model."))
+                elif event.get("type") == "phase":
                     ctx.progress(phases.get(event["phase"], 0), 3)
                     ctx.log(event["message"])
 
@@ -7270,7 +7712,15 @@ class MainWindow(QMainWindow):
             )
 
         self._start_job_worker(job, "Exporting GGUF", True)
-        self._train_log_line("Exporting GGUF (merge, convert, quantize)...")
+        if estimate_text:
+            self._train_log_line(
+                f"Exporting GGUF (merge, convert, quantize). "
+                f"{estimate_text}"
+            )
+        else:
+            self._train_log_line(
+                "Exporting GGUF (merge, convert, quantize)..."
+            )
 
     # -- T89: create the exported model in Ollama -------------------
     def _last_gguf_export(self, profile, project):
@@ -7349,7 +7799,11 @@ class MainWindow(QMainWindow):
 
         def job(ctx):
             def on_event(event):
-                if event.get("type") == "prompt":
+                # T152: each base load is said before it starts,
+                # with the model name — the probe loads twice.
+                if event.get("type") == "loading":
+                    ctx.log(event.get("message", "Loading the base model."))
+                elif event.get("type") == "prompt":
                     ctx.progress(event["done"], event["total"])
                     phase = (
                         "the base model"

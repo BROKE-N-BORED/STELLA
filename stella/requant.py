@@ -99,6 +99,13 @@ def validate_quant(quant: str) -> str:
     return name
 
 
+def bits_per_weight(quant: str) -> float:
+    """Bits per weight for a quant (T153): the disk estimate's
+    input — how many bits each weight costs in the output file,
+    per-block scales included. Validates first."""
+    return _QUANT_BPW[validate_quant(quant)]
+
+
 def ollama_models_dir() -> Path:
     """Where Ollama keeps its models (OLLAMA_MODELS wins)."""
     env = os.environ.get("OLLAMA_MODELS")

@@ -4048,7 +4048,9 @@ def test_project_window_dataset_valid_shows_count_and_preview(
     proj_win.dataset_edit.setText(str(path))
     proj_win.dataset_edit.editingFinished.emit()
     info = proj_win.dataset_info.text()
-    assert "10 examples: 9 to train, 1 to check." in info
+    # The content-hash split (T155): 2 of these 10 rows hash under
+    # the 10% threshold, so 8 train and 2 check.
+    assert "10 examples: 8 to train, 2 to check." in info
     assert "1. Question 0?" in info
     assert "2. Question 1?" in info
     assert "3. Question 2?" in info
@@ -6989,3 +6991,278 @@ def test_project_window_help_labels_not_clipped(window, qapp):
             )
     finally:
         proj_win.close()
+
+
+# -- v0.20.0: T150-T153 (checkpoints, run history, loading, export) --
+
+
+def _seed_checkpoint(seeded, step, loss=1.5, size=1000):
+    """A checkpoint dir with a state file + a file of `size` bytes."""
+    ckpt = (
+        seeded.project_dir("lfm3-tool", "tool-calls")
+        / "checkpoints" / f"step-{step}"
+    )
+    ckpt.mkdir(parents=True)
+    (ckpt / "training_state.json").write_text(
+        json.dumps({"step": step, "epoch": 1, "loss": loss})
+    )
+    (ckpt / "adapter_model.safetensors").write_bytes(b"x" * size)
+    return ckpt
+
+
+def _seed_runs_log(seeded):
+    """A train log with two finished runs (T151)."""
+    lines = [
+        {"event": "run_started", "run_id": "2026-11-13T10:00:00",
+         "started_at": "2026-11-13T10:00:00", "total_steps": 3,
+         "settings": {"rank": 8}},
+        {"step": 1, "total_steps": 3, "epoch": 1, "loss": 2.5, "lr": 0.0002},
+        {"step": 2, "total_steps": 3, "epoch": 1, "loss": 2.1, "lr": 0.0002},
+        {"step": 3, "total_steps": 3, "epoch": 1, "loss": 1.9, "lr": 0.0002},
+        {"event": "run_finished", "run_id": "2026-11-13T10:00:00",
+         "steps": 3, "final_loss": 1.9, "stopped": False},
+        {"event": "run_started", "run_id": "2026-11-14T09:00:00",
+         "started_at": "2026-11-14T09:00:00", "total_steps": 2,
+         "settings": {"rank": 8}},
+        {"step": 1, "total_steps": 2, "epoch": 1, "loss": 1.8, "lr": 0.0002},
+        {"step": 2, "total_steps": 2, "epoch": 1, "loss": 1.6, "lr": 0.0002},
+        {"event": "run_finished", "run_id": "2026-11-14T09:00:00",
+         "steps": 2, "final_loss": 1.6, "stopped": False},
+    ]
+    (
+        seeded.project_dir("lfm3-tool", "tool-calls") / "train_log.jsonl"
+    ).write_text("\n".join(json.dumps(r) for r in lines) + "\n")
+
+
+def test_checkpoint_list_shows_size_and_date(window, seeded, qapp):
+    # T150: each row shows step, loss, size, and date; the disk
+    # label totals them.
+    _seed_checkpoint(seeded, 5, loss=1.5, size=1000)
+    _seed_checkpoint(seeded, 10, loss=1.2, size=2000)
+    _select_session(window)
+    qapp.processEvents()
+    assert window.train_checkpoints.count() == 2
+    row = window.train_checkpoints.item(0).text()
+    assert "step 5" in row
+    assert "loss 1.5000" in row
+    assert "1 KB" in row
+    import re
+
+    assert re.search(r"\d{4}-\d{2}-\d{2}", row)
+    assert "3 KB" in window.checkpoint_disk_label.text()
+    assert "2 checkpoints" in window.checkpoint_disk_label.text()
+    # Nothing is selected by default.
+    assert window.train_checkpoints.currentItem() is None
+
+
+def test_checkpoint_detail_shows_on_click(window, seeded, qapp):
+    # T150: clicking a checkpoint fills the detail view.
+    _seed_checkpoint(seeded, 5, loss=1.5, size=1000)
+    _select_session(window)
+    qapp.processEvents()
+    item = window.train_checkpoints.item(0)
+    window.train_checkpoints.setCurrentItem(item)
+    window._on_checkpoint_selected(item)
+    detail = window.checkpoint_detail_label.text()
+    assert "Step 5" in detail
+    assert "loss 1.5000" in detail
+    assert "1 KB" in detail
+    assert "saved 20" in detail
+
+
+def test_checkpoint_delete_asks_and_deletes(window, seeded, monkeypatch, qapp):
+    # T150: Delete confirms with the size shown, defaulting to No;
+    # Yes deletes for good and reports the freed space.
+    from PySide6.QtWidgets import QMessageBox
+
+    ckpt = _seed_checkpoint(seeded, 5, loss=1.5, size=1000)
+    _select_session(window)
+    qapp.processEvents()
+    asked = []
+    monkeypatch.setattr(
+        QMessageBox, "question",
+        lambda *a, **k: asked.append(a[2]) or QMessageBox.Yes,
+    )
+    window.train_checkpoints.setCurrentRow(0)
+    window.checkpoint_delete_btn.click()
+    qapp.processEvents()
+    assert asked and "step 5" in asked[0] and "1 KB" in asked[0]
+    assert "cannot be undone" in asked[0]
+    assert not ckpt.exists()
+    assert window.train_checkpoints.count() == 0
+    assert "freed" in window.statusBar().currentMessage()
+
+
+def test_checkpoint_delete_no_keeps_it(window, seeded, monkeypatch, qapp):
+    # T150: No on the delete confirm keeps the checkpoint.
+    from PySide6.QtWidgets import QMessageBox
+
+    ckpt = _seed_checkpoint(seeded, 5, loss=1.5, size=1000)
+    _select_session(window)
+    qapp.processEvents()
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.No
+    )
+    window.train_checkpoints.setCurrentRow(0)
+    window.checkpoint_delete_btn.click()
+    qapp.processEvents()
+    assert ckpt.exists()
+    assert window.train_checkpoints.count() == 1
+
+
+def test_checkpoint_prune_keeps_newest_n(window, seeded, monkeypatch, qapp):
+    # T150: Prune keeps the newest N (default 3) and reports the
+    # size before and after plus the space freed.
+    from PySide6.QtWidgets import QMessageBox
+
+    for step in (1, 2, 3, 4, 5):
+        _seed_checkpoint(seeded, step, loss=1.5, size=1000)
+    _select_session(window)
+    qapp.processEvents()
+    assert window.checkpoint_keep_spin.value() == 3
+    asked = []
+    monkeypatch.setattr(
+        QMessageBox, "question",
+        lambda *a, **k: asked.append(a[2]) or QMessageBox.Yes,
+    )
+    window.checkpoint_prune_btn.click()
+    qapp.processEvents()
+    assert asked and "keep the newest 3" in asked[0]
+    assert "freeing" in asked[0]
+    base = seeded.project_dir("lfm3-tool", "tool-calls") / "checkpoints"
+    assert not (base / "step-1").exists()
+    assert not (base / "step-2").exists()
+    assert (base / "step-5").exists()
+    assert window.train_checkpoints.count() == 3
+    assert "freed" in window.statusBar().currentMessage()
+
+
+def test_checkpoint_prune_nothing_to_prune(window, seeded, monkeypatch, qapp):
+    # T150: pruning with fewer checkpoints than N asks nothing.
+    from PySide6.QtWidgets import QMessageBox
+
+    _seed_checkpoint(seeded, 5, loss=1.5, size=1000)
+    _select_session(window)
+    qapp.processEvents()
+    monkeypatch.setattr(
+        QMessageBox, "question",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("prune asked with nothing to prune")
+        ),
+    )
+    window.checkpoint_prune_btn.click()
+    qapp.processEvents()
+    assert window.train_checkpoints.count() == 1
+    assert "Nothing to prune" in window.statusBar().currentMessage()
+
+
+def test_resume_from_selected_passes_step(window, seeded, monkeypatch, qapp):
+    # T150: Resume from selected starts training from that
+    # checkpoint, not the latest one.
+    _seed_checkpoint(seeded, 5, loss=1.5, size=1000)
+    _select_session(window)
+    qapp.processEvents()
+    calls = []
+    monkeypatch.setattr(
+        window, "start_training",
+        lambda *a, **k: calls.append(k),
+    )
+    window.train_checkpoints.setCurrentRow(0)
+    window.checkpoint_resume_btn.click()
+    assert calls == [{"resume": True, "from_checkpoint": 5}]
+
+
+def test_run_history_lists_runs_and_shows_curve(window, seeded, qapp):
+    # T151: the history lists past runs (date, steps, final loss)
+    # and a click shows that run's curve in the chart.
+    _seed_runs_log(seeded)
+    _select_session(window)
+    qapp.processEvents()
+    assert window.run_history_list.count() == 2
+    row = window.run_history_list.item(0).text()
+    assert "2026-11-13" in row
+    assert "3 steps" in row
+    assert "final loss 1.9000" in row
+    # No settings values anywhere in the history UI (T16).
+    assert "rank" not in row.lower()
+    assert "8" not in row.split("final loss")[0]
+    item = window.run_history_list.item(0)
+    window._on_run_selected(item)
+    assert window.loss_curve.points == [(1, 2.5), (2, 2.1), (3, 1.9)]
+    assert "2026-11-13" in window.train_loss.text()
+    assert "final loss 1.9000" in window.train_loss.text()
+
+
+def test_export_estimate_label_shows_after_adapter(
+    window, seeded, tmp_path, qapp
+):
+    # T153: once a project has an adapter, the label beside the
+    # Export button shows the merged size, output size, and
+    # rough time.
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text(json.dumps({
+        "hidden_size": 2048, "num_hidden_layers": 24,
+        "intermediate_size": 8192, "torch_dtype": "bfloat16",
+    }))
+    (model_dir / "model.safetensors.index.json").write_text(json.dumps({
+        "metadata": {"total_size": 3_460_000_000},
+    }))
+    seeded.update_profile("lfm3-tool", base_ref=str(model_dir))
+    adapter = (
+        seeded.project_dir("lfm3-tool", "tool-calls") / "adapter"
+    )
+    adapter.mkdir()
+    (adapter / "adapter_config.json").write_text("{}\n")
+    _select_session(window)
+    qapp.processEvents()
+    text = window.export_estimate_label.text()
+    assert "merges about 3.2 GB" in text
+    assert "GGUF file (Q4_K_M)" in text
+    assert "roughly" in text.lower()
+
+
+def test_export_estimate_label_empty_without_adapter(window, seeded, qapp):
+    # T153: with no adapter there is nothing to export, so no
+    # estimate shows.
+    _select_session(window)
+    qapp.processEvents()
+    assert window.export_estimate_label.text() == ""
+
+
+def test_train_worker_loading_event_logs_model_name(qapp, seeded):
+    # T152: the loading event reaches the log (and through it the
+    # job card status) with the model name.
+    from stella.gui import TrainWorker
+
+    worker = TrainWorker(seeded, "lfm3-tool", "tool-calls")
+    lines = []
+    worker.log.connect(lines.append)
+    worker._event({
+        "type": "loading", "model": "LiquidAI/LFM3-1.7B",
+        "message": "Loading LiquidAI/LFM3-1.7B... The first run "
+        "downloads it, and Ctrl+C takes effect when the download "
+        "finishes.",
+    })
+    qapp.processEvents()
+    assert lines == [
+        "Loading LiquidAI/LFM3-1.7B... The first run downloads it, "
+        "and Ctrl+C takes effect when the download finishes."
+    ]
+
+
+def test_export_preview_shows_estimate(window, qapp):
+    # T153: the export preview dialog shows the estimate at the
+    # commit point, next to the Export button.
+    from stella.gui import ProbeResultsDialog
+
+    dialog = ProbeResultsDialog(
+        window, _probe_result(), export_mode=True,
+        estimate_text="Export merges about 3.2 GB, then writes "
+        "about a 1000 MB GGUF file (Q4_K_M). Roughly tens of minutes.",
+    )
+    try:
+        assert "3.2 GB" in dialog.estimate_label.text()
+        assert dialog.export_btn is not None
+    finally:
+        dialog.close()

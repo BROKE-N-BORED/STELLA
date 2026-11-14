@@ -608,3 +608,24 @@ def test_is_governing_profile_marked_seat():
     ) is False
     # The role path still works on its own.
     assert is_governing_profile({"role": "fast"}) is True
+
+
+# -- v0.20.0: T152 — a loading event before each base load -------------
+
+
+def test_probe_emits_loading_before_each_load(tmp_path, monkeypatch):
+    # T152: the probe loads the base twice (before, then after
+    # with the adapter) — each load is said before it starts,
+    # with the model name, and before its pass's phase event.
+    store = _probe_store(tmp_path)
+    events = []
+    _run_fake_probe(store, monkeypatch, on_event=events.append)
+    loading = [e for e in events if e.get("type") == "loading"]
+    assert len(loading) == 2
+    assert [e["phase"] for e in loading] == ["before", "after"]
+    assert all(e["model"] == "test/tiny-model" for e in loading)
+    assert all("test/tiny-model" in e["message"] for e in loading)
+    phases = [i for i, e in enumerate(events) if e.get("type") == "phase"]
+    loads = [i for i, e in enumerate(events) if e.get("type") == "loading"]
+    assert loads[0] < phases[0]
+    assert loads[1] < phases[1]

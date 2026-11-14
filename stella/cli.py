@@ -717,6 +717,7 @@ def cmd_train(args) -> int:
             args.project,
             max_steps=args.steps,
             resume=args.resume,
+            from_checkpoint=args.from_checkpoint,
             dataset_path=args.dataset,
             base_ref=args.base,
             force=args.force,
@@ -764,7 +765,10 @@ def cmd_export_gguf(args) -> int:
     def on_event(event: dict):
         # T109: a line per phase, so a multi-minute export is never
         # silent — the merge line first, then convert, then quantize.
-        if event.get("type") == "phase" and event.get("message"):
+        # T152: the merge's base load is said too, with the model name.
+        if event.get("type") == "loading" and event.get("message"):
+            print(event["message"], flush=True)
+        elif event.get("type") == "phase" and event.get("message"):
             print(event["message"], flush=True)
 
     result = export_gguf(
@@ -811,7 +815,11 @@ def cmd_probe(args) -> int:
     def on_event(event: dict):
         # T109: a line when each pass starts, so a probe that loads
         # two models and runs 24 generations is never silent.
-        if event.get("type") == "phase":
+        # T152: each base load is said before it starts, with the
+        # model name.
+        if event.get("type") == "loading" and event.get("message"):
+            print(event["message"], flush=True)
+        elif event.get("type") == "phase":
             if event.get("phase") == "before":
                 print("Probing before tuning...", flush=True)
             elif event.get("phase") == "after":
@@ -1488,6 +1496,9 @@ def build_parser() -> argparse.ArgumentParser:
                    "the model or training anything")
     p.add_argument("--resume", action="store_true",
                    help="continue from the latest checkpoint")
+    p.add_argument("--from-checkpoint", type=int, default=None,
+                   help="resume from checkpoints/step-N instead of "
+                   "the latest one (implies --resume)")
     p.add_argument("--force", action="store_true",
                    help="re-train a project that already finished "
                    "training (replaces the adapter)")

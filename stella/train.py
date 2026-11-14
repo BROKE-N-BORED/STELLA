@@ -36,6 +36,7 @@ import math
 import os
 import random
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .autoconfig import compute_settings, measure_pc
@@ -81,7 +82,11 @@ DEFAULT_TRAIN = {
 }
 
 # Dataset roles, in order of appearance in a conversation.
-DATASET_ROLES = ("system", "user", "assistant")
+# "tool" (T157) carries a tool result: it validates, renders as
+# masked prompt content, and is never trained on — the model
+# learns from the assistant turns around the tool results, not
+# from the results themselves.
+DATASET_ROLES = ("system", "user", "assistant", "tool")
 
 # A dataset under this many examples is "tiny" (T83): it trains, but
 # the model learns almost nothing general from it, so the pre-train
@@ -284,6 +289,41 @@ def validate_dataset_row(row: object, line_no: int) -> tuple[str, list[dict]]:
     )
 
 
+def iter_dataset_rows(path: str | Path):
+    """Validate a JSONL dataset line by line, streaming (T158).
+
+    Yields (line_no, row_format, messages) per non-blank row,
+    reading the file one line at a time — a 100 MB dataset
+    validates without ever holding the file (or the rows) in
+    memory. Raises StellaError naming the first bad line, the
+    same as load_dataset. The caller decides what to keep: the
+    trainer keeps every row, the streaming check keeps counts.
+    """
+    path = Path(path)
+    if not path.is_file():
+        raise StellaError(f"dataset not found: {path}")
+    fmt: str | None = None
+    with path.open(encoding="utf-8") as fh:
+        for line_no, raw in enumerate(fh, 1):
+            if not raw.strip():
+                continue
+            try:
+                row = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise StellaError(
+                    f"dataset line {line_no}: not valid JSON: {exc}"
+                ) from exc
+            row_fmt, messages = validate_dataset_row(row, line_no)
+            if fmt is None:
+                fmt = row_fmt
+            elif fmt != row_fmt:
+                raise StellaError(
+                    f"dataset line {line_no}: mixed formats. The file "
+                    f"started as {fmt!r} but this row is {row_fmt!r}"
+                )
+            yield line_no, row_fmt, messages
+
+
 def load_dataset(path: str | Path) -> tuple[list[dict], dict]:
     """Read + validate a JSONL dataset.
 
@@ -295,31 +335,18 @@ def load_dataset(path: str | Path) -> tuple[list[dict], dict]:
 
     Returns (examples, info). Each example is normalized to
     {"messages": [...]} so the trainer has one shape to handle.
+    The file is read line by line (T158) — the rows are still
+    all held (training needs them), but the raw file text never
+    is. `info` also carries "bytes", the file size, for the
+    dataset-size check.
     """
     path = Path(path)
-    if not path.is_file():
-        raise StellaError(f"dataset not found: {path}")
     examples: list[dict] = []
     fmt: str | None = None
     prompt_chars = 0
     completion_chars = 0
-    for line_no, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-        if not raw.strip():
-            continue
-        try:
-            row = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise StellaError(
-                f"dataset line {line_no}: not valid JSON: {exc}"
-            ) from exc
-        row_fmt, messages = validate_dataset_row(row, line_no)
-        if fmt is None:
-            fmt = row_fmt
-        elif fmt != row_fmt:
-            raise StellaError(
-                f"dataset line {line_no}: mixed formats. The file "
-                f"started as {fmt!r} but this row is {row_fmt!r}"
-            )
+    for _line_no, row_fmt, messages in iter_dataset_rows(path):
+        fmt = row_fmt
         prompt_chars += sum(len(m["content"]) for m in messages[:-1])
         completion_chars += len(messages[-1]["content"])
         examples.append({"messages": messages})
@@ -328,34 +355,166 @@ def load_dataset(path: str | Path) -> tuple[list[dict], dict]:
             f"dataset has {len(examples)} example(s). At least 2 are "
             "needed (1 to train on, 1 to validate)"
         )
+    try:
+        file_bytes = path.stat().st_size
+    except OSError:
+        file_bytes = 0
     info = {
         "path": str(path),
         "format": fmt,
         "count": len(examples),
         "avg_prompt_chars": round(prompt_chars / len(examples)),
         "avg_completion_chars": round(completion_chars / len(examples)),
+        "bytes": file_bytes,
     }
     return examples, info
+
+
+def stream_dataset_info(
+    path: str | Path,
+    *,
+    val_fraction: float = 0.1,
+    seed: int = 42,
+) -> dict:
+    """A dataset's shape without holding the rows (T158).
+
+    Streams the file once: validates every row, counts the
+    examples, splits train/val by the content-hash rule (the
+    hashes are kept — 8 bytes a row — never the rows), previews
+    the first 3, and estimates the token count. Returns the same
+    "info" shape load_dataset returns, plus train/val counts.
+    The dataset health check runs on this, so a 100 MB file
+    checks without loading whole.
+    """
+    path = Path(path)
+    count = 0
+    fmt: str | None = None
+    prompt_chars = 0
+    completion_chars = 0
+    preview: list[str] = []
+    hashes: list[float] = []
+    for _line_no, row_fmt, messages in iter_dataset_rows(path):
+        fmt = row_fmt
+        prompt_chars += sum(len(m["content"]) for m in messages[:-1])
+        completion_chars += len(messages[-1]["content"])
+        hashes.append(_row_val_hash({"messages": messages}, seed))
+        if len(preview) < 3:
+            first = messages[0]["content"] if messages else ""
+            first = " ".join(first.split())
+            preview.append(
+                first[:80] + ("..." if len(first) > 80 else "")
+            )
+        count += 1
+    if count < 2:
+        raise StellaError(
+            f"dataset has {count} example(s). At least 2 are "
+            "needed (1 to train on, 1 to validate)"
+        )
+    frac = min(max(float(val_fraction), 0.0), 1.0)
+    is_val = [h < frac for h in hashes]
+    if not any(is_val):
+        is_val[min(range(count), key=lambda i: hashes[i])] = True
+    if all(is_val):
+        is_val[max(range(count), key=lambda i: hashes[i])] = False
+    n_val = sum(is_val)
+    try:
+        file_bytes = path.stat().st_size
+    except OSError:
+        file_bytes = 0
+    total_chars = prompt_chars + completion_chars
+    return {
+        "path": str(path),
+        "format": fmt,
+        "count": count,
+        "train": count - n_val,
+        "val": n_val,
+        "avg_prompt_chars": round(prompt_chars / count),
+        "avg_completion_chars": round(completion_chars / count),
+        "preview": preview,
+        "est_tokens": total_chars // CHARS_PER_TOKEN,
+        "bytes": file_bytes,
+    }
+
+
+def _row_val_hash(example: dict, seed: int) -> float:
+    """One example's val-membership hash (T155), in [0, 1).
+
+    The row's messages as canonical JSON, salted with the seed,
+    through SHA-256 — namespaced with a version tag so a future
+    scheme change does not silently re-split old datasets. The
+    same row always hashes the same way, so adding rows never
+    moves an old row's val membership (unlike the old shuffle,
+    which re-dealt the whole deck on every run). A prompt /
+    completion row hashes as its normalized messages form, so
+    the same content splits the same way in either format.
+    """
+    import hashlib
+
+    messages = example.get("messages")
+    if messages is None:
+        messages = [
+            {"role": "user", "content": example.get("prompt", "")},
+            {"role": "assistant", "content": example.get("completion", "")},
+        ]
+    canonical = json.dumps(messages, sort_keys=True)
+    digest = hashlib.sha256(
+        f"stella-val-v1:{seed}:{canonical}".encode("utf-8")
+    ).digest()
+    return int.from_bytes(digest[:8], "big") / 2**64
 
 
 def split_dataset(
     examples: list[dict], val_fraction: float = 0.1, seed: int = 42
 ) -> tuple[list[dict], list[dict]]:
-    """Deterministic train/validate split (same seed = same split).
+    """Train/validate split by content hash (T155).
+
+    A row validates when its content hash falls in the lowest
+    `val_fraction` of the range — membership depends only on the
+    row itself, so adding rows never moves an old row between
+    train and val, and val loss stays comparable across runs.
 
     Always keeps at least one example for validation (T33) — a
     2-example dataset used to validate on 0 rows while load_dataset
     promised "1 to train on, 1 to validate". The cap at n - 1 keeps
-    at least one example for training.
+    at least one example for training. The two guards are the one
+    exception to stability: a dataset with no row under the
+    threshold validates on its lowest-hash row, and a new row
+    with an even lower hash can take that slot — with no stored
+    memory of past splits, a stateless rule cannot do better.
     """
-    order = list(range(len(examples)))
-    random.Random(seed).shuffle(order)
-    n_val = int(round(len(examples) * val_fraction))
-    n_val = max(1, min(n_val, len(examples) - 1))
-    val_idx = set(order[:n_val])
+    frac = min(max(float(val_fraction), 0.0), 1.0)
+    hashes = [_row_val_hash(ex, seed) for ex in examples]
+    val_idx = {i for i, h in enumerate(hashes) if h < frac}
+    if not val_idx and examples:
+        # No row fell under the threshold: the lowest-hash row
+        # validates (T33), so the run still has a val signal.
+        val_idx = {min(range(len(examples)), key=lambda i: hashes[i])}
+    if len(val_idx) >= len(examples) and examples:
+        # Every row fell under the threshold: the highest-hash row
+        # trains, so the run still has something to learn from.
+        val_idx.discard(
+            max(range(len(examples)), key=lambda i: hashes[i])
+        )
     train = [ex for i, ex in enumerate(examples) if i not in val_idx]
     val = [ex for i, ex in enumerate(examples) if i in val_idx]
     return train, val
+
+
+def val_membership_hashes(
+    examples: list[dict], val_fraction: float = 0.1, seed: int = 42
+) -> list[bool]:
+    """Per-row val membership (T155/T158): True when the row
+    validates under the content-hash split. The streaming dataset
+    check counts train/val without holding the rows — it hashes
+    each row as it passes and applies the same guards."""
+    frac = min(max(float(val_fraction), 0.0), 1.0)
+    hashes = [_row_val_hash(ex, seed) for ex in examples]
+    is_val = [h < frac for h in hashes]
+    if hashes and not any(is_val):
+        is_val[min(range(len(hashes)), key=lambda i: hashes[i])] = True
+    if hashes and all(is_val):
+        is_val[max(range(len(hashes)), key=lambda i: hashes[i])] = False
+    return is_val
 
 
 def resolve_dataset_ref(
@@ -382,8 +541,10 @@ def check_dataset(store: Store, profile: str, project: str,
                   ref: str) -> dict:
     """Check a dataset ref for display (T45): resolve it, validate
     the JSONL with the trainer's own validator, count the examples,
-    split train/val, and preview the first 3. Returns a dict; never
-    raises — a bad dataset is a report, not a crash:
+    split train/val, and preview the first 3. The check streams
+    the file (T158) — a big dataset checks without loading whole.
+    Returns a dict; never raises — a bad dataset is a report, not
+    a crash:
 
       status: "unset" (no ref), "ok", "missing", "invalid"
       count, train, val: example counts (0 unless ok)
@@ -396,12 +557,13 @@ def check_dataset(store: Store, profile: str, project: str,
         asks before starting on one
       est_tokens: rough total token count (T83), chars / 4 — 0
         unless ok
+      bytes: the dataset file size (T158) — 0 unless ok
     """
     ref = (ref or "").strip()
     empty = {
         "status": "unset", "count": 0, "train": 0, "val": 0,
         "format": None, "preview": [], "error": None, "path": None,
-        "tiny": False, "est_tokens": 0,
+        "tiny": False, "est_tokens": 0, "bytes": 0,
     }
     if not ref:
         return empty
@@ -411,31 +573,64 @@ def check_dataset(store: Store, profile: str, project: str,
         return {**empty, "status": "missing",
                 "error": f"dataset not found: {ref!r}"}
     try:
-        examples, info = load_dataset(path)
+        info = stream_dataset_info(path)
     except StellaError as exc:
         return {**empty, "status": "invalid", "error": str(exc),
                 "path": str(path)}
-    train, val = split_dataset(examples)
-    preview = []
-    for example in examples[:3]:
-        messages = example.get("messages") or []
-        first = messages[0]["content"] if messages else ""
-        first = " ".join(first.split())
-        preview.append(first[:80] + ("..." if len(first) > 80 else ""))
-    # Rough token count (T83): the validator already counted the
-    # average prompt/completion characters, so the total is one
-    # multiplication away — no tokenizer, no model load.
-    total_chars = (
-        info["avg_prompt_chars"] + info["avg_completion_chars"]
-    ) * len(examples)
     return {
-        "status": "ok", "count": len(examples),
-        "train": len(train), "val": len(val),
-        "format": info["format"], "preview": preview,
+        "status": "ok", "count": info["count"],
+        "train": info["train"], "val": info["val"],
+        "format": info["format"], "preview": info["preview"],
         "error": None, "path": str(path),
-        "tiny": len(examples) < TINY_DATASET_BELOW,
-        "est_tokens": total_chars // CHARS_PER_TOKEN,
+        "tiny": info["count"] < TINY_DATASET_BELOW,
+        "est_tokens": info["est_tokens"],
+        "bytes": info["bytes"],
     }
+
+
+# -- dataset size (T158) -------------------------------------------
+# A dataset competes with the model for the same 8 GB: the rows
+# sit in memory as Python dicts, then again as tokenized
+# input_ids + labels lists. A tokenized token costs about 72
+# bytes — two Python-int lists (input_ids and labels) at roughly
+# 36 bytes a token each (pointer + int object) — so the estimate
+# is deliberately rough and on the high side.
+
+_TOKENIZED_BYTES_PER_TOKEN = 72
+
+# Warn before tokenizing a dataset over either line: the run
+# still starts, but the user knows it will be heavy.
+DATASET_WARN_BYTES = 10 * 1024 * 1024
+DATASET_WARN_ROWS = 5000
+
+
+def estimate_dataset_bytes(file_bytes: int, est_tokens: int) -> int:
+    """RAM for one dataset, roughly (T158): the file's own bytes
+    (the rows live as Python strings and dicts) plus the
+    tokenized copy (input_ids + labels, per token)."""
+    return int(file_bytes) + int(est_tokens) * _TOKENIZED_BYTES_PER_TOKEN
+
+
+def check_dataset_fit(
+    dataset_bytes: int,
+    training_bytes: int,
+    limit_bytes: int = RAM_LIMIT_BYTES,
+) -> None:
+    """Refuse a run whose dataset would not fit alongside the
+    model (T158): the training estimate (T28) plus the dataset
+    estimate, against the same ceiling. The message names both
+    numbers, so the fix (a smaller dataset, or a smaller base)
+    is obvious."""
+    total = dataset_bytes + training_bytes
+    if total > limit_bytes:
+        raise StellaError(
+            f"This dataset would not fit alongside the model: "
+            f"training needs about {_gb(training_bytes)} of RAM "
+            f"and the dataset about {_gb(dataset_bytes)}, "
+            f"together over the {_gb(limit_bytes)} ceiling on "
+            "this PC.\n"
+            "Train on a smaller dataset, or use a smaller base model."
+        )
 
 
 # -- RAM guard ------------------------------------------------------
@@ -879,6 +1074,9 @@ def estimate_run(
         "dataset_count": len(examples),
         "dataset_format": info["format"],
         "est_tokens": total_chars // CHARS_PER_TOKEN,
+        "dataset_bytes": estimate_dataset_bytes(
+            info.get("bytes", 0), total_chars // CHARS_PER_TOKEN
+        ),
         "train_examples": len(train_examples),
         "val_examples": len(val_examples),
         "trainable_params": trainable,
@@ -1131,6 +1329,132 @@ def _chat_turn_end_ids(tokenizer) -> list[int]:
     return [i for i in ids if i in special]
 
 
+class _SegmentationFailed(Exception):
+    """The chat template would not segment into per-turn pieces
+    (a prefix render is not a prefix of the full render) — the
+    multi-turn tokenizer falls back to the plain renderer."""
+
+
+def _template_segments(tokenizer, messages: list[dict]):
+    """One multi-turn conversation as (text, is_completion)
+    segments through the chat template (T156).
+
+    For each assistant turn, the render up to that turn (with a
+    generation prompt) is the masked prompt, and the render
+    through the turn minus that prefix is the trained completion
+    — content plus the template's own turn end. Anything the
+    template appends after the last turn is masked prompt.
+    Raises _SegmentationFailed when a prefix render is not a
+    prefix of the longer render (some templates re-render the
+    whole conversation when a turn is added).
+    """
+    segments: list[tuple[str, bool]] = []
+    consumed = ""
+    for j, msg in enumerate(messages):
+        if msg["role"] != "assistant":
+            continue
+        pre = tokenizer.apply_chat_template(
+            messages[:j], tokenize=False, add_generation_prompt=True
+        )
+        post = tokenizer.apply_chat_template(
+            messages[:j + 1], tokenize=False, add_generation_prompt=False
+        )
+        if not isinstance(pre, str) or not isinstance(post, str):
+            raise _SegmentationFailed()
+        if not post.startswith(pre) or not pre.startswith(consumed):
+            raise _SegmentationFailed()
+        if pre[len(consumed):]:
+            segments.append((pre[len(consumed):], False))
+        if post[len(pre):]:
+            segments.append((post[len(pre):], True))
+        consumed = post
+    full = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=False
+    )
+    if not isinstance(full, str) or not full.startswith(consumed):
+        raise _SegmentationFailed()
+    if full[len(consumed):]:
+        segments.append((full[len(consumed):], False))
+    return segments
+
+
+def _fallback_segments(messages: list[dict]):
+    """The same segmentation through the plain renderer (T156):
+    'Role: content' lines, each assistant turn a completion.
+    For a single-turn row this renders exactly what
+    _render_fallback renders — the multi-turn path only runs
+    when there is more than one assistant turn."""
+    segments: list[tuple[str, bool]] = []
+    for idx, msg in enumerate(messages):
+        sep = "\n" if idx else ""
+        if msg["role"] == "assistant":
+            segments.append((sep + "Assistant:", False))
+            segments.append((" " + msg["content"], True))
+        else:
+            segments.append(
+                (sep + f"{msg['role'].capitalize()}: {msg['content']}", False)
+            )
+    return segments
+
+
+def _tokenize_multi_turn(tokenizer, messages: list[dict], max_seq_len: int) -> dict:
+    """Tokenize a multi-turn row (T156): EVERY assistant turn is
+    trained (unmasked), every user/system/tool turn is masked
+    prompt. The template path segments through apply_chat_template
+    (each turn's end token rides inside its completion); the
+    plain path segments through the fallback renderer and ends
+    the row with the template turn end, or EOS when the template
+    defines none (the same tail the single-turn path appends).
+
+    Truncation cuts from the left of the whole row: the earliest
+    prompt tokens go first, then the earliest turns — the most
+    recent turns are always kept, and the final turn's end tokens
+    are never cut. "truncated" says a completion token was cut.
+    """
+    templated = False
+    if hasattr(tokenizer, "apply_chat_template"):
+        try:
+            segments = _template_segments(tokenizer, messages)
+            templated = True
+        except Exception:
+            segments = _fallback_segments(messages)
+    else:
+        segments = _fallback_segments(messages)
+    input_ids: list[int] = []
+    labels: list[int] = []
+    for i, (text, is_completion) in enumerate(segments):
+        if not text:
+            continue
+        if i == 0:
+            ids = tokenizer.encode(text)
+        else:
+            ids = tokenizer.encode(text, add_special_tokens=False)
+        input_ids.extend(ids)
+        labels.extend(ids if is_completion else [-100] * len(ids))
+    # The tail (T100): the template path already ends each turn
+    # with the template's own terminator, so it needs nothing —
+    # unless the template defines no terminator, in which case
+    # EOS closes the row (the single-turn rule). The plain path
+    # has no turn ends at all, so it always appends the tail.
+    tail: list[int] = []
+    if not templated or not _chat_turn_end_ids(tokenizer):
+        turn_end = _chat_turn_end_ids(tokenizer)
+        eos = tokenizer.eos_token_id
+        tail = list(turn_end)
+        if not tail and eos is not None:
+            tail = [eos]
+        input_ids.extend(tail)
+        labels.extend(tail)
+    truncated = False
+    tail_len = len(tail)
+    while len(input_ids) > max_seq_len and len(input_ids) > tail_len:
+        dropped = labels.pop(0)
+        input_ids.pop(0)
+        if dropped != -100:
+            truncated = True
+    return {"input_ids": input_ids, "labels": labels, "truncated": truncated}
+
+
 def tokenize_example(tokenizer, example: dict, max_seq_len: int) -> dict:
     """Tokenize one example into input_ids + labels.
 
@@ -1138,8 +1462,14 @@ def tokenize_example(tokenizer, example: dict, max_seq_len: int) -> dict:
     — the model learns to WRITE the answer, not to predict the question.
     If the pair is too long, the prompt is cut from the left and the
     completion is kept whole.
+
+    Multi-turn rows (T156) train EVERY assistant turn: each turn's
+    completion is unmasked, each user/system/tool turn is masked.
+    A single assistant turn takes the original path, unchanged.
     """
     messages = example["messages"]
+    if sum(1 for m in messages if m["role"] == "assistant") > 1:
+        return _tokenize_multi_turn(tokenizer, messages, max_seq_len)
     if hasattr(tokenizer, "apply_chat_template"):
         try:
             prompt_text = tokenizer.apply_chat_template(
@@ -1258,6 +1588,24 @@ def evaluate_loss(
 
 # -- checkpoints ----------------------------------------------------
 
+def _dir_size_bytes(path: Path) -> int:
+    """A directory's size in bytes (T150): every file under it,
+    symlinks not followed. Unreadable files count 0 rather than
+    failing the listing."""
+    total = 0
+    try:
+        entries = list(path.rglob("*"))
+    except OSError:
+        return 0
+    for entry in entries:
+        try:
+            if entry.is_file() and not entry.is_symlink():
+                total += entry.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
 def list_checkpoints(
     store: Store, profile: str, project: str, *, ckpt_dir: Path | None = None
 ) -> list[dict]:
@@ -1265,6 +1613,9 @@ def list_checkpoints(
 
     `ckpt_dir` overrides the checkpoint folder — the sleep phase
     lists the checkpoints of one cycle, not the whole project.
+    Each entry carries step, path, loss, epoch — plus size_bytes
+    (the checkpoint's disk use, T150) and modified (its save time
+    as a Unix timestamp, for the date the list shows).
     """
     if ckpt_dir is None:
         ckpt_dir = store.project_dir(profile, project) / "checkpoints"
@@ -1281,16 +1632,79 @@ def list_checkpoints(
             state = json.loads(state_file.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             continue
+        try:
+            modified = state_file.stat().st_mtime
+        except OSError:
+            modified = 0.0
         out.append(
             {
                 "step": state.get("step", 0),
                 "path": str(d),
                 "loss": state.get("loss"),
                 "epoch": state.get("epoch"),
+                "size_bytes": _dir_size_bytes(d),
+                "modified": modified,
             }
         )
     out.sort(key=lambda c: c["step"])
     return out
+
+
+def delete_checkpoint(store: Store, profile: str, project: str,
+                      step: int) -> dict:
+    """Delete one checkpoint, permanently (T150).
+
+    The point is freeing disk — the trash does not free disk, so
+    there is no trash here. The caller confirms first (the window
+    asks, showing the size, defaulting to No). Returns the step
+    and the bytes freed. Raises StellaError when the checkpoint
+    does not exist.
+    """
+    ckpt_dir = (
+        store.project_dir(profile, project) / "checkpoints" / f"step-{step}"
+    )
+    if not ckpt_dir.is_dir():
+        raise StellaError(
+            f"no checkpoint step-{step} for project {project!r}"
+        )
+    freed = _dir_size_bytes(ckpt_dir)
+    shutil.rmtree(ckpt_dir)
+    return {"step": int(step), "freed_bytes": freed}
+
+
+def prune_checkpoints(store: Store, profile: str, project: str,
+                      keep: int = 3) -> dict:
+    """Delete all but the newest N checkpoints (T150).
+
+    Permanent, like delete_checkpoint — the caller confirms
+    first, showing the size before and after. Returns the kept
+    and deleted steps, the total size before and after, and the
+    bytes freed. `keep` must be at least 1: pruning to zero
+    would destroy every resume point.
+    """
+    if keep < 1:
+        raise StellaError(
+            "pruning must keep at least 1 checkpoint (the newest "
+            "one is the resume point)"
+        )
+    checkpoints = list_checkpoints(store, profile, project)
+    total_before = sum(c["size_bytes"] for c in checkpoints)
+    kept = checkpoints[-keep:] if checkpoints else []
+    doomed = checkpoints[:-keep] if len(checkpoints) > keep else []
+    freed = 0
+    deleted_steps: list[int] = []
+    for ck in doomed:
+        freed += _dir_size_bytes(Path(ck["path"]))
+        shutil.rmtree(ck["path"])
+        deleted_steps.append(ck["step"])
+    total_after = total_before - freed
+    return {
+        "kept": [c["step"] for c in kept],
+        "deleted": deleted_steps,
+        "freed_bytes": freed,
+        "total_before": total_before,
+        "total_after": total_after,
+    }
 
 
 def _save_checkpoint(model, optimizer, ckpt_dir: Path, state: dict) -> None:
@@ -1320,6 +1734,119 @@ def _save_checkpoint(model, optimizer, ckpt_dir: Path, state: dict) -> None:
 def _append_log(project_dir: Path, record: dict) -> None:
     with (project_dir / "train_log.jsonl").open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(record, sort_keys=True) + "\n")
+
+
+def _emit_warning(on_event, message: str) -> None:
+    """A warning event, when there is someone listening."""
+    if on_event is not None:
+        on_event({"type": "warning", "message": message})
+
+
+def _run_started_at() -> str:
+    """The run id (T151): the start time, ISO, UTC — unique per
+    run and readable in the log without decoding anything."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def list_runs(project_dir: str | Path) -> list[dict]:
+    """Past runs for one project, oldest first (T151), rebuilt
+    from train_log.jsonl.
+
+    Each run is date (started_at), steps, final loss, total
+    steps, whether it stopped early, and its loss curve
+    ([(step, loss), ...]) for the chart. Runs written since
+    v0.20.0 carry explicit run_started / run_finished records;
+    older logs split on a step that goes down (a new run starts
+    at step 1 again), the same boundary the live chart uses.
+    The settings snapshot rides in the run_started record for
+    future comparison — stored, never displayed (T16: the user
+    never sees settings values).
+    """
+    log_path = Path(project_dir) / "train_log.jsonl"
+    runs: list[dict] = []
+    if not log_path.is_file():
+        return runs
+    try:
+        lines = log_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return runs
+
+    def new_run(started_at: str | None) -> dict:
+        return {
+            "run_id": started_at or "",
+            "started_at": started_at,
+            "steps": 0,
+            "total_steps": 0,
+            "final_loss": None,
+            "stopped": False,
+            "finished": False,
+            "points": [],
+        }
+
+    current: dict | None = None
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        event = record.get("event")
+        if event == "run_started":
+            current = new_run(record.get("started_at"))
+            current["total_steps"] = int(record.get("total_steps") or 0)
+            current["run_id"] = record.get("run_id") or current["run_id"]
+            runs.append(current)
+            continue
+        if event == "run_finished":
+            if current is None:
+                current = new_run(record.get("started_at"))
+                runs.append(current)
+            current["finished"] = True
+            current["stopped"] = bool(record.get("stopped"))
+            try:
+                current["steps"] = int(record.get("steps") or current["steps"])
+            except (TypeError, ValueError):
+                pass
+            final = record.get("final_loss")
+            if final is not None:
+                try:
+                    current["final_loss"] = float(final)
+                except (TypeError, ValueError):
+                    pass
+            continue
+        if "loss" not in record or "step" not in record:
+            continue
+        try:
+            step = int(record["step"])
+            loss = float(record["loss"])
+        except (TypeError, ValueError):
+            continue
+        if current is None:
+            # A log from before run records: the first step opens
+            # an implicit run.
+            current = new_run(None)
+            runs.append(current)
+        elif current["points"] and step <= current["points"][-1][0]:
+            # A step that goes down starts a new run (an old log
+            # with no run_started record, or a resumed run that
+            # restarted its numbering).
+            current = new_run(None)
+            runs.append(current)
+        current["points"].append((step, loss))
+        current["steps"] = max(current["steps"], step)
+        if current["final_loss"] is None or step >= current["steps"]:
+            current["final_loss"] = loss
+        try:
+            current["total_steps"] = int(
+                record.get("total_steps") or current["total_steps"]
+            )
+        except (TypeError, ValueError):
+            pass
+    # A run that never finished has no final loss of its own —
+    # its last point is the latest loss, which the loop above
+    # already recorded.
+    return runs
 
 
 def _settings_drift(stored: dict, current: dict) -> list[str]:
@@ -1478,6 +2005,20 @@ def run_training_loop(
     # first, with the new total — before the "started" line, so the
     # announcement is the first thing the user reads. The CLI and
     # GUI both print it.
+    # The run record (T151) opens the run in the log first: the
+    # run history splits runs on it, and the settings snapshot
+    # rides along for future comparison (stored, never displayed).
+    run_id = _run_started_at()
+    _append_log(
+        project_dir,
+        {
+            "event": "run_started",
+            "run_id": run_id,
+            "started_at": run_id,
+            "total_steps": total_steps,
+            "settings": snapshot_settings,
+        },
+    )
     if extending:
         emit(
             {
@@ -1505,6 +2046,10 @@ def run_training_loop(
     model.train()
     step = start_step
     stopped = False
+    # The last step saved in-loop (T159): when the final step is
+    # a checkpoint step, the loop already saved it — the final
+    # save below must not save (and emit) it twice.
+    last_saved_step: int | None = None
     last_loss: float | None = None
     # The final val loss (T96): the last epoch-end validation, so
     # the run summary can report whether the tune generalized.
@@ -1592,6 +2137,7 @@ def run_training_loop(
                 }
                 ckpt = project_dir / "checkpoints" / f"step-{step}"
                 _save_checkpoint(model, optimizer, ckpt, state)
+                last_saved_step = step
                 emit({"type": "checkpoint", "step": step, "path": str(ckpt)})
             if controller is not None and controller.stop_requested:
                 stopped = True
@@ -1623,17 +2169,22 @@ def run_training_loop(
             break
 
     # Final checkpoint (also the resume point if the run is paused).
-    state = {
-        "step": step,
-        "epoch": min(epochs, epoch + 1) if not stopped else epoch + 1,
-        "loss": last_loss,
-        "examples_seen_in_epoch": examples_seen,
-        "stella_version": STELLA_VERSION,
-        "settings": snapshot_settings,
-    }
+    # T159: when the last step was already saved in-loop, the final
+    # save is skipped — same directory, same content, one event.
+    # The checkpoint path still names the step, for the return and
+    # the paused event below.
     ckpt = project_dir / "checkpoints" / f"step-{step}"
-    _save_checkpoint(model, optimizer, ckpt, state)
-    emit({"type": "checkpoint", "step": step, "path": str(ckpt)})
+    if last_saved_step != step:
+        state = {
+            "step": step,
+            "epoch": min(epochs, epoch + 1) if not stopped else epoch + 1,
+            "loss": last_loss,
+            "examples_seen_in_epoch": examples_seen,
+            "stella_version": STELLA_VERSION,
+            "settings": snapshot_settings,
+        }
+        _save_checkpoint(model, optimizer, ckpt, state)
+        emit({"type": "checkpoint", "step": step, "path": str(ckpt)})
 
     if not stopped:
         adapter_dir = project_dir / "adapter"
@@ -1665,6 +2216,20 @@ def run_training_loop(
     else:
         emit({"type": "paused", "step": step, "path": str(ckpt)})
 
+    # The run record closes (T151): the history reads the steps
+    # and final loss off this line. A crashed run never writes
+    # one — the history shows its points with no finish line.
+    _append_log(
+        project_dir,
+        {
+            "event": "run_finished",
+            "run_id": run_id,
+            "steps": step,
+            "final_loss": last_loss,
+            "stopped": stopped,
+        },
+    )
+
     return {
         "steps": step,
         "total_steps": total_steps,
@@ -1684,6 +2249,7 @@ def train_project(
     *,
     max_steps: int | None = None,
     resume: bool = False,
+    from_checkpoint: int | None = None,
     dataset_path: str | Path | None = None,
     base_ref: str | None = None,
     on_event=None,
@@ -1703,6 +2269,11 @@ def train_project(
     `_model_loader` is a test hook: a callable returning
     (model, tokenizer) so tests can train a tiny random model with no
     downloads. Real runs always load from Hugging Face.
+
+    `from_checkpoint` (T150) resumes from checkpoints/step-N
+    instead of the latest one — it implies resume. A missing step
+    is refused before anything loads, naming the checkpoints that
+    do exist.
 
     `work_dir` overrides where checkpoints, the adapter, and the log
     go (default: the project dir). The sleep phase trains into its
@@ -1732,6 +2303,10 @@ def train_project(
             ) from None
         if max_steps <= 0:
             raise StellaError("--steps must be at least 1.")
+    # A from-checkpoint resume is a resume (T150): the checkpoint
+    # picker passes the step and nothing else.
+    if from_checkpoint is not None:
+        resume = True
     # Cheap checks first (T48): the profile lookup, settings,
     # trained-refusal, base_ref, and dataset resolution below all
     # run BEFORE the dependency gate, so a base install reports
@@ -1809,12 +2384,37 @@ def train_project(
         float(settings.get("val_fraction", 0.1)),
         int(settings.get("seed", 42)),
     )
+    # The dataset-size warning (T158): a big dataset is said out
+    # loud before tokenization, with its size — the run still
+    # starts, but the user knows it will be heavy. The refusal
+    # (a dataset that will not fit alongside the model) comes
+    # later, once the training estimate exists.
+    dataset_bytes = estimate_dataset_bytes(
+        info.get("bytes", 0),
+        (
+            (info["avg_prompt_chars"] + info["avg_completion_chars"])
+            * len(examples)
+        )
+        // CHARS_PER_TOKEN,
+    )
+    if (
+        info.get("bytes", 0) > DATASET_WARN_BYTES
+        or len(examples) > DATASET_WARN_ROWS
+    ):
+        _emit_warning(
+            on_event,
+            f"This dataset is large ({len(examples):,} examples, "
+            f"about {_fmt_disk(info.get('bytes', 0))}). It will use "
+            f"about {_gb(dataset_bytes)} of RAM while training, "
+            "on top of the model.",
+        )
 
     # --resume with no checkpoints is refused here (T48), before
     # the deps gate — the user should not have to install the
     # training stack to learn there is nothing to resume. The list
     # is reused inside the lock for the actual resume.
     resume_checkpoints = None
+    resume_step = None
     if resume:
         resume_checkpoints = list_checkpoints(
             store, profile, project, ckpt_dir=work_dir / "checkpoints"
@@ -1823,6 +2423,19 @@ def train_project(
             raise StellaError(
                 "nothing to resume. This project has no checkpoints yet"
             )
+        if from_checkpoint is not None:
+            # Resume from a SELECTED checkpoint (T150): the step
+            # must exist, and the refusal names what does.
+            steps = [c["step"] for c in resume_checkpoints]
+            if from_checkpoint not in steps:
+                have = ", ".join(
+                    f"step-{s}" for s in steps
+                )
+                raise StellaError(
+                    f"no checkpoint step-{from_checkpoint} for "
+                    f"project {project!r}. This project has: {have}"
+                )
+            resume_step = from_checkpoint
 
     # One job at a time (T29): the engine lock. The cheap checks
     # above ran without it, so a bad profile or dataset is still
@@ -1848,6 +2461,9 @@ def train_project(
         if _model_loader is None:
             pre_estimate, _ = estimate_training_from_metadata(ref, settings)
             check_ram_fit(pre_estimate)
+            # The dataset fit (T158): the dataset must fit
+            # alongside the model, not just the model on its own.
+            check_dataset_fit(dataset_bytes, pre_estimate)
 
         # Load the base, then check the guard a second time with the
         # real param counts (belt and braces: the pre-load estimate
@@ -1860,10 +2476,11 @@ def train_project(
         if on_event is not None:
             on_event({
                 "type": "loading",
+                "model": ref,
                 "message": (
-                    "Loading the base model. The first run "
-                    "downloads it, and Ctrl+C takes effect when "
-                    "the download finishes."
+                    f"Loading {ref}... The first run downloads "
+                    "it, and Ctrl+C takes effect when the "
+                    "download finishes."
                 ),
             })
         if _model_loader is not None:
@@ -1895,9 +2512,15 @@ def train_project(
         if resume:
             # The checkpoint list was already read before the lock
             # (T48) — the empty case was refused there, so this
-            # list is non-empty.
+            # list is non-empty. A selected checkpoint (T150)
+            # wins over the latest one.
             checkpoints = resume_checkpoints
-            latest = checkpoints[-1]
+            if resume_step is not None:
+                latest = next(
+                    c for c in checkpoints if c["step"] == resume_step
+                )
+            else:
+                latest = checkpoints[-1]
             ckpt_dir = Path(latest["path"])
             model = PeftModel.from_pretrained(
                 model, str(ckpt_dir), is_trainable=True
