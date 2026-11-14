@@ -119,6 +119,18 @@ job, export it as a usable package.
   icons live in the hicolor theme at every size, and there is
   a double-click installer, an uninstaller, and `stella
   doctor` to repair an install after the folder moves.
+- v0.16.0 pre-train estimates + probe cluster (2026-11-14):
+  the Train panel shows a dataset health line and a RAM/time
+  estimate before a run starts, with an Estimate button (and
+  `stella train --dry-run`) for the full dry run; a tiny
+  dataset asks before training. The refusal probe is
+  informational for most profiles and a gate for governing
+  seats (a failed gate exits 3), its results carry provenance
+  and 6 hard-benign prompts, the evidence opens in a dialog
+  after each run, and Export GGUF previews the before/after
+  replies before committing. A proof-run button starts a
+  5-step smoke test, and finished runs report the val loss
+  next to the training loss.
 
 ## Install
 

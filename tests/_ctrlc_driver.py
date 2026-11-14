@@ -62,7 +62,10 @@ def main() -> int:
 
     store = Store(home)
     store.create_profile("p1", base_ref="test/tiny-model")
-    store.create_project("p1", "proj", dataset_ref="sample.jsonl")
+    # The pre-train dataset check (T83) runs before the engine, so
+    # the project needs a dataset that actually exists: the bundled
+    # sample resolves through the app data dir.
+    store.create_project("p1", "proj", dataset_ref="sample-tool-calls.jsonl")
     train_mod.train_project = _fake_train
     return cli_mod.main(["train", "p1", "proj"])
 

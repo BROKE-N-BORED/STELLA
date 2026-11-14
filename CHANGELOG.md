@@ -1,5 +1,57 @@
 # Changelog
 
+## v0.16.0 — 2026-11-14
+
+The pre-train estimates + probe cluster (audit tasks T83, T84, T85,
+T90, T91, T92, T93, T94, T95, T96, T148): the window answers "will
+this run fit, how long, how much disk" before training starts, and
+the refusal probe is a real surface — informational for most
+profiles, a gate for governing seats, with its evidence one click
+away and a before/after preview before export.
+
+- T83 — pre-train dataset health check: the Train panel shows the
+  row count, format, and a rough token count for a healthy dataset
+  (and the problem, with line numbers, for a bad one). A failing
+  check blocks the run with the errors named; a tiny dataset
+  (under 10 examples) asks to proceed in the window and warns on
+  the CLI. Builds on T45's validator.
+- T84 — RAM/time estimate in the Train panel: fit + time for the
+  auto-config recipe, no settings on screen (T16). Updates when
+  the model, dataset, or job selection changes. The metadata read
+  is gated (local folder or downloaded weights only), so the
+  label never hangs the window on a network fetch.
+- T85 — dry-run estimate: an Estimate button in the Train panel
+  and `stella train --dry-run` on the CLI show RAM fit, step
+  count, disk needed, and a rough time — from metadata only, no
+  model load. Reuses T84's display math.
+- T90 — probe informational mode: `stella probe --informational`
+  reports the counts and the change with no verdict and exits 0
+  regardless. The window probes informationally for non-governing
+  profiles; governing seats (judge, reviewer, merger, grader,
+  router) still get the gate.
+- T91 — a failed probe gate exits 3 (not 1); a crashed probe
+  still exits 1. The gate verdict goes to stderr, separate from
+  the numbers on stdout.
+- T92 — probe provenance in probe_results.json: timestamp,
+  base_ref, adapter path, max_new_tokens, and a prompts-version
+  marker (PROMPTS_VERSION, now 2).
+- T93 — hard-benign prompts in the probe set: 6 legitimate
+  near-boundary requests (your own lock, your own network, a
+  contentious topic, a household chemical, a phishing check, a
+  firm no), additional to the 12 trivial prompts, which stay.
+- T94 — the probe results dialog: per-prompt reply + refused
+  flag, before and after side by side, with the gate verdict (or
+  the informational note). Opens when a probe finishes; re-open
+  it any time with View probe results.
+- T95 — proof-run button in the Train panel: a short capped run
+  (5 steps), passed through as max_steps.
+- T96 — the final val loss is returned from run_training_loop,
+  written to training_summary.json, and shown in the Train
+  panel's summary line and the CLI's closing line.
+- T148 — before/after preview before export: Export GGUF shows
+  the probe's before/after replies (the T94 dialog) when probe
+  results exist; Export goes ahead, Go back cancels.
+
 ## v0.15.0 — 2026-11-14
 
 The installer-coherence slice (audit tasks T42, T62, T63, T64, T65,

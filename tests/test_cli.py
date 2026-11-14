@@ -854,3 +854,289 @@ def test_cli_import_prints_summary_before_importing(tmp_path):
     assert "Imported project 'proj'" in res.stdout
     # The summary comes before the import confirmation.
     assert res.stdout.index("Profile p1") < res.stdout.index("Imported")
+
+
+# -- T83/T85/T90/T91/T96: the v0.16.0 CLI cluster ----------------------
+# In-process (main() directly) so the engine can be faked: the probe
+# and the trainer need weights, but the exit codes, the verdict
+# channel, and the pre-flight only need the CLI's own logic.
+
+
+def _rising_probe_result():
+    """A probe result where refusals ROSE after tuning: the gate
+    fails on it, and an informational run reports the change."""
+    return {
+        "profile": "p1",
+        "project": "proj",
+        "before": {
+            "total": 18, "refusals": 0, "empty": 0, "rate": 0.0,
+            "details": [],
+        },
+        "after": {
+            "total": 18, "refusals": 3, "empty": 0,
+            "rate": 0.167, "details": [],
+        },
+        "delta": 0.167,
+        "mode": "gate",
+    }
+
+
+def _falling_probe_result():
+    result = _rising_probe_result()
+    result["after"] = {
+        "total": 18, "refusals": 0, "empty": 0, "rate": 0.0,
+        "details": [],
+    }
+    result["delta"] = 0.0
+    return result
+
+
+def _setup_probe_project(home):
+    run_cli(home, "create-profile", "p1", "--base", "test/tiny-model")
+    run_cli(home, "create-project", "p1", "proj")
+
+
+def test_cli_probe_gate_fail_exits_3(home, monkeypatch, capsys):
+    # T91: a failed gate exits 3 (not 1), and the verdict is on
+    # stderr — readable separately from the numbers on stdout.
+    import stella.cli as cli_mod
+    import stella.probe as probe_mod
+
+    monkeypatch.setenv("STELLA_HOME", str(home))
+    monkeypatch.setattr(
+        probe_mod, "probe_project",
+        lambda *a, **k: _rising_probe_result(),
+    )
+    _setup_probe_project(home)
+    code = cli_mod.main(["probe", "p1", "proj"])
+    assert code == 3
+    out = capsys.readouterr()
+    assert "0/18 refusals" in out.out
+    assert "3/18 refusals" in out.out
+    assert "gate failed" not in out.out
+    assert "gate failed" in out.err
+
+
+def test_cli_probe_gate_pass_exits_0(home, monkeypatch, capsys):
+    # T91: a passed gate still exits 0, verdict on stderr.
+    import stella.cli as cli_mod
+    import stella.probe as probe_mod
+
+    monkeypatch.setenv("STELLA_HOME", str(home))
+    monkeypatch.setattr(
+        probe_mod, "probe_project",
+        lambda *a, **k: _falling_probe_result(),
+    )
+    _setup_probe_project(home)
+    code = cli_mod.main(["probe", "p1", "proj"])
+    assert code == 0
+    out = capsys.readouterr()
+    assert "Gate passed" in out.err
+    assert "Gate passed" not in out.out
+
+
+def test_cli_probe_informational_exits_0_no_verdict(
+    home, monkeypatch, capsys
+):
+    # T90: an informational probe prints the counts and the change
+    # with no verdict, and exits 0 even when refusals rose.
+    import stella.cli as cli_mod
+    import stella.probe as probe_mod
+
+    seen = {}
+    monkeypatch.setenv("STELLA_HOME", str(home))
+
+    def fake_probe(store, profile, project, **kwargs):
+        seen.update(kwargs)
+        result = _rising_probe_result()
+        result["mode"] = "informational"
+        return result
+
+    monkeypatch.setattr(probe_mod, "probe_project", fake_probe)
+    _setup_probe_project(home)
+    code = cli_mod.main(["probe", "p1", "proj", "--informational"])
+    assert code == 0
+    assert seen["informational"] is True
+    out = capsys.readouterr()
+    assert "0/18 refusals" in out.out
+    assert "3/18 refusals" in out.out
+    assert "Change:" in out.out
+    assert "Gate" not in out.out
+    assert "Gate" not in out.err
+
+
+def test_cli_probe_crash_exits_1(home, monkeypatch, capsys):
+    # T91: a crashed probe still exits 1 — distinct from a failed
+    # gate (3).
+    import stella.cli as cli_mod
+    import stella.probe as probe_mod
+    from stella.model import StellaError
+
+    monkeypatch.setenv("STELLA_HOME", str(home))
+    monkeypatch.setattr(
+        probe_mod, "probe_project",
+        lambda *a, **k: (_ for _ in ()).throw(
+            StellaError("no trained adapter yet")
+        ),
+    )
+    _setup_probe_project(home)
+    code = cli_mod.main(["probe", "p1", "proj"])
+    assert code == 1
+    assert "no trained adapter" in capsys.readouterr().err
+
+
+def test_cli_probe_help_names_informational(home):
+    res = run_cli(home, "probe", "--help")
+    assert res.returncode == 0
+    assert "--informational" in res.stdout
+    assert "stella probe lfm3-tool tool-calls --informational" in res.stdout
+
+
+def _setup_train_project(home, dataset_ref="sample-tool-calls.jsonl"):
+    run_cli(home, "create-profile", "p1", "--base", "test/tiny-model")
+    run_cli(
+        home, "create-project", "p1", "proj", "--dataset", dataset_ref
+    )
+
+
+def test_cli_train_preflight_refuses_malformed_dataset(
+    home, monkeypatch, capsys, tmp_path
+):
+    # T83: starting a run with a malformed dataset is refused with
+    # the bad line numbers — the engine never starts.
+    import stella.cli as cli_mod
+    import stella.train as train_mod
+
+    monkeypatch.setenv("STELLA_HOME", str(home))
+    monkeypatch.setattr(
+        train_mod, "train_project",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("training started on a bad dataset")
+        ),
+    )
+    bad = tmp_path / "bad.jsonl"
+    bad.write_text('{"prompt": "a", "completion": "b"}\nnot json\n')
+    _setup_train_project(home, dataset_ref=str(bad))
+    code = cli_mod.main(["train", "p1", "proj"])
+    assert code == 1
+    assert "dataset line 2" in capsys.readouterr().err
+
+
+def test_cli_train_preflight_warns_tiny_dataset(
+    home, monkeypatch, capsys, tmp_path
+):
+    # T83: a 3-example dataset warns before starting (the CLI
+    # warns and proceeds; the window asks).
+    import stella.cli as cli_mod
+    import stella.train as train_mod
+
+    monkeypatch.setenv("STELLA_HOME", str(home))
+    monkeypatch.setattr(
+        train_mod, "train_project",
+        lambda *a, **k: {
+            "steps": 3, "final_loss": 5.5, "final_val_loss": 5.0,
+            "trainable_params": 12345, "ram_estimate_gb": 4.2,
+        },
+    )
+    tiny = tmp_path / "tiny.jsonl"
+    tiny.write_text(
+        "".join(
+            json.dumps({"prompt": f"Q{i}?", "completion": f"A{i}."}) + "\n"
+            for i in range(3)
+        )
+    )
+    _setup_train_project(home, dataset_ref=str(tiny))
+    code = cli_mod.main(["train", "p1", "proj"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "Dataset: 3 examples" in out
+    assert "Warning: only 3 examples" in out
+
+
+def test_cli_train_preflight_shows_healthy_dataset(
+    home, monkeypatch, capsys
+):
+    # T83: a healthy dataset shows its row count and format before
+    # the run starts.
+    import stella.cli as cli_mod
+    import stella.train as train_mod
+
+    monkeypatch.setenv("STELLA_HOME", str(home))
+    monkeypatch.setattr(
+        train_mod, "train_project",
+        lambda *a, **k: {
+            "steps": 3, "final_loss": 5.5, "final_val_loss": 5.0,
+            "trainable_params": 12345, "ram_estimate_gb": 4.2,
+        },
+    )
+    _setup_train_project(home)
+    code = cli_mod.main(["train", "p1", "proj"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "Dataset: 20 examples (messages format" in out
+
+
+def test_cli_train_closing_line_shows_val_loss(home, monkeypatch, capsys):
+    # T96: the closing line shows the final val loss next to the
+    # training loss.
+    import stella.cli as cli_mod
+    import stella.train as train_mod
+
+    monkeypatch.setenv("STELLA_HOME", str(home))
+    monkeypatch.setattr(
+        train_mod, "train_project",
+        lambda *a, **k: {
+            "steps": 3, "final_loss": 5.5, "final_val_loss": 5.1234,
+            "trainable_params": 12345, "ram_estimate_gb": 4.2,
+        },
+    )
+    _setup_train_project(home)
+    code = cli_mod.main(["train", "p1", "proj"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "final loss 5.5000, val loss 5.1234" in out
+
+
+def test_cli_train_dry_run_prints_estimate_without_training(
+    home, monkeypatch, capsys, tmp_path
+):
+    # T85: --dry-run prints RAM fit, steps, and disk — and trains
+    # nothing (the engine is rigged to fail if it starts).
+    import stella.cli as cli_mod
+    import stella.train as train_mod
+
+    monkeypatch.setenv("STELLA_HOME", str(home))
+    monkeypatch.setattr(
+        train_mod, "train_project",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("a dry run started training")
+        ),
+    )
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text(json.dumps({
+        "hidden_size": 2048, "num_hidden_layers": 24,
+        "intermediate_size": 8192, "torch_dtype": "bfloat16",
+    }))
+    (model_dir / "model.safetensors.index.json").write_text(json.dumps({
+        "metadata": {"total_size": 3_460_000_000},
+    }))
+    run_cli(home, "create-profile", "p1", "--base", str(model_dir))
+    run_cli(
+        home, "create-project", "p1", "proj",
+        "--dataset", "sample-tool-calls.jsonl",
+    )
+    code = cli_mod.main(["train", "p1", "proj", "--dry-run"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "RAM: about" in out
+    assert "fits in 8.00 GB" in out
+    assert "Steps: 9" in out
+    assert "Disk: about" in out
+    assert "Trained" not in out
+
+
+def test_cli_train_help_names_dry_run(home):
+    res = run_cli(home, "train", "--help")
+    assert res.returncode == 0
+    assert "--dry-run" in res.stdout

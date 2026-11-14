@@ -83,6 +83,18 @@ DEFAULT_TRAIN = {
 # Dataset roles, in order of appearance in a conversation.
 DATASET_ROLES = ("system", "user", "assistant")
 
+# A dataset under this many examples is "tiny" (T83): it trains, but
+# the model learns almost nothing general from it, so the pre-train
+# check asks the user to confirm instead of starting silently. The
+# bundled sample (20 examples) sits above the line on purpose.
+TINY_DATASET_BELOW = 10
+
+# Rough tokens-per-character for the pre-train token estimate (T83):
+# English text averages about 4 characters per token. The estimate
+# is an order of magnitude, not a tokenizer count — it is computed
+# without loading any model, so it stays cheap.
+CHARS_PER_TOKEN = 4
+
 
 # -- engine-side settings validation (T6, D6) -----------------------
 # The model layer (model.validate_settings) guards what gets STORED.
@@ -379,11 +391,17 @@ def check_dataset(store: Store, profile: str, project: str,
       preview: the first message of the first 3 examples, trimmed
       error: the plain-words problem (None unless missing/invalid)
       path: the resolved file (None unless found)
+      tiny: True when the dataset is ok but under
+        TINY_DATASET_BELOW examples (T83) — the pre-train check
+        asks before starting on one
+      est_tokens: rough total token count (T83), chars / 4 — 0
+        unless ok
     """
     ref = (ref or "").strip()
     empty = {
         "status": "unset", "count": 0, "train": 0, "val": 0,
         "format": None, "preview": [], "error": None, "path": None,
+        "tiny": False, "est_tokens": 0,
     }
     if not ref:
         return empty
@@ -404,11 +422,19 @@ def check_dataset(store: Store, profile: str, project: str,
         first = messages[0]["content"] if messages else ""
         first = " ".join(first.split())
         preview.append(first[:80] + ("..." if len(first) > 80 else ""))
+    # Rough token count (T83): the validator already counted the
+    # average prompt/completion characters, so the total is one
+    # multiplication away — no tokenizer, no model load.
+    total_chars = (
+        info["avg_prompt_chars"] + info["avg_completion_chars"]
+    ) * len(examples)
     return {
         "status": "ok", "count": len(examples),
         "train": len(train), "val": len(val),
         "format": info["format"], "preview": preview,
         "error": None, "path": str(path),
+        "tiny": len(examples) < TINY_DATASET_BELOW,
+        "est_tokens": total_chars // CHARS_PER_TOKEN,
     }
 
 
@@ -673,6 +699,215 @@ def estimate_training_from_metadata(
         batch_size=int(settings.get("batch_size", 1)),
         hidden_size=meta["hidden_size"],
         num_layers=meta["num_layers"],
+    )
+
+
+# -- pre-train estimate: RAM fit + steps + disk, no model load ------
+# (T84/T85). One function serves the Train panel's estimate label
+# (T84) and the dry run (T85) — the display math lives here, not in
+# two places. Everything comes from metadata (T28) + the dataset
+# file: the base model is never loaded, so asking "will this fit"
+# cannot itself OOM the machine.
+
+# Bytes per trainable parameter a checkpoint holds, roughly: the
+# adapter weights (fp32 master copy) + the AdamW optimizer state
+# (fp32 m + v) + the saved gradients. Deliberately on the high
+# side — the disk estimate should overstate, never understate.
+_CHECKPOINT_BYTES_PER_PARAM = 16
+
+
+def _rough_time_note(total_steps: int) -> str:
+    """A rough time band for a step count, in plain words (T84).
+
+    Orders of magnitude, not a promise: a CPU optimizer step on a
+    1.7B base takes on the order of a minute on this PC (several
+    micro-steps of forward + backward each), so the bands run from
+    minutes to many hours. The label says "rough" so nobody reads
+    it as a schedule."""
+    if total_steps < 10:
+        return "roughly minutes"
+    if total_steps < 100:
+        return "roughly tens of minutes to an hour"
+    if total_steps < 500:
+        return "roughly hours"
+    return "roughly many hours"
+
+
+def _effective_settings_for_estimate(
+    store: Store, profile: str, project: str
+) -> dict:
+    """The settings a run would use (T84): the auto-config recipe
+    for an "auto" project, re-resolved from a fresh measurement
+    WITHOUT storing it (a display refresh must not write), or the
+    stored settings for a "manual" one. The user never sees these
+    numbers (T16) — the estimate shows fit and time, not knobs."""
+    proj = store.get_project(profile, project)
+    settings = dict(DEFAULT_TRAIN)
+    if proj.get("settings_source", "manual") == "auto":
+        measurement = measure_pc(store.home)
+        settings.update(compute_settings(measurement["ram_available_gb"]))
+    else:
+        settings.update(proj.get("settings", {}) or {})
+    return settings
+
+
+def estimate_run(
+    store: Store,
+    profile: str,
+    project: str,
+    *,
+    dataset_path: str | Path | None = None,
+    base_ref: str | None = None,
+) -> dict:
+    """The pre-train estimate (T84/T85), from metadata only.
+
+    RAM fit (T28's honest estimator, no model load), the step
+    count for the dataset + settings, the disk the run needs
+    (checkpoints + adapter + merged weights), and a rough time
+    band. Raises StellaError when the answer cannot be found out
+    (no base ref, unreadable model metadata, bad dataset) — the
+    caller reports it plainly instead of guessing.
+
+    Returns: fits, estimate_bytes, limit_bytes, ram_gb, steps,
+    disk_bytes, time_note, dataset_count, dataset_format,
+    est_tokens, train_examples, val_examples, trainable_params,
+    base_bytes.
+    """
+    prof = store.get_profile(profile)
+    proj = store.get_project(profile, project)
+    ref = base_ref or prof.get("base_ref") or ""
+    if not ref:
+        raise StellaError(
+            f"profile {profile!r} has no base_ref. Set it to the "
+            f"Hugging Face repo of the base model (e.g. {LFM3_HF_REPO!r})"
+        )
+    settings = _effective_settings_for_estimate(store, profile, project)
+    settings.update(validate_run_settings(settings))
+    meta = load_model_metadata(ref)
+    trainable = estimate_lora_params(
+        hidden_size=meta["hidden_size"],
+        intermediate_size=meta["intermediate_size"],
+        num_layers=meta["num_layers"],
+        rank=int(settings.get("rank", 8)),
+    )
+    estimate_bytes, _breakdown = estimate_training_bytes(
+        params=meta["params"],
+        trainable_params=trainable,
+        base_bytes_per_param=meta["bytes_per_param"],
+        seq_len=int(settings.get("max_seq_len", 1024)),
+        batch_size=int(settings.get("batch_size", 1)),
+        hidden_size=meta["hidden_size"],
+        num_layers=meta["num_layers"],
+    )
+    if dataset_path is not None:
+        data_path = Path(dataset_path).expanduser()
+        if not data_path.is_file():
+            raise StellaError(f"dataset not found: {data_path}")
+    else:
+        dataset_ref = proj.get("dataset_ref") or ""
+        if not dataset_ref:
+            raise StellaError(
+                f"project {project!r} has no dataset set. Pick a .jsonl "
+                "dataset in the Train panel, or use the sample dataset"
+            )
+        data_path = resolve_dataset_ref(store, profile, project, dataset_ref)
+    examples, info = load_dataset(data_path)
+    train_examples, val_examples = split_dataset(
+        examples,
+        float(settings.get("val_fraction", 0.1)),
+        int(settings.get("seed", 42)),
+    )
+    steps_per_epoch = max(
+        1,
+        math.ceil(
+            len(train_examples)
+            / (
+                int(settings.get("batch_size", 1))
+                * int(settings.get("grad_accum", 8))
+            )
+        ),
+    )
+    total_steps = steps_per_epoch * int(settings.get("epochs", 3))
+    # Disk: the merged weights (a full copy of the base) + one
+    # checkpoint per checkpoint interval plus the final one + the
+    # finished adapter. A checkpoint interval of 0 means no
+    # mid-run checkpoints, only the final save.
+    checkpoint_steps = int(settings.get("checkpoint_steps", 50))
+    if checkpoint_steps > 0:
+        n_checkpoints = total_steps // checkpoint_steps + 1
+    else:
+        n_checkpoints = 1
+    disk_bytes = (
+        meta["base_bytes"]
+        + n_checkpoints * trainable * _CHECKPOINT_BYTES_PER_PARAM
+        + trainable * 4
+    )
+    total_chars = (
+        info["avg_prompt_chars"] + info["avg_completion_chars"]
+    ) * len(examples)
+    return {
+        "fits": estimate_bytes <= RAM_LIMIT_BYTES,
+        "estimate_bytes": estimate_bytes,
+        "limit_bytes": RAM_LIMIT_BYTES,
+        "ram_gb": round(estimate_bytes / 1024**3, 2),
+        "steps": total_steps,
+        "disk_bytes": disk_bytes,
+        "time_note": _rough_time_note(total_steps),
+        "dataset_count": len(examples),
+        "dataset_format": info["format"],
+        "est_tokens": total_chars // CHARS_PER_TOKEN,
+        "train_examples": len(train_examples),
+        "val_examples": len(val_examples),
+        "trainable_params": trainable,
+        "base_bytes": meta["base_bytes"],
+    }
+
+
+def _fmt_disk(n: int) -> str:
+    if n >= 1024**3:
+        return f"{n / 1024**3:.1f} GB"
+    if n >= 1024**2:
+        return f"{n / 1024**2:.0f} MB"
+    return f"{n:,} bytes"
+
+
+def format_estimate(estimate: dict) -> str:
+    """The dry-run report (T85): RAM fit, steps, disk, time — one
+    line each, in plain words. Shared by the CLI flag and the
+    Train panel's Estimate button."""
+    fit = (
+        f"fits in {_gb(estimate['limit_bytes'])}"
+        if estimate["fits"]
+        else f"will not fit in {_gb(estimate['limit_bytes'])}"
+    )
+    lines = [
+        f"RAM: about {_gb(estimate['estimate_bytes'])} ({fit}).",
+        f"Steps: {estimate['steps']} "
+        f"({estimate['train_examples']} training examples, "
+        f"{estimate['val_examples']} held out to validate).",
+        f"Disk: about {_fmt_disk(estimate['disk_bytes'])} "
+        "(checkpoints plus the adapter plus the merged weights).",
+        f"Time: {estimate['time_note']} on this PC (rough).",
+    ]
+    if not estimate["fits"]:
+        lines.append(
+            "This run will not fit this PC. Pick a smaller base "
+            "model, or train it elsewhere."
+        )
+    return "\n".join(lines)
+
+
+def format_estimate_short(estimate: dict) -> str:
+    """The one-line estimate for the Train panel label (T84): fit
+    and time, no settings (T16 — the user never sees the knobs)."""
+    if estimate["fits"]:
+        return (
+            f"Fits in 8 GB (about {estimate['ram_gb']} GB). "
+            f"{estimate['steps']} steps, {estimate['time_note']}."
+        )
+    return (
+        f"Will not fit in 8 GB (about {estimate['ram_gb']} GB). "
+        "Pick a smaller model, or train it elsewhere."
     )
 
 
@@ -1055,7 +1290,8 @@ def run_training_loop(
     extending: bool = False,
 ) -> dict:
     """The loop itself, separated from model loading so tests can pass
-    a tiny random model. Returns a summary dict. `max_steps` caps
+    a tiny random model. Returns a summary dict (steps, total_steps,
+    final_loss, final_val_loss, stopped, checkpoint). `max_steps` caps
     the run at that many optimizer steps from `start_step` (T56):
     reaching the cap is completion, not a pause — the adapter is
     saved and the run reports done. `extending` (T25) marks a
@@ -1144,6 +1380,11 @@ def run_training_loop(
     step = start_step
     stopped = False
     last_loss: float | None = None
+    # The final val loss (T96): the last epoch-end validation, so
+    # the run summary can report whether the tune generalized.
+    # None when no epoch finished (a run stopped mid-first-epoch
+    # never validated).
+    last_val_loss: float | None = None
     epoch = start_epoch
     examples_seen = skip_in_epoch
     for epoch in range(start_epoch, epochs):
@@ -1231,6 +1472,7 @@ def run_training_loop(
             break
         val_loss = evaluate()
         if val_loss is not None:
+            last_val_loss = val_loss
             _append_log(
                 project_dir,
                 {"step": step, "epoch": epoch + 1, "val_loss": round(val_loss, 4)},
@@ -1263,6 +1505,7 @@ def run_training_loop(
                     "steps": step,
                     "epochs": epochs,
                     "final_loss": last_loss,
+                    "final_val_loss": last_val_loss,
                     "rank": rank,
                     "stella_version": STELLA_VERSION,
                 },
@@ -1280,6 +1523,7 @@ def run_training_loop(
         "steps": step,
         "total_steps": total_steps,
         "final_loss": last_loss,
+        "final_val_loss": last_val_loss,
         "stopped": stopped,
         "checkpoint": str(ckpt),
     }

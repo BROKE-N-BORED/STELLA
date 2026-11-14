@@ -241,6 +241,47 @@ def cmd_train(args) -> int:
     from .train import TrainController, train_project
 
     store = _store()
+    # Pre-train dataset check (T83): the CLI pre-flight, the same
+    # check the Train panel runs — a malformed or missing dataset
+    # is refused here with the bad lines named, before the run
+    # starts; a healthy one reports its row count and format; a
+    # tiny one warns (the GUI asks; the CLI warns and proceeds,
+    # so scripted runs never block on a prompt).
+    from .train import check_dataset
+
+    dataset_ref = args.dataset
+    if dataset_ref is None:
+        dataset_ref = (
+            store.get_project(args.profile, args.project).get("dataset_ref")
+            or ""
+        )
+    health = check_dataset(store, args.profile, args.project, dataset_ref)
+    if health["status"] in ("missing", "invalid"):
+        print(f"stella: {health['error']}", file=sys.stderr)
+        return 1
+    if health["status"] == "ok":
+        print(
+            f"Dataset: {health['count']} examples "
+            f"({health['format']} format, about "
+            f"{health['est_tokens']:,} tokens)."
+        )
+        if health["tiny"]:
+            print(
+                f"Warning: only {health['count']} examples. A tiny "
+                "dataset teaches the model very little: it will "
+                "memorize these rows, not generalize from them."
+            )
+    # Dry run (T85): answer fit / steps / disk from metadata only
+    # (no model load) and stop — nothing trains.
+    if args.dry_run:
+        from .train import estimate_run, format_estimate
+
+        estimate = estimate_run(
+            store, args.profile, args.project,
+            dataset_path=args.dataset, base_ref=args.base,
+        )
+        print(format_estimate(estimate))
+        return 0
     controller = TrainController()
     events = {"last": 0}
 
@@ -317,9 +358,14 @@ def cmd_train(args) -> int:
         signal.signal(signal.SIGINT, old_handler)
     final_loss = summary["final_loss"]
     loss_text = f"{final_loss:.4f}" if final_loss is not None else "n/a"
+    # T96: the val loss is the number that says whether the tune
+    # generalized — the closing line carries it next to the
+    # training loss.
+    val_loss = summary.get("final_val_loss")
+    val_text = f"{val_loss:.4f}" if val_loss is not None else "n/a"
     print(
         f"Trained {summary['steps']} steps, "
-        f"final loss {loss_text}, "
+        f"final loss {loss_text}, val loss {val_text}, "
         f"{summary['trainable_params']:,} trainable params, "
         # T35: this is the pre-run estimate, not a measurement.
         f"about {summary['ram_estimate_gb']} GB RAM (estimated)."
@@ -358,7 +404,10 @@ def cmd_probe(args) -> int:
     from .probe import probe_gate, probe_project
 
     store = _store()
-    result = probe_project(store, args.profile, args.project)
+    result = probe_project(
+        store, args.profile, args.project,
+        informational=args.informational,
+    )
     before = result["before"]
     after = result["after"]
 
@@ -374,9 +423,24 @@ def cmd_probe(args) -> int:
 
     print(_line("Before tuning:", before))
     print(_line("After tuning: ", after))
+    if args.informational:
+        # T90: informational mode reports the counts and the
+        # change, no pass/fail verdict — and exits 0 regardless
+        # of what the change was.
+        print(
+            f"Change: {result['delta']:+.0%}. Informational only: "
+            "no gate verdict."
+        )
+        return 0
     passed, message = probe_gate(result)
-    print(message)
-    return 0 if passed else 1
+    # T91: the verdict goes to stderr, separate from the numbers
+    # on stdout, so a script can read each on its own. (T172 adds
+    # a --json verdict later; this is the hook it builds on.)
+    print(message, file=sys.stderr)
+    # T91: a failed gate exits 3 — distinct from a crash (1) and
+    # from argparse's usage error (2) — so a script can tell
+    # "the probe ran and the gate failed" from "the probe crashed".
+    return 0 if passed else 3
 
 
 def cmd_create_project(args) -> int:
@@ -824,6 +888,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("project", help="project name, e.g. tool-calls")
     p.add_argument("--steps", type=_positive_int, default=None,
                    help="cap the run at N optimizer steps (proof run)")
+    p.add_argument("--dry-run", action="store_true",
+                   help="estimate only: show RAM fit, step count, "
+                   "disk needed, and a rough time, without loading "
+                   "the model or training anything")
     p.add_argument("--resume", action="store_true",
                    help="continue from the latest checkpoint")
     p.add_argument("--force", action="store_true",
@@ -859,9 +927,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_export_gguf)
 
     p = _cmd("probe", "refusal probe, before vs after tuning",
-             "examples:\n  stella probe lfm3-tool tool-calls")
+             "examples:\n"
+             "  stella probe lfm3-tool tool-calls\n"
+             "  stella probe lfm3-tool tool-calls --informational")
     p.add_argument("profile", help="profile name, e.g. lfm3-tool")
     p.add_argument("project", help="project name, e.g. tool-calls")
+    p.add_argument(
+        "--informational", action="store_true",
+        help="informational mode: report the before/after counts "
+        "and the change with no pass/fail verdict, and exit 0 "
+        "regardless. Without it the probe is a gate: a failed "
+        "gate exits 3.",
+    )
     p.set_defaults(func=cmd_probe)
 
     p = _cmd(

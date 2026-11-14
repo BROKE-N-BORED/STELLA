@@ -67,6 +67,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication,
+    QAbstractItemView,
     QButtonGroup,
     QCheckBox,
     QComboBox,
@@ -75,6 +76,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QFrame,
     QHBoxLayout,
+    QHeaderView,
     QInputDialog,
     QLabel,
     QLineEdit,
@@ -88,6 +90,8 @@ from PySide6.QtWidgets import (
     QRadioButton,
     QScrollArea,
     QSplitter,
+    QTableWidget,
+    QTableWidgetItem,
     QTextBrowser,
     QTreeWidget,
     QTreeWidgetItem,
@@ -130,6 +134,13 @@ from .providers import (
     test_connection,
 )
 from .train import TrainController
+
+# The proof run's step cap (T95): a short smoke test before an
+# hours-long run — 5 optimizer steps is enough to prove the data,
+# the model, and the loop all work, and short enough to finish in
+# minutes on this PC. Passed through as max_steps (T56 made the
+# cap real); reaching it is completion, not a pause.
+PROOF_RUN_STEPS = 5
 
 
 def _help_label(text):
@@ -521,13 +532,14 @@ class TrainWorker(QThread):
     finished = Signal(bool, str)  # ok, message
 
     def __init__(self, store, profile, project, resume=False, force=False,
-                 parent=None):
+                 max_steps=None, parent=None):
         super().__init__(parent)
         self._store = store
         self._profile = profile
         self._project = project
         self._resume = resume
         self._force = force
+        self._max_steps = max_steps
         self._controller = TrainController()
 
     def request_stop(self):
@@ -583,6 +595,7 @@ class TrainWorker(QThread):
                 self._project,
                 resume=self._resume,
                 force=self._force,
+                max_steps=self._max_steps,
                 on_event=self._event,
                 controller=self._controller,
             )
@@ -592,7 +605,19 @@ class TrainWorker(QThread):
         except Exception as exc:  # keep the window alive on a crash
             self.finished.emit(False, f"Training failed: {exc}")
             return
-        self.finished.emit(True, f"Trained {summary['steps']} steps.")
+        # T96: the finish line carries the val loss next to the
+        # training loss — it is the number that says whether the
+        # tune generalized. A run stopped before its first epoch
+        # end never validated, so the val half is left out rather
+        # than printed as a fake number.
+        message = f"Trained {summary['steps']} steps."
+        final_loss = summary.get("final_loss")
+        if final_loss is not None:
+            message += f" Final loss {final_loss:.4f}."
+        val_loss = summary.get("final_val_loss")
+        if val_loss is not None:
+            message += f" Validation loss {val_loss:.4f}."
+        self.finished.emit(True, message)
 
 
 class SleepWorker(QThread):
@@ -2951,6 +2976,7 @@ class ImportPreviewDialog(QDialog):
         row.addWidget(self.confirm_btn)
         row.addWidget(self.cancel_btn)
         layout.addLayout(row)
+        self.resize(520, 320)
 
     def profile_choice(self):
         """The merge choice: "take" only when the take radio is
@@ -2961,6 +2987,123 @@ class ImportPreviewDialog(QDialog):
         if self._take_radio is None:
             return None
         return "take" if self._take_radio.isChecked() else "keep"
+
+
+class ProbeResultsDialog(QDialog):
+    """The probe evidence (T94): every prompt's reply + refused
+    flag, before and after side by side, with the gate verdict —
+    the numbers behind the one-line summary, one click away. The
+    before/after preview before export (T148) REUSES this dialog
+    instead of building a second side-by-side view: export mode
+    swaps the Close button for Export / Go back.
+
+    The mode comes from the saved result (T90): a "gate" run shows
+    the gate verdict; an "informational" run shows no verdict at
+    all, only the counts and the change. A result saved before
+    v0.16 has no mode key and reads as a gate run — every probe
+    before v0.16 was one."""
+
+    def __init__(self, parent, result: dict, *, export_mode: bool = False):
+        super().__init__(parent)
+        self.setWindowTitle(
+            "Before you export: what the tune changed"
+            if export_mode
+            else "Refusal probe results"
+        )
+        self._result = result
+        before = result.get("before") or {}
+        after = result.get("after") or {}
+        layout = QVBoxLayout(self)
+        self.counts_label = QLabel(
+            f"Refusals: {before.get('refusals', 0)}/"
+            f"{before.get('total', 0)} before, "
+            f"{after.get('refusals', 0)}/{after.get('total', 0)} after "
+            f"(change {result.get('delta', 0):+.0%})."
+        )
+        self.counts_label.setWordWrap(True)
+        layout.addWidget(self.counts_label)
+        if result.get("mode", "gate") == "informational":
+            verdict_text = (
+                "Informational only: this probe does not pass or "
+                "fail anything. Read the counts as a signal."
+            )
+        else:
+            from .probe import probe_gate
+
+            _passed, verdict_text = probe_gate(result)
+        self.verdict_label = QLabel(verdict_text)
+        self.verdict_label.setWordWrap(True)
+        layout.addWidget(self.verdict_label)
+        if export_mode:
+            note = QLabel(
+                "Read what changed, then export or go back. "
+                "Exporting does not run the probe again."
+            )
+            note.setWordWrap(True)
+            layout.addWidget(note)
+        before_details = before.get("details") or []
+        after_details = after.get("details") or []
+        rows = max(len(before_details), len(after_details))
+        self.table = QTableWidget(rows, 5)
+        self.table.setHorizontalHeaderLabels([
+            "Prompt", "Before", "Refused", "After", "Refused",
+        ])
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Stretch
+        )
+        self.table.setWordWrap(True)
+        for i in range(rows):
+            b = before_details[i] if i < len(before_details) else {}
+            a = after_details[i] if i < len(after_details) else {}
+            prompt = b.get("prompt") or a.get("prompt") or ""
+            self.table.setItem(i, 0, QTableWidgetItem(prompt))
+            self.table.setItem(
+                i, 1, QTableWidgetItem(self._reply_text(b))
+            )
+            self.table.setItem(
+                i, 2, QTableWidgetItem(self._flag_text(b))
+            )
+            self.table.setItem(
+                i, 3, QTableWidgetItem(self._reply_text(a))
+            )
+            self.table.setItem(
+                i, 4, QTableWidgetItem(self._flag_text(a))
+            )
+        self.table.resizeRowsToContents()
+        layout.addWidget(self.table, 1)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        if export_mode:
+            self.export_btn = QPushButton("Export")
+            self.export_btn.clicked.connect(self.accept)
+            self.go_back_btn = QPushButton("Go back")
+            self.go_back_btn.clicked.connect(self.reject)
+            row.addWidget(self.export_btn)
+            row.addWidget(self.go_back_btn)
+        else:
+            self.close_btn = QPushButton("Close")
+            self.close_btn.clicked.connect(self.accept)
+            row.addWidget(self.close_btn)
+        layout.addLayout(row)
+        self.resize(900, 540)
+
+    @staticmethod
+    def _reply_text(detail: dict) -> str:
+        """The reply cell: the reply itself, or "(no answer)" for
+        a silent prompt (T30) — a blank cell would read as missing
+        data, and a silent model is evidence, not a gap."""
+        if detail.get("empty"):
+            return "(no answer)"
+        return detail.get("reply") or ""
+
+    @staticmethod
+    def _flag_text(detail: dict) -> str:
+        if detail.get("empty"):
+            return "No answer"
+        return "Refused" if detail.get("refused") else "Answered"
 
 
 class MainWindow(QMainWindow):
@@ -3008,6 +3151,18 @@ class MainWindow(QMainWindow):
         self._train_worker: TrainWorker | None = None
         self._sleep_worker: SleepWorker | None = None
         self._job_worker: JobWorker | None = None
+        # The running probe's job (T90/T94): which project it
+        # probed, and whether it was informational — the finish
+        # slot opens the results dialog for that project, with or
+        # without a gate verdict. Cleared when the dialog opens.
+        self._probe_job_key: tuple | None = None
+        self._probe_informational: bool = False
+        # The estimate label's cache (T84): the last computed
+        # text, keyed by what it was computed from. refresh_session
+        # runs often; the estimate only recomputes when the model
+        # or dataset changed.
+        self._estimate_cache_key: tuple | None = None
+        self._estimate_cache_text: str = ""
         # The running job worker's card title (T29): the refusal
         # message names the running job, and a title is what the
         # user recognizes ("Refusal probe", not "a job").
@@ -3434,6 +3589,13 @@ class MainWindow(QMainWindow):
         card_layout.addWidget(self.train_progress)
         self.train_loss = QLabel("Not started.")
         card_layout.addWidget(self.train_loss)
+        # The pre-train estimate (T84): fit + time for the
+        # auto-config recipe — no settings on screen (T16). It
+        # updates when the model, dataset, or job selection
+        # changes, via refresh_session.
+        self.train_estimate_label = QLabel("")
+        self.train_estimate_label.setWordWrap(True)
+        card_layout.addWidget(self.train_estimate_label)
         run_btns = QHBoxLayout()
         self.train_pause_btn = QPushButton("Pause")
         self.train_pause_btn.clicked.connect(self.pause_training)
@@ -3442,8 +3604,21 @@ class MainWindow(QMainWindow):
         self.train_resume_btn.clicked.connect(
             lambda: self.start_training(resume=True)
         )
+        # The proof run (T95): a short capped run, as a button —
+        # toy-simple, no settings on screen. It starts the same
+        # training with a 5-step cap.
+        self.train_proof_btn = QPushButton("Proof run")
+        self.train_proof_btn.clicked.connect(
+            lambda: self.start_training(max_steps=PROOF_RUN_STEPS)
+        )
+        # The dry run (T85): RAM fit + steps + disk, computed from
+        # metadata only — no model load — and shown in the log.
+        self.train_estimate_btn = QPushButton("Estimate")
+        self.train_estimate_btn.clicked.connect(self._on_estimate)
         run_btns.addWidget(self.train_pause_btn)
         run_btns.addWidget(self.train_resume_btn)
+        run_btns.addWidget(self.train_proof_btn)
+        run_btns.addWidget(self.train_estimate_btn)
         run_btns.addStretch(1)
         card_layout.addLayout(run_btns)
         layout.addWidget(card)
@@ -3464,6 +3639,13 @@ class MainWindow(QMainWindow):
         dataset_btns.addWidget(self.train_sample_btn)
         dataset_btns.addStretch(1)
         dataset_section.content_layout.addLayout(dataset_btns)
+        # The dataset health line (T83): row count, format, and a
+        # rough token count for a healthy dataset; the problem,
+        # with line numbers, for a bad one. Refreshed with the
+        # panel, so picking a dataset updates it at once.
+        self.dataset_health_label = QLabel("")
+        self.dataset_health_label.setWordWrap(True)
+        dataset_section.content_layout.addWidget(self.dataset_health_label)
         layout.addWidget(dataset_section)
         self.dataset_section = dataset_section
 
@@ -3476,8 +3658,13 @@ class MainWindow(QMainWindow):
         self.train_export_gguf_btn.clicked.connect(self.export_gguf_gui)
         self.train_probe_btn = QPushButton("Run refusal probe")
         self.train_probe_btn.clicked.connect(self.run_probe_gui)
+        # The probe evidence (T94), re-openable after the run: the
+        # saved results, per prompt, before and after.
+        self.train_view_probe_btn = QPushButton("View probe results")
+        self.train_view_probe_btn.clicked.connect(self._view_probe_results)
         export_btns.addWidget(self.train_export_gguf_btn)
         export_btns.addWidget(self.train_probe_btn)
+        export_btns.addWidget(self.train_view_probe_btn)
         export_btns.addStretch(1)
         checkpoints_section.content_layout.addLayout(export_btns)
         layout.addWidget(checkpoints_section)
@@ -3533,11 +3720,12 @@ class MainWindow(QMainWindow):
             self.dataset_sample_btn, self.dataset_pick_btn,
             self.job_card.cancel_btn,
             self.train_pause_btn, self.train_resume_btn,
+            self.train_proof_btn, self.train_estimate_btn,
             self.dataset_section.header_btn,
             self.train_pick_dataset_btn, self.train_sample_btn,
             self.checkpoints_section.header_btn,
             self.train_checkpoints, self.train_export_gguf_btn,
-            self.train_probe_btn,
+            self.train_probe_btn, self.train_view_probe_btn,
             self.log_section.header_btn, self.train_log,
             self.sleep_section.header_btn,
             self.sleep_dream_check, self.sleep_cycles,
@@ -3955,6 +4143,14 @@ class MainWindow(QMainWindow):
             and not self._training_running()
             and not self._sleep_running()
         )
+        # The proof run and the dry run follow the same rule as
+        # Resume: a session, and no run in progress (T95/T85).
+        self.train_proof_btn.setEnabled(
+            has_session
+            and not self._training_running()
+            and not self._sleep_running()
+        )
+        self.train_estimate_btn.setEnabled(has_session)
         # Export and probe follow the job rule in _refresh_go (a
         # second job is refused, T74); the download button follows
         # the weights state in _refresh_download_row (T79).
@@ -3965,7 +4161,86 @@ class MainWindow(QMainWindow):
         self._refresh_go()
         self._refresh_menu_state()
         self.refresh_train_panel()
+        self._refresh_estimate()
         self._refresh_checklist()
+
+    def _refresh_estimate(self):
+        """The pre-train estimate label (T84): fit + time for the
+        auto-config recipe, no settings on screen (T16). Cached
+        by (profile, project, dataset, base ref) — refresh_session
+        runs often, and the estimate only recomputes when one of
+        those changed.
+
+        The metadata read is gated, not attempted blindly: a
+        remote base ref would fetch from the Hub on every
+        refresh, so the estimate only computes when the weights
+        are already downloaded (the read then hits the local
+        cache) or the base is a local folder. Anything else shows
+        a plain unavailable line instead of hanging the window on
+        a network fetch."""
+        if not self._current_profile or not self._current_project:
+            self.train_estimate_label.setText("")
+            self._estimate_cache_key = None
+            self._estimate_cache_text = ""
+            return
+        try:
+            prof = self.store.get_profile(self._current_profile)
+            proj = self.store.get_project(
+                self._current_profile, self._current_project
+            )
+        except StellaError:
+            self.train_estimate_label.setText("Estimate unavailable.")
+            return
+        base_ref = (prof.get("base_ref") or "").strip()
+        key = self._estimate_key(
+            self._current_profile, self._current_project
+        )
+        if key == self._estimate_cache_key:
+            self.train_estimate_label.setText(self._estimate_cache_text)
+            return
+        text = "Estimate unavailable."
+        if base_ref:
+            local = Path(base_ref).expanduser().is_dir()
+            ready = False
+            if not local:
+                try:
+                    ready = (
+                        provision.weights_status(
+                            self.store, self._current_profile
+                        )["state"]
+                        == "ready"
+                    )
+                except StellaError:
+                    ready = False
+            if local or ready:
+                from .train import estimate_run, format_estimate_short
+
+                try:
+                    estimate = estimate_run(
+                        self.store,
+                        self._current_profile,
+                        self._current_project,
+                    )
+                except StellaError:
+                    # The dataset health line already names a bad
+                    # dataset; an unreadable model just leaves the
+                    # estimate blank.
+                    text = "Estimate unavailable."
+                else:
+                    text = format_estimate_short(estimate)
+            elif is_hf_repo_id(base_ref):
+                # A real Hub repo whose weights are not downloaded
+                # yet: the estimate appears once they are (the
+                # read then hits the local cache). A base ref that
+                # is not a repo id at all (an Ollama tag, from the
+                # T54 sync) stays plain unavailable — downloading
+                # would not make it estimable.
+                text = (
+                    "Estimate available after the model downloads."
+                )
+        self._estimate_cache_key = key
+        self._estimate_cache_text = text
+        self.train_estimate_label.setText(text)
 
     def _refresh_download_row(self):
         if not self._current_profile:
@@ -4042,7 +4317,10 @@ class MainWindow(QMainWindow):
             and not running
         )
         has_session = bool(self._current_profile and self._current_project)
-        for w in (self.train_export_gguf_btn, self.train_probe_btn):
+        for w in (
+            self.train_export_gguf_btn, self.train_probe_btn,
+            self.train_view_probe_btn,
+        ):
             w.setEnabled(has_session and not running)
         self._menu_action_run.setEnabled(self.go_btn.isEnabled())
 
@@ -4298,6 +4576,7 @@ class MainWindow(QMainWindow):
     def _start_job_worker(
         self, job, title: str, determinate: bool,
         from_job: str | None = None,
+        on_finished=None,
     ) -> bool:
         """Start a JobWorker job as a job card (T74): the card shows
         the title, the job's log lines become its live status, and
@@ -4306,7 +4585,10 @@ class MainWindow(QMainWindow):
         overwrite a running worker and orphan it. Returns False
         when refused. `from_job` names the picker tile the job came
         from (T149): the card morphs out of it. GGUF export and the
-        probe are not picker tiles, so they pass none."""
+        probe are not picker tiles, so they pass none. `on_finished`
+        (T94) is an extra finished slot, connected BEFORE the
+        worker starts — a fast job can emit before a caller that
+        connects afterwards gets its connection in."""
         if self._job_already_running():
             return False
         self._job_worker = JobWorker(job)
@@ -4315,6 +4597,8 @@ class MainWindow(QMainWindow):
         self._job_worker.log.connect(self.job_card.set_status)
         self._job_worker.progress.connect(self.job_card.set_progress)
         self._job_worker.finished.connect(self._on_job_finished)
+        if on_finished is not None:
+            self._job_worker.finished.connect(on_finished)
         self._set_activity("job", f"Working: {title.lower()}...")
         self.job_card.start(
             title, determinate,
@@ -5359,6 +5643,12 @@ class MainWindow(QMainWindow):
             if self._current_profile and self._current_project
             else None
         )
+        # The dataset health line (T83) follows the SESSION, not
+        # the pinned project: it is the session's dataset the user
+        # is about to train on. Updated on every refresh, not just
+        # on a project switch — picking a dataset refreshes the
+        # panel for the same project.
+        self._refresh_dataset_health()
         if running is not None and running != session:
             job = "Training" if self._training_running() else "Sleep"
             self.train_pin_label.setText(
@@ -5442,6 +5732,56 @@ class MainWindow(QMainWindow):
         else:
             self.train_log.setPlainText("")
 
+    def _refresh_dataset_health(self):
+        """The dataset health line (T83): row count, format, and a
+        rough token count for a healthy dataset; the problem, with
+        line numbers, for a bad one. A tiny dataset says so
+        outright — the pre-train check asks before starting on
+        one, and the label should not hide why."""
+        if not self._current_profile or not self._current_project:
+            self.dataset_health_label.setText("")
+            return
+        try:
+            proj = self.store.get_project(
+                self._current_profile, self._current_project
+            )
+        except StellaError:
+            self.dataset_health_label.setText("")
+            return
+        ref = proj.get("dataset_ref") or ""
+        if not ref.strip():
+            self.dataset_health_label.setText(
+                "No dataset yet. Pick a file, or use the sample dataset."
+            )
+            return
+        from .train import check_dataset
+
+        check = check_dataset(
+            self.store, self._current_profile, self._current_project, ref
+        )
+        if check["status"] == "ok":
+            text = (
+                f"{check['count']} examples, {check['format']} format, "
+                f"about {check['est_tokens']:,} tokens "
+                f"({check['train']} to train on, {check['val']} held "
+                "out to validate)."
+            )
+            if check["tiny"]:
+                text += (
+                    " Only a few examples: the model will memorize "
+                    "these rows, not generalize from them."
+                )
+            self.dataset_health_label.setText(text)
+        elif check["status"] == "missing":
+            self.dataset_health_label.setText(
+                f"Dataset not found: {ref}. Pick a file that exists, "
+                "or use the sample dataset."
+            )
+        else:  # invalid
+            self.dataset_health_label.setText(
+                f"Dataset problem: {check['error']}"
+            )
+
     def pick_dataset(self):
         if not self._current_profile or not self._current_project:
             self._warn("Pick a project first.")
@@ -5502,7 +5842,62 @@ class MainWindow(QMainWindow):
             "examples). Start training when ready."
         )
 
-    def start_training(self, resume: bool = False):
+    def _dataset_preflight_ok(self, profile: str, project: str) -> bool:
+        """The pre-train dataset check (T83): True when the run may
+        start. A failing check blocks the run with the errors
+        named (a dialog + a log line + the status bar, so the
+        reason is visible wherever the user is looking); a tiny
+        dataset asks to proceed. The check reuses T45's validator
+        (check_dataset) — one rule for what a dataset is,
+        wherever it is checked.
+
+        Modal audit: the tiny-dataset question is the only new
+        modal on this path, and it only appears when the dataset
+        is valid but tiny — every existing test that reaches
+        start_training either has no dataset (blocked, no
+        question) or a full one. The new tests stub the question.
+        """
+        try:
+            proj = self.store.get_project(profile, project)
+        except StellaError as exc:
+            self._warn(str(exc))
+            return False
+        ref = proj.get("dataset_ref") or ""
+        if not ref.strip():
+            message = (
+                "This project has no dataset set. Pick a dataset "
+                "file or use the sample dataset first."
+            )
+            self._train_log_line(message)
+            self._warn(message)
+            self._say("Training not started.")
+            return False
+        from .train import check_dataset
+
+        check = check_dataset(self.store, profile, project, ref)
+        if check["status"] != "ok":
+            message = f"Dataset problem: {check['error']}"
+            self._train_log_line(message)
+            self._warn(message)
+            self._say("Training not started.")
+            return False
+        if check["tiny"]:
+            answer = QMessageBox.question(
+                self,
+                "Train on only a few examples?",
+                f"This dataset has only {check['count']} examples. "
+                "The model will memorize these rows, not learn "
+                "from them. Train anyway?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                self._say("Training not started.")
+                return False
+        return True
+
+    def start_training(self, resume: bool = False,
+                       max_steps: int | None = None):
         profile = self._selected_profile()
         project = self._selected_project()
         if not profile or not project:
@@ -5566,8 +5961,17 @@ class MainWindow(QMainWindow):
         # weights may still be missing: offer the download first.
         if not self._weights_offer(profile):
             return
+        # The pre-train dataset check (T83), the last gate before
+        # the worker starts: a failing check blocks the run with
+        # the errors named, a tiny dataset asks to proceed. It
+        # runs after the deps and weights checks, so a missing
+        # training stack or missing weights is still reported
+        # first — the user fixes one thing at a time.
+        if not self._dataset_preflight_ok(profile, project):
+            return
         self._train_worker = TrainWorker(
-            self.store, profile, project, resume=resume, force=force
+            self.store, profile, project, resume=resume, force=force,
+            max_steps=max_steps,
         )
         self._train_worker.progress.connect(self._on_train_progress)
         self._train_worker.log.connect(self._train_log_line)
@@ -5576,19 +5980,31 @@ class MainWindow(QMainWindow):
         self._run_started_at = None
         self.go_btn.setEnabled(False)
         self.train_resume_btn.setEnabled(False)
+        self.train_proof_btn.setEnabled(False)
         self.train_pause_btn.setEnabled(True)
         self._set_activity(
             "training", "Resuming training..." if resume else "Training..."
         )
+        # A proof run (T95) says so on the card and in the log, so
+        # the short run is never mistaken for a full one that
+        # stopped early.
+        if max_steps is not None and not resume:
+            job_title = f"Proof run ({max_steps} steps)"
+            start_line = (
+                f"Starting proof run ({max_steps} steps)..."
+            )
+        else:
+            job_title = "Resuming training" if resume else "Training"
+            start_line = (
+                "Resuming training..." if resume else "Starting training..."
+            )
         self.job_card.start(
-            "Resuming training" if resume else "Training", True,
+            job_title, True,
             # The card morphs out of the Train tile (T149).
             from_rect=self._job_button_rect("train"),
             reduced_motion=reduced_motion(),
         )
-        self._train_log_line(
-            "Resuming training..." if resume else "Starting training..."
-        )
+        self._train_log_line(start_line)
         self.debug_log.action(
             f"training started: {profile}/{project} (resume={resume})"
         )
@@ -5604,6 +6020,58 @@ class MainWindow(QMainWindow):
             self._train_log_line(
                 "Pausing after this step (checkpoint will save)..."
             )
+
+    def _on_estimate(self):
+        """The dry run (T85): RAM fit + steps + disk, computed
+        from metadata only — no model load — and shown in the log
+        and on the estimate label. An explicit click, so a remote
+        base ref may fetch its config here (unlike the automatic
+        label refresh, which never fetches). A run that will not
+        fit warns in the report itself."""
+        profile = self._selected_profile()
+        project = self._selected_project()
+        if not profile or not project:
+            self._warn("Pick a project first.")
+            return
+        from .train import (
+            estimate_run,
+            format_estimate,
+            format_estimate_short,
+        )
+
+        try:
+            estimate = estimate_run(self.store, profile, project)
+        except StellaError as exc:
+            self._warn(str(exc))
+            return
+        report = format_estimate(estimate)
+        self._train_log_line("Dry run (no model loaded):")
+        for line in report.splitlines():
+            self._train_log_line(line)
+        short = format_estimate_short(estimate)
+        self.train_estimate_label.setText(short)
+        # The label refresh keeps the dry-run answer until the
+        # model or dataset changes (it would otherwise overwrite
+        # it with "unavailable" for a remote base whose weights
+        # are not downloaded yet).
+        self._estimate_cache_key = self._estimate_key(profile, project)
+        self._estimate_cache_text = short
+        self._say(short.split(".")[0] + ".")
+
+    def _estimate_key(self, profile: str, project: str) -> tuple | None:
+        """The estimate cache key for a session (T84): what the
+        estimate was computed from. None when the manifests
+        cannot be read."""
+        try:
+            prof = self.store.get_profile(profile)
+            proj = self.store.get_project(profile, project)
+        except StellaError:
+            return None
+        return (
+            profile, project,
+            proj.get("dataset_ref") or "",
+            (prof.get("base_ref") or "").strip(),
+        )
 
     def _on_train_progress(self, step: int, total: int, loss: float,
                            epoch: int = 0):
@@ -5626,6 +6094,10 @@ class MainWindow(QMainWindow):
             self._set_activity("training", f"Training: step {step} / {total}")
 
     def _on_train_finished(self, ok: bool, message: str):
+        # Which project just finished (T47): the panel may be
+        # showing another project by now, and the finished run's
+        # summary belongs to its own project, not this panel's.
+        finished_key = self._running_job_key
         self._running_job_key = None  # unpins the Train panel (T47)
         self.train_pause_btn.setEnabled(False)
         self._set_activity("idle", "Idle")
@@ -5646,6 +6118,21 @@ class MainWindow(QMainWindow):
         self.stat_time_left.setText("Time left: done")
         self.refresh_tree()
         self.refresh_session()
+        # T96: the Train panel's summary line keeps the finished
+        # run's losses — training and validation — so the number
+        # that says whether the tune generalized stays visible
+        # after the run, not just in the log. Only when the
+        # message carries a val loss (a run that never validated
+        # leaves the live line alone — a finished run keeps its
+        # final step, T20), and only when the panel shows the
+        # finished project (a run on another project must not
+        # write its summary into this panel, T47). A missing key
+        # (no run was tracked) updates — the panel is the
+        # session's own.
+        if ok and message and "Validation loss" in message:
+            session_key = (self._current_profile, self._current_project)
+            if finished_key is None or finished_key == session_key:
+                self.train_loss.setText(message.splitlines()[0])
         # The confirmation goes last (T50): refresh_session reports
         # the session in the status bar, and a _say before it would
         # be overwritten before the user ever sees it.
@@ -5779,6 +6266,24 @@ class MainWindow(QMainWindow):
             return
         if self._job_already_running():
             return
+        # T148: before export, show what the tune changed — the
+        # probe's before/after replies, in the same dialog the
+        # probe itself opens (T94). Export goes ahead; Go back
+        # cancels before any folder is picked or any work starts.
+        # With no probe results there is nothing to preview, and
+        # the export proceeds as before.
+        # Modal audit: this dialog opens only when probe results
+        # exist for the project. No existing test has any (the
+        # export tests refuse the start or have no results file),
+        # so no existing test reaches it; the new tests stub it.
+        probe_result = self._load_probe_results(profile, project)
+        if probe_result is not None:
+            dialog = ProbeResultsDialog(
+                self, probe_result, export_mode=True
+            )
+            if dialog.exec() != QDialog.Accepted:
+                self._say("Export cancelled.")
+                return
         dest = QFileDialog.getExistingDirectory(
             self, "Export GGUF to folder", str(Path.home())
         )
@@ -5814,7 +6319,19 @@ class MainWindow(QMainWindow):
             return
         if self._job_already_running():
             return
-        from .probe import probe_gate, probe_project
+        # T90: the probe is a gate only for governing seats (a
+        # fine-tune bound for one must pass the refusal probe).
+        # Every other profile probes informationally: counts and
+        # change, no verdict. The mode is recorded in the saved
+        # result, so the dialog reads it back.
+        from .probe import is_governing_profile, probe_gate, probe_project
+
+        try:
+            prof = self.store.get_profile(profile)
+        except StellaError as exc:
+            self._warn(str(exc))
+            return
+        informational = not is_governing_profile(prof)
 
         def job(ctx):
             def on_event(event):
@@ -5832,9 +6349,9 @@ class MainWindow(QMainWindow):
 
             result = probe_project(
                 self.store, profile, project,
+                informational=informational,
                 on_event=on_event, should_stop=ctx.is_cancelled,
             )
-            _passed, verdict = probe_gate(result)
             before = result["before"]
             after = result["after"]
             summary = (
@@ -5849,10 +6366,85 @@ class MainWindow(QMainWindow):
                     f" {silent} prompt"
                     f"{'s' if silent != 1 else ''} got no answer."
                 )
+            if informational:
+                return (
+                    f"{summary}\nChange: {result['delta']:+.0%}. "
+                    "Informational only: no gate verdict."
+                )
+            _passed, verdict = probe_gate(result)
             return f"{summary}\n{verdict}"
 
-        self._start_job_worker(job, "Refusal probe", True)
+        self._probe_job_key = (profile, project)
+        self._probe_informational = informational
+        # T94: when the probe finishes, the evidence opens — the
+        # dialog reads the saved results for this project. The
+        # slot is connected before the worker starts (see
+        # _start_job_worker): a fast job must not beat it.
+        started = self._start_job_worker(
+            job, "Refusal probe", True,
+            on_finished=self._on_probe_finished,
+        )
+        if not started:
+            self._probe_job_key = None
         self._train_log_line("Running refusal probe (before vs after)...")
+
+    def _on_probe_finished(self, ok: bool, _message: str):
+        """A finished probe opens its evidence (T94): the results
+        dialog for the project that was probed. Only on a finished
+        run — a failed probe has no fresh results to show, and
+        showing stale ones as if they were fresh would lie. The
+        dialog reads the mode from the saved result, so an
+        informational run never shows a gate verdict.
+
+        Modal audit: this dialog opens only after a probe job
+        finishes. No existing test runs a probe job to completion
+        (the probe tests refuse the start), so no existing test
+        reaches it; the new probe tests stub the dialog."""
+        key = self._probe_job_key
+        self._probe_job_key = None
+        if not ok or key is None:
+            return
+        result = self._load_probe_results(*key)
+        if result is None:
+            return
+        dialog = ProbeResultsDialog(self, result)
+        dialog.exec()
+
+    def _load_probe_results(
+        self, profile: str, project: str
+    ) -> dict | None:
+        """The saved probe_results.json for a project, or None
+        when there is none (or it cannot be read). A missing or
+        corrupt file is not an error here — the caller decides
+        what to say."""
+        path = (
+            self.store.project_dir(profile, project) / "probe_results.json"
+        )
+        if not path.is_file():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    def _view_probe_results(self):
+        """Re-open the saved probe results (T94): the evidence
+        stays one click away after the run, not just when it
+        finishes."""
+        profile = self._selected_profile()
+        project = self._selected_project()
+        if not profile or not project:
+            self._warn("Pick a project first.")
+            return
+        result = self._load_probe_results(profile, project)
+        if result is None:
+            self._warn(
+                "No probe results yet. Run the refusal probe first."
+            )
+            return
+        dialog = ProbeResultsDialog(self, result)
+        dialog.exec()
 
     def closeEvent(self, event):
         self.settings.setValue("geometry", self.saveGeometry())

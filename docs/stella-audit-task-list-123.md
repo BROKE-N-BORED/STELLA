@@ -2490,6 +2490,7 @@ accounts for their findings.)
 - **Origin:** repo-audit verdict (R27)
 - **Covers:** R27
 - **Effort:** M
+- **Status:** DONE in v0.16.0 (2026-11-14) — before training starts, Stella checks the dataset's health: it blocks on a failing check and asks on a tiny dataset.
 - **Problem:** Nothing checks the dataset before a run starts — a
   malformed file, a wrong-format row, or a 3-example dataset
   fails (or silently trains garbage) hours into a run. T45
@@ -2515,6 +2516,7 @@ accounts for their findings.)
 - **Covers:** A2-W9, A2-G4, A2-D8
 - **Effort:** M
 - **Note:** Extended by T18 (Audit #9 R4).
+- **Status:** DONE in v0.16.0 (2026-11-14) — the detail panel shows whether the run fits in 8 GB and roughly how long it will take, with zero settings words.
 - **Problem:** Rank up to 64, seq len up to 32768, batch up to 32,
   epochs up to 100 — all selectable with no RAM or time estimate.
   The defaults are good, but the extremes are swap death on 8 GB
@@ -2542,6 +2544,7 @@ accounts for their findings.)
 - **Covers:** R28
 - **Effort:** M
 - **Depends on:** T84 (estimate display), T28 (honest RAM guard)
+- **Status:** DONE in v0.16.0 (2026-11-14) — the Estimate button works out RAM fit + steps + disk without loading the model (metadata only, shared with the display).
 - **Problem:** There is no way to ask "will this run fit, how
   long, how much disk" without starting the run — the
   detail-panel estimate (T84) shows RAM fit for the current
@@ -2681,6 +2684,7 @@ accounts for their findings.)
 - **Origin:** repo-audit verdict (R9)
 - **Covers:** R9
 - **Effort:** S
+- **Status:** DONE in v0.16.0 (2026-11-14) — the refusal probe knows governing seats (Driver, Reviewer, Fast/tester) from the rest: governing seats get the pass/fail gate, everything else gets counts with no verdict. (Coordinator fix: the builder's set was wrong — it gated judge/merger/grader/router and treated driver/fast as informational; fixed to GOVERNING_ROLES = driver, reviewer, tester, fast, with a forgiving substring match on the free-text role.)
 - **Problem:** The docs describe an informational probe mode, but
   the probe gate has none — every probe run is a pass/fail gate.
   For a stock base (LFM3) the probe is informational by design
@@ -2704,6 +2708,7 @@ accounts for their findings.)
 - **Origin:** audit #5 T11
 - **Covers:** A5-W12, A5-D10
 - **Effort:** S
+- **Status:** DONE in v0.16.0 (2026-11-14) — a failed probe gate exits 3 (a crash still exits 1), with the gate verdict to stderr.
 - **Problem:** `cmd_probe` returns `0 if passed else 1`
   (`cli.py:189`). A script — or a user reading the exit code —
   cannot tell "the probe ran and the gate failed" from "the probe
@@ -2725,6 +2730,7 @@ accounts for their findings.)
 - **Origin:** audit #8 T20
 - **Covers:** A8-G3, A8-D16
 - **Effort:** S
+- **Status:** DONE in v0.16.0 (2026-11-14) — probe results carry their provenance (timestamp, base_ref, adapter, max_new_tokens, prompts_version) and mode.
 - **Problem:** Probed keys of `probe_results.json`: `[after,
   before, delta, profile, project]` — no timestamp, no
   `base_ref`, no adapter path, no `max_new_tokens`, no prompts
@@ -2743,6 +2749,7 @@ accounts for their findings.)
 - **Origin:** audit #8 T21
 - **Covers:** A8-G4
 - **Effort:** S
+- **Status:** DONE in v0.16.0 (2026-11-14) — 6 hard-benign prompts added to the probe set (18 total, the 12 original unchanged); PROMPTS_VERSION = 2.
 - **Problem:** All 12 prompts are trivially benign. A model
   could regain refusals on edgy-but-legitimate requests —
   dual-use help, security-adjacent questions, contentious topics
@@ -2764,6 +2771,7 @@ accounts for their findings.)
 - **Covers:** A8-U4, A8-D17
 - **Effort:** M
 - **Note:** Extended by T148 (Audit #9 R19).
+- **Status:** DONE in v0.16.0 (2026-11-14) — the probe is surfaced in the window (View probe results button, ProbeResultsDialog).
 - **Problem:** `run_probe_gui` logs one line ("X/12 refusals
   before, Y/12 after") plus the verdict. `probe_results.json` —
   all 24 replies, the evidence behind the verdict — is never
@@ -2781,6 +2789,7 @@ accounts for their findings.)
 - **Origin:** audit #8 T17
 - **Covers:** A8-U2
 - **Effort:** S
+- **Status:** DONE in v0.16.0 (2026-11-14) — the Proof run button runs 5 steps to prove the setup.
 - **Problem:** The CLI has `--steps` for a quick proof run; the
   GUI's Start training always runs the full epoch budget
   (`gui.py:961` passes no `max_steps`, and no control exists).
@@ -2799,6 +2808,7 @@ accounts for their findings.)
 - **Covers:** A8-U3, A8-G8
 - **Effort:** S
 - **Note:** Extended by T148 (Audit #9 R19).
+- **Status:** DONE in v0.16.0 (2026-11-14) — the final validation loss is in the run summary and the window (the summary is written only when the finish message carries "Validation loss").
 - **Problem:** The loss label shows the last training loss; val
   loss appears only as a log line. When a run finishes, the
   window says "Trained N steps" with no val loss — the one
@@ -3973,6 +3983,7 @@ flag exposes the traceback the catch-all hides); T87 before T161
 - **Effort:** M
 - **Library:** 017 See it before you commit
 - **Extends:** T94 (surface the probe in the window), T96 (val loss in run summary and window).
+- **Status:** DONE in v0.16.0 (2026-11-14) — export shows the before/after preview before committing (reuses ProbeResultsDialog in export_mode).
 - **Problem:** Nothing shows what a fine-tune changed before the user commits to a GGUF export; the probe reports numbers in a dialog.
 - **Fix:** Before export, show a side-by-side from the probe: the base model's reply next to the fine-tuned model's reply to the same prompts, so the user sees what changed before committing.
 - **Done:** Export offers the preview; the user can export or go back.

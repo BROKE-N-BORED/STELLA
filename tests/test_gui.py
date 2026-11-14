@@ -637,6 +637,16 @@ def test_train_panel_widgets_exist(window):
     assert window.train_log is not None
     assert window.train_log.isReadOnly()
     assert window.train_pause_btn.isEnabled() is False
+    # v0.16.0: the proof run + estimate buttons, the estimate
+    # label, the dataset health line, and the probe results view.
+    assert window.train_proof_btn is not None
+    assert window.train_proof_btn.text() == "Proof run"
+    assert window.train_estimate_btn is not None
+    assert window.train_estimate_btn.text() == "Estimate"
+    assert window.train_estimate_label is not None
+    assert window.dataset_health_label is not None
+    assert window.train_view_probe_btn is not None
+    assert window.train_view_probe_btn.text() == "View probe results"
 
 
 def test_start_training_without_deps_logs_hint(window, monkeypatch):
@@ -1834,7 +1844,7 @@ def test_start_training_refused_on_unsaved_edits_in_open_window(
 
 
 def test_start_training_saves_dirty_window_then_starts(
-    window, seeded, monkeypatch, qapp
+    window, seeded, monkeypatch, qapp, tmp_path
 ):
     from PySide6.QtWidgets import QMessageBox
 
@@ -1842,6 +1852,15 @@ def test_start_training_saves_dirty_window_then_starts(
     import stella.train as train_mod
 
     _select_session(window)
+    # T83: the pre-train check blocks a missing dataset, so the
+    # file the form points at must exist — a real dataset in the
+    # store home, where the resolver looks.
+    (seeded.home / "new-data.jsonl").write_text(
+        "".join(
+            json.dumps({"prompt": f"Q{i}?", "completion": f"A{i}."}) + "\n"
+            for i in range(20)
+        )
+    )
     proj_win = window.open_project_window("lfm3-tool", "tool-calls")
     qapp.processEvents()
     proj_win.dataset_edit.setText("new-data.jsonl")
@@ -2053,6 +2072,13 @@ def test_start_training_on_done_project_asks_first(
 
     _select_session(window)
     seeded.update_project("lfm3-tool", "tool-calls", status="done")
+    # T83: the pre-train check blocks a missing dataset — the
+    # seeded ref points at a file that does not exist, so the
+    # sample stands in (the question under test is the re-train
+    # ask, not the dataset).
+    seeded.update_project(
+        "lfm3-tool", "tool-calls", dataset_ref="sample-tool-calls.jsonl"
+    )
     asked = []
     monkeypatch.setattr(
         QMessageBox, "question",
@@ -2074,6 +2100,11 @@ def test_start_training_on_done_project_yes_forces(
 
     _select_session(window)
     seeded.update_project("lfm3-tool", "tool-calls", status="done")
+    # T83: a valid dataset, so the pre-train check passes and the
+    # re-train question is the only gate.
+    seeded.update_project(
+        "lfm3-tool", "tool-calls", dataset_ref="sample-tool-calls.jsonl"
+    )
     monkeypatch.setattr(
         QMessageBox, "question", lambda *a, **k: QMessageBox.Yes
     )
@@ -2091,6 +2122,11 @@ def test_start_training_on_draft_project_does_not_ask(
 
     _select_session(window)
     assert seeded.get_project("lfm3-tool", "tool-calls")["status"] != "done"
+    # T83: a valid dataset, so the pre-train check passes and no
+    # question is asked at all.
+    seeded.update_project(
+        "lfm3-tool", "tool-calls", dataset_ref="sample-tool-calls.jsonl"
+    )
     asked = []
     monkeypatch.setattr(
         QMessageBox, "question",
@@ -2154,6 +2190,10 @@ def test_go_train_starts_training(window, monkeypatch, qapp):
 
     _select_session(window)
     window._checklist_dismiss()
+    # T83: a valid dataset, so the pre-train check passes.
+    window.store.update_project(
+        "lfm3-tool", "tool-calls", dataset_ref="sample-tool-calls.jsonl"
+    )
     monkeypatch.setattr(train_mod, "training_deps_missing", lambda: [])
     monkeypatch.setattr(window, "_weights_offer", lambda profile: True)
     monkeypatch.setattr(gui_mod.TrainWorker, "run", lambda self: None)
@@ -4806,6 +4846,10 @@ def test_start_training_morphs_from_train_tile(
     """T149: training morphs out of the Train tile."""
     window._checklist_dismiss()
     _select_session(window)
+    # T83: a valid dataset, so the pre-train check passes.
+    window.store.update_project(
+        "lfm3-tool", "tool-calls", dataset_ref="sample-tool-calls.jsonl"
+    )
     _start_training_ready(window, monkeypatch)
     window.start_training()
     assert window.job_card._morph_animation is not None
@@ -4910,3 +4954,680 @@ def test_accessibility_presets_persist(
         style_mod.set_reduced_motion(False)
         style_mod.apply_text_size(qapp, False)
     assert qapp.font().pointSize() == base
+
+
+# -- v0.16.0: pre-train estimates + probe cluster ----------------------
+
+
+def _write_dataset(path, n=20):
+    """A valid prompt/completion JSONL dataset with n rows."""
+    path.write_text(
+        "".join(
+            json.dumps({"prompt": f"Question {i}?", "completion": f"Answer {i}."})
+            + "\n"
+            for i in range(n)
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _fake_model_dir(path, total_size=3_460_000_000):
+    """A local HF folder with a config + a weight-size index — no
+    real weights, so the metadata read is fast and offline."""
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "config.json").write_text(json.dumps({
+        "hidden_size": 2048, "num_hidden_layers": 24,
+        "intermediate_size": 8192, "torch_dtype": "bfloat16",
+    }))
+    (path / "model.safetensors.index.json").write_text(json.dumps({
+        "metadata": {"total_size": total_size},
+    }))
+    return path
+
+
+def _probe_result(mode="gate", rising=True):
+    """A canned probe result: 2 prompts, refusals flat or rising."""
+    before = {
+        "total": 2, "refusals": 0, "empty": 0, "rate": 0.0,
+        "details": [
+            {
+                "prompt": "Write a Python function that adds two numbers.",
+                "reply": "Here is the function.",
+                "refused": False, "empty": False,
+            },
+            {
+                "prompt": "What is the capital of France?",
+                "reply": "The capital of France is Paris.",
+                "refused": False, "empty": False,
+            },
+        ],
+    }
+    after = {
+        "total": 2, "refusals": 1 if rising else 0, "empty": 0,
+        "rate": 0.5 if rising else 0.0,
+        "details": [
+            {
+                "prompt": "Write a Python function that adds two numbers.",
+                "reply": "Here is the function.",
+                "refused": False, "empty": False,
+            },
+            {
+                "prompt": "What is the capital of France?",
+                "reply": "I'm sorry, I can't help with that.",
+                "refused": True, "empty": False,
+            },
+        ],
+    }
+    if not rising:
+        after["details"][1] = {
+            "prompt": "What is the capital of France?",
+            "reply": "The capital of France is Paris.",
+            "refused": False, "empty": False,
+        }
+    return {
+        "profile": "lfm3-tool", "project": "tool-calls",
+        "before": before, "after": after,
+        "delta": 0.5 if rising else 0.0,
+        "timestamp": "2026-11-14T00:00:00+00:00",
+        "base_ref": "test/tiny-model",
+        "adapter": "/tmp/fake/adapter",
+        "max_new_tokens": 64,
+        "prompts_version": 2,
+        "mode": mode,
+    }
+
+
+# -- T83: dataset health before training ------------------------------
+
+
+def test_dataset_health_label_shows_row_count_and_format(window, seeded):
+    # T83: a healthy dataset shows its row count and format.
+    _select_session(window)
+    seeded.update_project(
+        "lfm3-tool", "tool-calls", dataset_ref="sample-tool-calls.jsonl"
+    )
+    window.refresh_train_panel()
+    text = window.dataset_health_label.text()
+    assert "20 examples" in text
+    assert "messages format" in text
+    assert "tokens" in text
+    assert "to train on" in text
+
+
+def test_dataset_health_label_shows_error_for_malformed(
+    window, seeded, tmp_path
+):
+    # T83: a malformed dataset names the bad line in the panel.
+    _select_session(window)
+    bad = tmp_path / "bad.jsonl"
+    bad.write_text('{"prompt": "a", "completion": "b"}\nnot json\n')
+    seeded.update_project(
+        "lfm3-tool", "tool-calls", dataset_ref=str(bad)
+    )
+    window.refresh_train_panel()
+    text = window.dataset_health_label.text()
+    assert "Dataset problem" in text
+    assert "line 2" in text
+
+
+def test_dataset_health_label_marks_tiny_dataset(window, seeded, tmp_path):
+    # T83: a tiny dataset says so outright in the panel.
+    _select_session(window)
+    tiny = _write_dataset(tmp_path / "tiny.jsonl", 3)
+    seeded.update_project(
+        "lfm3-tool", "tool-calls", dataset_ref=str(tiny)
+    )
+    window.refresh_train_panel()
+    text = window.dataset_health_label.text()
+    assert "3 examples" in text
+    assert "Only a few examples" in text
+
+
+def test_start_training_refuses_malformed_dataset(
+    window, seeded, monkeypatch, tmp_path
+):
+    # T83: starting a run with a malformed dataset is refused
+    # with the bad line numbers — no worker starts.
+    _select_session(window)
+    bad = tmp_path / "bad.jsonl"
+    bad.write_text('{"prompt": "a", "completion": "b"}\nnot json\n')
+    seeded.update_project(
+        "lfm3-tool", "tool-calls", dataset_ref=str(bad)
+    )
+    _start_training_ready(window, monkeypatch)
+    warnings = []
+    monkeypatch.setattr(window, "_warn", warnings.append)
+    window.start_training()
+    assert window._train_worker is None
+    assert warnings
+    assert "line 2" in warnings[0]
+    assert "line 2" in window.train_log.toPlainText()
+
+
+def test_start_training_refuses_missing_dataset(window, seeded, monkeypatch):
+    # T83: the seeded ref points at a file that does not exist —
+    # the run is refused, not started into a worker failure.
+    _select_session(window)
+    _start_training_ready(window, monkeypatch)
+    warnings = []
+    monkeypatch.setattr(window, "_warn", warnings.append)
+    window.start_training()
+    assert window._train_worker is None
+    assert warnings
+    assert "not found" in warnings[0]
+
+
+def test_start_training_tiny_dataset_asks_first(
+    window, seeded, monkeypatch, tmp_path
+):
+    # T83: a 3-example dataset asks to proceed — No stops the
+    # start, Yes starts it.
+    from PySide6.QtWidgets import QMessageBox
+
+    _select_session(window)
+    tiny = _write_dataset(tmp_path / "tiny.jsonl", 3)
+    seeded.update_project(
+        "lfm3-tool", "tool-calls", dataset_ref=str(tiny)
+    )
+    _start_training_ready(window, monkeypatch)
+    asked = []
+    monkeypatch.setattr(
+        QMessageBox, "question",
+        lambda *a, **k: asked.append(a[2]) or QMessageBox.No,
+    )
+    window.start_training()
+    assert window._train_worker is None
+    assert len(asked) == 1
+    assert "only 3 examples" in asked[0]
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.Yes
+    )
+    window.start_training()
+    assert window._train_worker is not None
+
+
+# -- T84: RAM/time estimate in the Train panel ------------------------
+
+
+def _estimable_session(window, seeded, tmp_path, total_size=3_460_000_000):
+    """A session on a local fake model with the sample dataset —
+    the estimate computes offline against it."""
+    model_dir = _fake_model_dir(tmp_path / "model", total_size)
+    seeded.create_profile("local-model", base_ref=str(model_dir))
+    seeded.create_project(
+        "local-model", "proj", dataset_ref="sample-tool-calls.jsonl"
+    )
+    window.set_session("local-model", "proj")
+    return window
+
+
+def test_estimate_label_shows_fit_for_small_model(
+    window, seeded, tmp_path, qapp
+):
+    # T84: the defaults on an LFM3-shaped base show "fits".
+    _estimable_session(window, seeded, tmp_path)
+    qapp.processEvents()
+    text = window.train_estimate_label.text()
+    assert text.startswith("Fits in 8 GB")
+    assert "9 steps" in text
+    # T16: no settings on screen.
+    assert "rank" not in text
+    assert "seq" not in text
+
+
+def test_estimate_label_shows_will_not_fit_for_huge_model(
+    window, seeded, tmp_path, qapp
+):
+    # T84: a 100 GB base shows "will not fit".
+    _estimable_session(
+        window, seeded, tmp_path, total_size=100_000_000_000
+    )
+    qapp.processEvents()
+    assert window.train_estimate_label.text().startswith("Will not fit")
+
+
+def test_estimate_label_updates_when_project_changes(
+    window, seeded, tmp_path, qapp
+):
+    # T84: the estimate updates when the selection changes.
+    _estimable_session(window, seeded, tmp_path)
+    qapp.processEvents()
+    assert "Fits in 8 GB" in window.train_estimate_label.text()
+    big = _fake_model_dir(tmp_path / "big", 100_000_000_000)
+    seeded.create_profile("big-model", base_ref=str(big))
+    seeded.create_project(
+        "big-model", "proj", dataset_ref="sample-tool-calls.jsonl"
+    )
+    window.set_session("big-model", "proj")
+    qapp.processEvents()
+    assert "Will not fit" in window.train_estimate_label.text()
+    window.set_session("local-model", "proj")
+    qapp.processEvents()
+    assert "Fits in 8 GB" in window.train_estimate_label.text()
+
+
+def test_estimate_label_unavailable_without_base_ref(window, qapp):
+    # T84: the seeded profile has no base ref — the label says
+    # unavailable instead of guessing or fetching.
+    _select_session(window)
+    qapp.processEvents()
+    assert window.train_estimate_label.text() == "Estimate unavailable."
+
+
+# -- T85: dry-run estimate button -------------------------------------
+
+
+def test_estimate_button_shows_dry_run_in_log(
+    window, seeded, tmp_path, qapp, monkeypatch
+):
+    # T85: the Estimate button shows RAM fit, step count, and
+    # disk needed in the log — without loading the model.
+    import stella.train as train_mod
+
+    _estimable_session(window, seeded, tmp_path)
+    qapp.processEvents()
+    # The no-load proof, at the GUI level: the loader is rigged
+    # to fail, and the button still answers.
+    monkeypatch.setattr(
+        train_mod, "load_base_model",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("the dry run loaded the model")
+        ),
+    )
+    window.train_estimate_btn.click()
+    qapp.processEvents()
+    log = window.train_log.toPlainText()
+    assert "Dry run (no model loaded)" in log
+    assert "RAM: about" in log
+    assert "Steps: 9" in log
+    assert "Disk: about" in log
+
+
+def test_estimate_button_without_model_warns(window, monkeypatch, qapp):
+    # T85: with no base ref the button warns plainly instead of
+    # crashing or hanging on a fetch.
+    _select_session(window)
+    warnings = []
+    monkeypatch.setattr(window, "_warn", warnings.append)
+    window.train_estimate_btn.click()
+    qapp.processEvents()
+    assert warnings
+    assert "base_ref" in warnings[0]
+
+
+# -- T95: proof-run button --------------------------------------------
+
+
+def test_proof_run_button_starts_capped_run(window, seeded, monkeypatch, qapp):
+    # T95: the Proof run button starts training with the 5-step
+    # cap passed through as max_steps.
+    from stella.gui import PROOF_RUN_STEPS
+
+    _select_session(window)
+    seeded.update_project(
+        "lfm3-tool", "tool-calls", dataset_ref="sample-tool-calls.jsonl"
+    )
+    _start_training_ready(window, monkeypatch)
+    assert window.train_proof_btn.text() == "Proof run"
+    assert window.train_proof_btn.isEnabled()
+    window.train_proof_btn.click()
+    qapp.processEvents()
+    assert window._train_worker is not None
+    assert window._train_worker._max_steps == PROOF_RUN_STEPS == 5
+    assert "Starting proof run (5 steps)" in window.train_log.toPlainText()
+
+
+def test_proof_run_button_disabled_without_session(window):
+    # T95/U6: no session, no proof run.
+    assert not window.train_proof_btn.isEnabled()
+
+
+# -- T96: val loss in the run summary ---------------------------------
+
+
+def test_train_finished_shows_val_loss_in_summary_line(window, qapp):
+    # T96: a finished run's summary line shows the final val loss
+    # next to the training loss.
+    _select_session(window)
+    window._on_train_finished(
+        True,
+        "Trained 12 steps. Final loss 1.2345. Validation loss 1.1000.",
+    )
+    qapp.processEvents()
+    assert "Validation loss 1.1000" in window.train_loss.text()
+    assert "Final loss 1.2345" in window.train_loss.text()
+
+
+def test_train_worker_finished_message_carries_val_loss(monkeypatch):
+    # T96: the worker's finish message carries the val loss from
+    # the run summary.
+    import stella.gui as gui_mod
+    import stella.train as train_mod
+
+    monkeypatch.setattr(
+        train_mod, "train_project",
+        lambda *a, **k: {
+            "steps": 12, "final_loss": 1.2345, "final_val_loss": 1.1,
+            "stopped": False, "checkpoint": "/tmp/fake/step-12",
+        },
+    )
+    seen = []
+    worker = gui_mod.TrainWorker(None, "p1", "proj")
+    worker.finished.connect(lambda ok, msg: seen.append((ok, msg)))
+    worker.run()
+    assert len(seen) == 1
+    ok, message = seen[0]
+    assert ok is True
+    assert message == (
+        "Trained 12 steps. Final loss 1.2345. Validation loss 1.1000."
+    )
+
+
+def test_train_worker_finished_message_without_val_loss(monkeypatch):
+    # T96: a run that never validated (stopped mid-first-epoch)
+    # omits the val half instead of printing a fake number.
+    import stella.gui as gui_mod
+    import stella.train as train_mod
+
+    monkeypatch.setattr(
+        train_mod, "train_project",
+        lambda *a, **k: {
+            "steps": 2, "final_loss": 2.5, "final_val_loss": None,
+            "stopped": True, "checkpoint": "/tmp/fake/step-2",
+        },
+    )
+    seen = []
+    worker = gui_mod.TrainWorker(None, "p1", "proj")
+    worker.finished.connect(lambda ok, msg: seen.append((ok, msg)))
+    worker.run()
+    assert seen[0][1] == "Trained 2 steps. Final loss 2.5000."
+    assert "Validation loss" not in seen[0][1]
+
+
+# -- T94: the probe results dialog ------------------------------------
+
+
+def test_probe_results_dialog_shows_replies_side_by_side(window, qapp):
+    # T94: per-prompt reply + refused flag, before and after side
+    # by side, with the gate verdict.
+    from PySide6.QtWidgets import QDialog
+
+    from stella.gui import ProbeResultsDialog
+
+    dialog = ProbeResultsDialog(window, _probe_result())
+    assert dialog.windowTitle() == "Refusal probe results"
+    assert "0/2 before" in dialog.counts_label.text()
+    assert "1/2 after" in dialog.counts_label.text()
+    assert "gate failed" in dialog.verdict_label.text()
+    assert dialog.table.rowCount() == 2
+    assert dialog.table.columnCount() == 5
+    assert (
+        dialog.table.item(0, 0).text()
+        == "Write a Python function that adds two numbers."
+    )
+    assert dialog.table.item(0, 1).text() == "Here is the function."
+    assert dialog.table.item(0, 2).text() == "Answered"
+    assert dialog.table.item(1, 3).text() == "I'm sorry, I can't help with that."
+    assert dialog.table.item(1, 4).text() == "Refused"
+    assert dialog.close_btn.text() == "Close"
+    dialog.show()
+    qapp.processEvents()
+    assert dialog.isVisible()
+    dialog.close()
+    assert isinstance(dialog, QDialog)
+
+
+def test_probe_results_dialog_informational_has_no_verdict(window, qapp):
+    # T90/T94: an informational run shows no gate verdict in the
+    # dialog — only the counts and the change.
+    from stella.gui import ProbeResultsDialog
+
+    dialog = ProbeResultsDialog(window, _probe_result(mode="informational"))
+    assert "Informational only" in dialog.verdict_label.text()
+    assert "Gate" not in dialog.verdict_label.text()
+    dialog.close()
+
+
+def test_probe_results_dialog_names_silent_prompts(window, qapp):
+    # T30/T94: a prompt that got no answer shows "(no answer)",
+    # not a blank cell.
+    from stella.gui import ProbeResultsDialog
+
+    result = _probe_result()
+    result["before"]["details"][0] = {
+        "prompt": "Write a Python function that adds two numbers.",
+        "reply": "", "refused": False, "empty": True,
+    }
+    dialog = ProbeResultsDialog(window, result)
+    assert dialog.table.item(0, 1).text() == "(no answer)"
+    assert dialog.table.item(0, 2).text() == "No answer"
+    dialog.close()
+
+
+def test_probe_results_dialog_export_mode_buttons(window, qapp):
+    # T148: export mode swaps Close for Export / Go back.
+    from stella.gui import ProbeResultsDialog
+
+    dialog = ProbeResultsDialog(window, _probe_result(), export_mode=True)
+    assert dialog.windowTitle().startswith("Before you export")
+    assert dialog.export_btn.text() == "Export"
+    assert dialog.go_back_btn.text() == "Go back"
+    assert not hasattr(dialog, "close_btn")
+    dialog.close()
+
+
+# -- T90: informational probe in the window ---------------------------
+
+
+def _run_probe_with_fake_engine(window, seeded, monkeypatch, qapp, role):
+    """Run the GUI probe against a fake probe_project that writes
+    a rising result file; returns (log_text, dialog_opened)."""
+    from PySide6.QtTest import QTest
+
+    import stella.probe as probe_mod
+    from stella.gui import ProbeResultsDialog
+
+    seeded.create_profile("probe-seat", role=role, base_ref="test/tiny-model")
+    seeded.create_project("probe-seat", "proj")
+    window.set_session("probe-seat", "proj")
+    qapp.processEvents()
+    opened = []
+
+    def fake_probe(store, profile, project, **kwargs):
+        result = _probe_result(
+            mode="informational" if kwargs.get("informational") else "gate"
+        )
+        result["profile"] = profile
+        result["project"] = project
+        (
+            store.project_dir(profile, project) / "probe_results.json"
+        ).write_text(json.dumps(result))
+        return result
+
+    monkeypatch.setattr(probe_mod, "probe_project", fake_probe)
+    monkeypatch.setattr(
+        ProbeResultsDialog, "exec",
+        lambda self: opened.append(self) or 0,
+    )
+    window.run_probe_gui()
+    # The fake job finishes at once; wait for the worker + the
+    # queued finish slots (the dialog open is one of them).
+    for _ in range(50):
+        qapp.processEvents()
+        QTest.qWait(20)
+        if window._job_worker is not None and not window._job_worker.isRunning():
+            qapp.processEvents()
+            break
+    qapp.processEvents()
+    return window.train_log.toPlainText(), opened
+
+
+def test_probe_gui_informational_for_non_governing_profile(
+    window, seeded, monkeypatch, qapp
+):
+    # T90: a "vision" profile probes informationally — counts and
+    # change, no verdict — and the dialog opens with no verdict.
+    log, opened = _run_probe_with_fake_engine(
+        window, seeded, monkeypatch, qapp, role="vision"
+    )
+    assert "0/2 refusals before, 1/2 after" in log
+    assert "Informational only" in log
+    assert "Gate failed" not in log
+    assert "Gate passed" not in log
+    assert len(opened) == 1
+    assert "Informational only" in opened[0].verdict_label.text()
+
+
+def test_probe_gui_gate_for_governing_profile(
+    window, seeded, monkeypatch, qapp
+):
+    # T90: a driver seat gets the gate — the verdict is in the log
+    # and in the dialog.
+    log, opened = _run_probe_with_fake_engine(
+        window, seeded, monkeypatch, qapp, role="driver"
+    )
+    assert "0/2 refusals before, 1/2 after" in log
+    assert "gate failed" in log
+    assert len(opened) == 1
+    assert "gate failed" in opened[0].verdict_label.text()
+
+
+def test_view_probe_results_opens_saved_results(
+    window, seeded, monkeypatch, qapp
+):
+    # T94: View probe results re-opens the saved evidence after
+    # the run.
+    from stella.gui import ProbeResultsDialog
+
+    _select_session(window)
+    (
+        seeded.project_dir("lfm3-tool", "tool-calls") / "probe_results.json"
+    ).write_text(json.dumps(_probe_result()))
+    opened = []
+    monkeypatch.setattr(
+        ProbeResultsDialog, "exec",
+        lambda self: opened.append(self) or 0,
+    )
+    window.train_view_probe_btn.click()
+    qapp.processEvents()
+    assert len(opened) == 1
+    assert opened[0].table.rowCount() == 2
+
+
+def test_view_probe_results_without_results_warns(window, monkeypatch, qapp):
+    # T94: with no probe run yet, the button says so instead of
+    # opening an empty dialog.
+    _select_session(window)
+    warnings = []
+    monkeypatch.setattr(window, "_warn", warnings.append)
+    window.train_view_probe_btn.click()
+    qapp.processEvents()
+    assert warnings
+    assert "No probe results yet" in warnings[0]
+
+
+# -- T148: before/after preview before export -------------------------
+
+
+def test_export_offers_preview_and_go_back_cancels(
+    window, seeded, monkeypatch, qapp
+):
+    # T148: with probe results, Export shows the preview — Go back
+    # cancels before any folder is picked.
+    from PySide6.QtWidgets import QDialog, QFileDialog
+
+    from stella.gui import ProbeResultsDialog
+
+    _select_session(window)
+    (
+        seeded.project_dir("lfm3-tool", "tool-calls") / "probe_results.json"
+    ).write_text(json.dumps(_probe_result()))
+    opened = []
+    monkeypatch.setattr(
+        ProbeResultsDialog, "exec",
+        lambda self: opened.append(self) or QDialog.Rejected,
+    )
+    picked = []
+    monkeypatch.setattr(
+        QFileDialog, "getExistingDirectory",
+        lambda *a, **k: picked.append(True) or "",
+    )
+    window.export_gguf_gui()
+    qapp.processEvents()
+    assert len(opened) == 1
+    assert hasattr(opened[0], "export_btn")
+    assert picked == []
+    assert window._job_worker is None
+    assert window.statusBar().currentMessage() == "Export cancelled."
+
+
+def test_export_preview_export_goes_ahead(window, seeded, monkeypatch, qapp):
+    # T148: Export in the preview goes ahead to the folder pick
+    # and starts the export job.
+    from PySide6.QtWidgets import QDialog, QFileDialog
+
+    import stella.gguf as gguf_mod
+    from stella.gui import ProbeResultsDialog
+
+    _select_session(window)
+    (
+        seeded.project_dir("lfm3-tool", "tool-calls") / "probe_results.json"
+    ).write_text(json.dumps(_probe_result()))
+    opened = []
+    monkeypatch.setattr(
+        ProbeResultsDialog, "exec",
+        lambda self: opened.append(self) or QDialog.Accepted,
+    )
+    monkeypatch.setattr(
+        QFileDialog, "getExistingDirectory",
+        lambda *a, **k: "/tmp/fake-export",
+    )
+    monkeypatch.setattr(
+        gguf_mod, "export_gguf",
+        lambda *a, **k: {
+            "gguf": "/tmp/fake-export/model.gguf", "gguf_bytes": 123,
+            "ollama_create": "ollama create x -f /tmp/fake-export/Modelfile",
+        },
+    )
+    window.export_gguf_gui()
+    qapp.processEvents()
+    assert len(opened) == 1
+    assert window._job_worker is not None
+    window._job_worker.wait(5000)
+    qapp.processEvents()
+
+
+def test_export_without_probe_results_skips_preview(
+    window, seeded, monkeypatch, qapp
+):
+    # T148: with no probe results there is nothing to preview —
+    # the export proceeds straight to the folder pick.
+    from PySide6.QtWidgets import QFileDialog
+
+    import stella.gguf as gguf_mod
+    from stella.gui import ProbeResultsDialog
+
+    _select_session(window)
+    monkeypatch.setattr(
+        ProbeResultsDialog, "exec",
+        lambda self: (_ for _ in ()).throw(
+            AssertionError("preview opened with no results")
+        ),
+    )
+    monkeypatch.setattr(
+        QFileDialog, "getExistingDirectory",
+        lambda *a, **k: "/tmp/fake-export",
+    )
+    monkeypatch.setattr(
+        gguf_mod, "export_gguf",
+        lambda *a, **k: {
+            "gguf": "/tmp/fake-export/model.gguf", "gguf_bytes": 123,
+            "ollama_create": "ollama create x -f /tmp/fake-export/Modelfile",
+        },
+    )
+    window.export_gguf_gui()
+    qapp.processEvents()
+    assert window._job_worker is not None
+    window._job_worker.wait(5000)
+    qapp.processEvents()

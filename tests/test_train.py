@@ -16,7 +16,10 @@ from stella.train import (
     check_dataset,
     check_ram_fit,
     detect_target_modules,
+    estimate_run,
     estimate_training_bytes,
+    format_estimate,
+    format_estimate_short,
     list_checkpoints,
     load_dataset,
     require_training_deps,
@@ -1583,3 +1586,241 @@ def test_sleep_not_blocked_by_done_status(need_torch, tmp_path):
     assert summary["steps"] == 3
     assert (cycle_dir / "adapter").is_dir()
     assert store.get_project("tiny", "proof")["status"] == "done"
+
+
+# -- T83: the pre-train dataset health check --------------------------
+
+
+def _dataset_project(store, tmp_path, rows):
+    """A project whose dataset is `rows` prompt/completion rows."""
+    data = write_dataset(tmp_path / "data.jsonl", rows)
+    store.create_profile("p1", base_ref="test/tiny-model")
+    store.create_project("p1", "proj", dataset_ref=str(data))
+    return store
+
+
+def test_check_dataset_marks_tiny_dataset(tmp_path):
+    # T83: a 3-example dataset is ok but tiny — the pre-train
+    # check asks before starting on one.
+    from stella.model import Store
+
+    store = _dataset_project(
+        Store(tmp_path / "home"), tmp_path, prompt_rows(3)
+    )
+    check = check_dataset(store, "p1", "proj", str(tmp_path / "data.jsonl"))
+    assert check["status"] == "ok"
+    assert check["count"] == 3
+    assert check["tiny"] is True
+
+
+def test_check_dataset_healthy_dataset_not_tiny(tmp_path):
+    # T83: 20 examples is a healthy dataset — not tiny, with a
+    # token estimate attached.
+    from stella.model import Store
+
+    store = _dataset_project(
+        Store(tmp_path / "home"), tmp_path, prompt_rows(20)
+    )
+    check = check_dataset(store, "p1", "proj", str(tmp_path / "data.jsonl"))
+    assert check["status"] == "ok"
+    assert check["count"] == 20
+    assert check["tiny"] is False
+    assert check["est_tokens"] > 0
+
+
+def test_check_dataset_estimates_tokens(tmp_path):
+    # T83: the token estimate is chars / 4 — 4 rows of
+    # "Question i?" (11 chars) + "Answer i." (9 chars) is 80
+    # chars, about 20 tokens.
+    from stella.model import Store
+
+    store = _dataset_project(
+        Store(tmp_path / "home"), tmp_path, prompt_rows(4)
+    )
+    check = check_dataset(store, "p1", "proj", str(tmp_path / "data.jsonl"))
+    assert check["est_tokens"] == 20
+
+
+def test_check_dataset_bad_rows_carry_no_token_estimate(tmp_path):
+    # T83: a failing check reports the error, not numbers —
+    # est_tokens stays 0 and tiny stays False.
+    from stella.model import Store
+
+    store = Store(tmp_path / "home")
+    store.create_profile("p1", base_ref="test/tiny-model")
+    bad = tmp_path / "bad.jsonl"
+    bad.write_text('{"prompt": "a", "completion": "b"}\nnot json\n')
+    store.create_project("p1", "proj", dataset_ref=str(bad))
+    check = check_dataset(store, "p1", "proj", str(bad))
+    assert check["status"] == "invalid"
+    assert "line 2" in check["error"]
+    assert check["est_tokens"] == 0
+    assert check["tiny"] is False
+
+
+# -- T84/T85: the pre-train estimate (RAM fit + steps + disk) ---------
+
+
+def _fake_model_dir(path, total_size=3_460_000_000):
+    """A local HF folder with a config + a weight-size index — no
+    real weights, so the metadata read is fast and offline. The
+    default size is an LFM3-shaped 1.7B bf16 base."""
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "config.json").write_text(json.dumps({
+        "hidden_size": 2048, "num_hidden_layers": 24,
+        "intermediate_size": 8192, "torch_dtype": "bfloat16",
+    }))
+    (path / "model.safetensors.index.json").write_text(json.dumps({
+        "metadata": {"total_size": total_size},
+    }))
+    return path
+
+
+def _estimable_project(store, tmp_path, total_size=3_460_000_000, rows=20):
+    """A project on a local fake model with a real dataset — the
+    estimate runs entirely offline against it."""
+    model_dir = _fake_model_dir(tmp_path / "model", total_size)
+    data = write_dataset(tmp_path / "data.jsonl", prompt_rows(rows))
+    store.create_profile("p1", base_ref=str(model_dir))
+    store.create_project("p1", "proj", dataset_ref=str(data))
+    return store
+
+
+def test_estimate_run_fits_small_model(tmp_path):
+    # T84/T85: an LFM3-shaped base on the defaults fits — and the
+    # estimate names steps, disk, and time, not just RAM.
+    from stella.model import Store
+
+    store = _estimable_project(Store(tmp_path / "home"), tmp_path)
+    estimate = estimate_run(store, "p1", "proj")
+    assert estimate["fits"] is True
+    assert estimate["ram_gb"] < 8.0
+    # 20 rows, 2 held out: 18 train, batch 1, grad_accum 8 ->
+    # 3 steps/epoch x 3 epochs.
+    assert estimate["steps"] == 9
+    assert estimate["dataset_count"] == 20
+    assert estimate["train_examples"] == 18
+    assert estimate["val_examples"] == 2
+    assert estimate["disk_bytes"] > estimate["base_bytes"]
+    assert estimate["time_note"]
+
+
+def test_estimate_run_wont_fit_huge_model(tmp_path):
+    # T84: a 100 GB base will not fit, and the estimate says so
+    # without loading anything.
+    from stella.model import Store
+
+    store = _estimable_project(
+        Store(tmp_path / "home"), tmp_path, total_size=100_000_000_000
+    )
+    estimate = estimate_run(store, "p1", "proj")
+    assert estimate["fits"] is False
+    assert estimate["ram_gb"] > 8.0
+
+
+def test_estimate_run_never_loads_the_model(tmp_path, monkeypatch):
+    # T85: the no-load proof — the estimate runs with the model
+    # loader rigged to fail, and still answers.
+    import stella.train as train_mod
+    from stella.model import Store
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("the estimate loaded the model")
+
+    monkeypatch.setattr(train_mod, "load_base_model", _boom)
+    store = _estimable_project(Store(tmp_path / "home"), tmp_path)
+    estimate = estimate_run(store, "p1", "proj")
+    assert estimate["fits"] is True
+
+
+def test_estimate_run_needs_base_ref(tmp_path):
+    # T84: with no base ref there is nothing to estimate from —
+    # the estimate refuses instead of guessing.
+    from stella.model import Store
+
+    store = Store(tmp_path / "home")
+    store.create_profile("p1")  # no base_ref
+    data = write_dataset(tmp_path / "data.jsonl", prompt_rows(4))
+    store.create_project("p1", "proj", dataset_ref=str(data))
+    with pytest.raises(StellaError, match="base_ref"):
+        estimate_run(store, "p1", "proj")
+
+
+def test_estimate_run_refuses_bad_dataset(tmp_path):
+    # T84/T85: a malformed dataset is refused with the bad line
+    # named, like the pre-train check.
+    from stella.model import Store
+
+    store = Store(tmp_path / "home")
+    model_dir = _fake_model_dir(tmp_path / "model")
+    store.create_profile("p1", base_ref=str(model_dir))
+    bad = tmp_path / "bad.jsonl"
+    bad.write_text('{"prompt": "a", "completion": "b"}\nnot json\n')
+    store.create_project("p1", "proj", dataset_ref=str(bad))
+    with pytest.raises(StellaError, match="line 2"):
+        estimate_run(store, "p1", "proj")
+
+
+def test_format_estimate_names_fit_steps_and_disk(tmp_path):
+    # T85: the dry-run report answers all three questions.
+    from stella.model import Store
+
+    store = _estimable_project(Store(tmp_path / "home"), tmp_path)
+    report = format_estimate(estimate_run(store, "p1", "proj"))
+    assert "RAM: about" in report
+    assert "fits in 8.00 GB" in report
+    assert "Steps: 9" in report
+    assert "Disk: about" in report
+    assert "Time: roughly" in report
+
+
+def test_format_estimate_warns_when_it_wont_fit(tmp_path):
+    # T85: an over-budget dry run warns before the run starts.
+    from stella.model import Store
+
+    store = _estimable_project(
+        Store(tmp_path / "home"), tmp_path, total_size=100_000_000_000
+    )
+    report = format_estimate(estimate_run(store, "p1", "proj"))
+    assert "will not fit in 8.00 GB" in report
+    assert "will not fit this PC" in report
+
+
+def test_format_estimate_short_shows_fit_not_settings(tmp_path):
+    # T84/T16: the one-liner shows fit and time — no settings
+    # (no rank, no seq len, no batch) anywhere in it.
+    from stella.model import Store
+
+    store = _estimable_project(Store(tmp_path / "home"), tmp_path)
+    short = format_estimate_short(estimate_run(store, "p1", "proj"))
+    assert short.startswith("Fits in 8 GB")
+    assert "9 steps" in short
+    assert "rank" not in short
+    assert "seq" not in short
+    assert "batch" not in short
+
+
+# -- T96: the final val loss in the run summary -----------------------
+
+
+def test_two_step_lora_run_reports_final_val_loss(need_torch, tmp_path):
+    # T96: run_training_loop returns the final val loss, and the
+    # training summary file carries it too.
+    from stella.model import Store
+
+    store = _tiny_project(Store(tmp_path / "home"), tmp_path)
+    summary = train_project(
+        store, "tiny", "proof",
+        on_event=lambda event: None,
+        _model_loader=tiny_model_and_tokenizer,
+        _dtype="float32",
+    )
+    assert summary["final_val_loss"] is not None
+    assert summary["final_loss"] is not None
+    saved = json.loads(
+        (
+            store.project_dir("tiny", "proof")
+            / "adapter" / "training_summary.json"
+        ).read_text()
+    )
+    assert saved["final_val_loss"] == summary["final_val_loss"]
