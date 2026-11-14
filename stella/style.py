@@ -37,7 +37,7 @@ QMainWindow, QDialog {{
 QWidget {{
     /* The base (T81): EVERY plain widget carries the dark surface.
        Without this, bare pages and scroll viewports keep Fusion's
-       light background while labels render light text — the
+       light background while labels render light text - the
        session header band went light-on-light (drive 2026-11-14).
        Specific rules below win for their widgets (same
        specificity, later in the sheet). */
@@ -198,7 +198,7 @@ QSplitter::handle {{
     background-color: {BORDER};
 }}
 /* The focus ring (T82, entry 023): unmistakable, 2 px gold, on
-   every focusable family — never the faint default outline. */
+   every focusable family - never the faint default outline. */
 QPushButton:focus, QLineEdit:focus, QComboBox:focus,
 QTreeWidget:focus, QListWidget:focus, QTextBrowser:focus,
 QPlainTextEdit:focus, QCheckBox:focus {{

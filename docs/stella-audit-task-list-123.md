@@ -1501,6 +1501,7 @@ accounts for their findings.)
 - **Origin:** audit #6 T9
 - **Covers:** A6-W9, A6-W10, A6-D7
 - **Effort:** S
+- **Status:** DONE in v0.15.0 (2026-11-14) — the installer names the real failure instead of a blanket message, and cleans up only what it made.
 - **Problem:** Any failure of `python3 -m venv` prints the same
   message, whatever the cause. Probed (P6): `.venv` existing as a
   stray file made venv creation fail with `Error: Unable to create
@@ -2044,6 +2045,7 @@ accounts for their findings.)
 - **Origin:** audit #6 T5
 - **Covers:** A6-W5, A6-D5
 - **Effort:** S
+- **Status:** DONE in v0.15.0 (2026-11-14) — run.sh checks PySide6 before exec and fails visibly.
 - **Problem:** Probed (P7b): venv present, PySide6 absent →
 
   ```
@@ -2072,6 +2074,7 @@ accounts for their findings.)
 - **Origin:** audit #6 T4
 - **Covers:** A6-W4, A6-D4
 - **Effort:** S
+- **Status:** DONE in v0.15.0 (2026-11-14) — install is atomic: it checks before writing anything, so a failed install leaves no launcher behind.
 - **Problem:** The desktop file and the `~/.local/bin/stella`
   symlink are written *before* the final `import stella` check.
   Probed (P8): with `stella/__init__.py` sabotaged to raise,
@@ -2093,6 +2096,7 @@ accounts for their findings.)
 - **Origin:** repo-audit verdict (R3) + audit #6 T3 + audit #6 T11 (merged — one install-story fix)
 - **Covers:** R3; A6-W3, A6-U1, A6-U2 (README part), A6-D3, A6-D16
 - **Effort:** M
+- **Status:** DONE in v0.15.0 (2026-11-14) — double-click Install Stella.desktop runs the installer (the proven python3 -c pattern, %k as a separate argv token); the README install section is fixed.
 - **Problem:** The README promises a double-click "Install Stella"
   and there is no .desktop file anywhere in the tree — confirmed by
   the verdict (no .desktop found) and by the corrections (the
@@ -2135,6 +2139,7 @@ accounts for their findings.)
 - **Origin:** repo-audit verdict (R5)
 - **Covers:** R5
 - **Effort:** S
+- **Status:** DONE in v0.15.0 (2026-11-14) — exec bits set in the tree (run.sh, stella-cli, install scripts).
 - **Problem:** Every file in the tree is 100644 — confirmed by the
   verdict. A clone install leaves run.sh and stella-cli
   non-executable, so the launchers are dead: the user who clones
@@ -2160,6 +2165,7 @@ accounts for their findings.)
 - **Origin:** audit #6 T7
 - **Covers:** A6-W7, A6-G3, A6-D13
 - **Effort:** M
+- **Status:** DONE in v0.15.0 (2026-11-14) — `stella doctor` checks and repairs the install after a move (venv, PySide6, launcher, symlink, icon, receipt).
 - **Problem:** Everything install.sh writes is an absolute path to
   `$DIR`. Probed (P12): after `mv moveme moved-to`, `gio launch`
   on the desktop file exited 1 (`Unable to load application
@@ -2186,6 +2192,7 @@ accounts for their findings.)
 - **Origin:** audit #6 T8
 - **Covers:** A6-W8, A6-D6
 - **Effort:** S
+- **Status:** DONE in v0.15.0 (2026-11-14) — install.sh's pip lines carry --timeout 120 --retries 10.
 - **Problem:** `install-training.sh` got `--timeout 120 --retries
   10` as a v0.2 fix because "pip's default 15s read timeout
   repeatedly failed the torch download" (TEST-REPORT defect #4).
@@ -2204,6 +2211,7 @@ accounts for their findings.)
 - **Origin:** audit #6 T6
 - **Covers:** A6-W6, A6-D17
 - **Effort:** S
+- **Status:** DONE in v0.15.0 (2026-11-14) — run_tests.sh uses the venv, never system pip.
 - **Problem:** When no `.venv` exists it falls back to system
   `python3` and runs `"$PY" -m pip install --quiet pytest` (and
   PySide6-Essentials) into system Python. Probed (P11) on this
@@ -2233,6 +2241,7 @@ accounts for their findings.)
 - **Origin:** audit #6 T10
 - **Covers:** A6-G2, A6-D12
 - **Effort:** M
+- **Status:** DONE in v0.15.0 (2026-11-14) — installer tests (31), including the GLib icon check.
 - **Problem:** No `test_installer.py`; the only test references
   to the installers assert that error messages *name*
   `install-training.sh` (`test_cli.py:119,160`,
@@ -3576,6 +3585,7 @@ accounts for their findings.)
 - **Origin:** repo-audit verdict (R13); extended by audit #6 T14 (pin side)
 - **Covers:** R13; A6-W13, A6-D10 (pin side)
 - **Effort:** M
+- **Status:** DONE in v0.15.0 (2026-11-14) — MIT LICENSE, .gitignore covering secrets and venvs, pinned requirements (requirements-base.txt + requirements-train.txt), and CI (base + train jobs running the full suite offscreen). The repo description/topics half is GitHub-side, still owed via browser.
 - **Problem:** The repo has no LICENSE, no .gitignore, no pinned
   training requirements, and no CI — and no description or topics
   on GitHub. Anyone cloning the repo gets no license terms, no
@@ -3638,6 +3648,7 @@ accounts for their findings.)
 - **Origin:** audit #6 T12
 - **Covers:** A6-W11, A6-D8
 - **Effort:** S
+- **Status:** DONE in v0.15.0 (2026-11-14) — pip failures are wrapped in a Stella error naming the real failure.
 - **Problem:** Both installers run pip bare under `set -e`, so a
   pip failure exits at the pip line and the friendly fatal checks
   never run. Probed twice: ENOSPC during the PySide6 install →
@@ -3659,6 +3670,7 @@ accounts for their findings.)
 - **Origin:** audit #6 T13
 - **Covers:** A6-W12, A6-D9
 - **Effort:** S
+- **Status:** DONE in v0.15.0 (2026-11-14) — a disk-space preflight runs before installing.
 - **Problem:** Neither installer checks free space before
   downloading (~90 MB wheel / 259 MB installed for the base;
   ~2 GB for training). The only "disk space" strings in the
@@ -3678,6 +3690,7 @@ accounts for their findings.)
 - **Origin:** audit #6 T20
 - **Covers:** A6-W14, A6-D20
 - **Effort:** S
+- **Status:** DONE in v0.15.0 (2026-11-14) — a fast path for a training re-run: the venv is kept, no ~2 GB re-download.
 - **Problem:** The P9b dry-run probe — same packages, same
   versions, nothing to do — took 148 s: pip re-resolves the torch
   CPU index on every run, and the script prints nothing between
@@ -3697,6 +3710,7 @@ accounts for their findings.)
 - **Origin:** audit #6 T21
 - **Covers:** A6-W15, A6-D22
 - **Effort:** S
+- **Status:** DONE in v0.15.0 (2026-11-14) — the PySide6 check is strengthened (a throwaway QApplication proves the GUI can start).
 - **Problem:** The fatal check is `import PySide6; from PySide6
   import QtWidgets` with stderr hidden (`2>/dev/null`), and its
   error message names only "a network connection, or ... disk
@@ -3719,6 +3733,7 @@ accounts for their findings.)
 - **Origin:** audit #6 T15
 - **Covers:** A6-U2, A6-U3, A6-U4, A6-U8, A6-D18
 - **Effort:** S
+- **Status:** DONE in v0.15.0 (2026-11-14) — the success message reflects reality: the installer verifies the install works before saying so.
 - **Problem:** "double-click Stella on the desktop. No terminal
   needed." prints even when the desktop copy was skipped (A6-U3:
   `cp ... "$HOME/Desktop/Stella.desktop" 2>/dev/null || true` —
@@ -3745,6 +3760,7 @@ accounts for their findings.)
 - **Origin:** audit #6 T17
 - **Covers:** A6-G1, A6-D11
 - **Effort:** M
+- **Status:** DONE in v0.15.0 (2026-11-14) — uninstall.sh + a removal section in the README; uninstall removes everything but never touches ~/.stella data without asking.
 - **Problem:** No `uninstall.sh`, no removal instructions anywhere
   (grep: zero mentions outside one test comment). Removing Stella
   means hand-deleting the folder,
@@ -3765,6 +3781,7 @@ accounts for their findings.)
 - **Origin:** audit #6 T18
 - **Covers:** A6-G4, A6-U6, A6-D15
 - **Effort:** M
+- **Status:** DONE in v0.15.0 (2026-11-14) — icons installed into the hicolor theme (9 sizes) with small sizes rendered.
 - **Problem:** The icon is referenced by absolute path from the
   install dir instead of installed into
   `~/.local/share/icons/hicolor/`. A theme install (copies, not
@@ -3788,6 +3805,7 @@ accounts for their findings.)
 - **Origin:** audit #6 T19
 - **Covers:** A6-G5, A6-D21
 - **Effort:** S
+- **Status:** DONE in v0.15.0 (2026-11-14) — an install receipt records a complete install (a never-installed folder gets its launch artifacts fixed but no receipt).
 - **Problem:** Nothing records what an install did —
   PySide6/torch versions, where the artifacts went, when it ran.
   When something breaks later, there is no record to send Arlo.
@@ -3808,6 +3826,7 @@ accounts for their findings.)
 - **Origin:** audit #6 T22
 - **Covers:** A6-G6, A6-D24
 - **Effort:** S
+- **Status:** DONE in v0.15.0 (2026-11-14) — the README documents the upgrade path (unzip over the folder, bash install.sh; profiles untouched).
 - **Problem:** v0.1 → v0.2 means unzipping a new folder and
   installing from scratch. Re-installing over the *same* folder
   is idempotent (P3), but a new folder leaves the old install

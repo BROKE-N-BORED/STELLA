@@ -1,26 +1,31 @@
 #!/usr/bin/env bash
 # Run the Stella test suite. Run with: bash run_tests.sh
+#
+# The suite runs in Stella's own .venv, never in system Python:
+# Mint's Python is externally managed, so pip installing pytest
+# into it fails (T68). Run bash install.sh first on a bare checkout.
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$DIR"
 
-if [ -x "$DIR/.venv/bin/python" ]; then
-  PY="$DIR/.venv/bin/python"
-else
-  PY="python3"
+if [ ! -x "$DIR/.venv/bin/python" ]; then
+  echo "Stella is not installed yet. Run bash install.sh first," >&2
+  echo "then run bash run_tests.sh again." >&2
+  exit 1
 fi
+PY="$DIR/.venv/bin/python"
 
 if ! "$PY" -m pytest --version >/dev/null 2>&1; then
-  echo "Installing pytest for the test run..."
-  "$PY" -m pip install --quiet pytest
+  echo "Installing pytest into the Stella venv for the test run..."
+  "$PY" -m pip install --quiet --timeout 120 --retries 10 pytest
 fi
 
 # The GUI tests need PySide6. The installed venv already has it; a
-# bare checkout installs it for the test run (same as pytest above).
+# venv without it gets it here, inside the venv (never system pip).
 if ! "$PY" -c "import PySide6" 2>/dev/null; then
-  echo "Installing PySide6-Essentials for the GUI tests..."
-  "$PY" -m pip install --quiet PySide6-Essentials
+  echo "Installing PySide6-Essentials into the Stella venv for the GUI tests..."
+  "$PY" -m pip install --quiet --timeout 120 --retries 10 PySide6-Essentials
 fi
 
 # Training tests need the training stack; without it they skip cleanly

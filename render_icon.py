@@ -17,7 +17,10 @@ except ImportError:
 
 app = QGuiApplication([])
 renderer = QSvgRenderer(str(ASSETS / "stella.svg"))
-for size in (512, 256, 128, 64):
+# Full hicolor set (T138): the big sizes for the menu and the About
+# art, the small ones purpose-rendered so the star stays crisp in
+# panels and trays instead of being scaled down from 256.
+for size in (512, 256, 128, 64, 48, 32, 24, 22, 16):
     image = QImage(QSize(size, size), QImage.Format_ARGB32)
     image.fill(0)
     painter = QPainter(image)

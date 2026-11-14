@@ -110,11 +110,23 @@ job, export it as a usable package.
   Train panel resets per project and stays with the running
   one; and the window gets a finish moment, loading states,
   a job morph, and reduced-motion and larger-text presets.
+- v0.15.0 installer coherence (2026-11-14): the installer is
+  honest now — venv failures name the real cause, pip failures
+  end with a Stella line instead of raw pip output, disk space
+  is checked before downloading, and a failed install leaves
+  no launcher behind. Installs are pinned (PySide6 6.12.0,
+  torch 2.15.0+cpu) with a receipt recording what landed, the
+  icons live in the hicolor theme at every size, and there is
+  a double-click installer, an uninstaller, and `stella
+  doctor` to repair an install after the folder moves.
 
 ## Install
 
 Unzip a release anywhere, then double-click **Install Stella** in the
-folder (or run one short command in a terminal inside the folder):
+folder (the file is `Install Stella.desktop`, next to `install.sh`).
+If double-clicking opens a text editor instead, right-click the file
+and choose Allow Launching, then double-click it again. Or run one
+short command in a terminal inside the folder:
 
 `bash install.sh`
 
@@ -125,6 +137,47 @@ After that, just click it — no terminal needed to run Stella.
 To launch from a terminal instead:
 
 `bash run.sh`
+
+The `stella` command works after install — open a new terminal
+first (or log out and back in), because Mint only adds
+`~/.local/bin` to PATH at login. A terminal already open at install
+time will not find `stella` until then.
+
+## Upgrade to a new version
+
+Unzip the new version somewhere, run its `install.sh`, then delete
+the old folder. The new install re-points the menu launcher and the
+`stella` command at the new folder; deleting the old folder removes
+its old venv too, so nothing is left orphaned. Your data lives in
+`~/.stella`, not in the folder, so it survives the upgrade untouched.
+Re-running `install.sh` in the same folder is safe too — it is
+idempotent and just refreshes the install.
+
+## Moved the folder? Repair it
+
+Everything the installer writes points at the folder it ran from,
+so moving the folder leaves a dead menu entry and a dead `stella`
+command (the window itself still runs from the new location with
+`bash run.sh`). Fix it from a terminal inside the moved folder:
+
+`bash stella-cli doctor`
+
+The doctor checks the venv, PySide6, launcher, command, and icons,
+and re-links what is stale. `stella doctor --check` only reports,
+without fixing. Re-running `bash install.sh` from the new folder
+repairs it the same way.
+
+## Remove Stella
+
+From a terminal inside the Stella folder:
+
+`bash uninstall.sh`
+
+That removes the menu launcher, the desktop icon, the `stella`
+command, the menu icons, and the Python environment. Your data in
+`~/.stella` is kept unless you say to remove it — the uninstaller
+asks, and the default answer is No. Delete the folder afterwards
+to finish removing it.
 
 ## Install the training packages (only if you want to train)
 
@@ -343,6 +396,8 @@ After install, `stella` works in a terminal:
 `stella pc-info`
 
 `stella distill <profile> <project> --teacher <tag> --prompts <file>`
+
+`stella doctor [--check]`
 
 Every command's `--help` shows a worked example, e.g.
 `stella create-profile --help`.

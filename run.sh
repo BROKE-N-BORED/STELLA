@@ -14,11 +14,34 @@ done
 DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 cd "$DIR"
 
+# Fail visibly (T62): from the menu, with Terminal=false, the user
+# sees nothing at all when the launch dies — so a failure prints a
+# plain message AND, when there is no terminal to read it in, shows
+# a dialog through zenity or kdialog if one is installed. Never a
+# silent traceback from the menu icon.
+fail_visible() { # $1 = plain message naming the fix
+  echo "$1" >&2
+  if [ ! -t 1 ]; then
+    if command -v zenity >/dev/null 2>&1; then
+      zenity --error --no-wrap --title="Stella" --text="$1" 2>/dev/null || true
+    elif command -v kdialog >/dev/null 2>&1; then
+      kdialog --error "$1" --title "Stella" 2>/dev/null || true
+    fi
+  fi
+  exit 1
+}
+
 if [ -x "$DIR/.venv/bin/python" ]; then
   PY="$DIR/.venv/bin/python"
 else
-  echo "Stella is not installed yet. Run: bash install.sh" >&2
-  exit 1
+  fail_visible "Stella is not installed yet. Run: bash install.sh (from the Stella folder)"
+fi
+
+# PySide6 check, before exec (T62): a venv without PySide6 — the
+# state after any pip failure mid-install — used to die with a raw
+# ModuleNotFoundError traceback, invisible from the menu.
+if ! "$PY" -c "import PySide6; from PySide6 import QtWidgets" 2>/dev/null; then
+  fail_visible "Stella is not fully installed: PySide6 is missing. Run: bash install.sh (from the Stella folder)"
 fi
 
 exec "$PY" -m stella "$@"

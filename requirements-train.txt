@@ -1,0 +1,10 @@
+# STELLA training requirements — the stack install-training.sh installs (T130).
+# Pinned to the verified stack (TEST-REPORT.md): torch 2.15.0+cpu,
+# transformers 5.22.2, peft 0.21.2, accelerate 1.15.0.
+# The CPU wheel index is an extra index so torch resolves to the +cpu
+# build while the rest still come from PyPI.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.15.0+cpu
+transformers==5.22.2
+peft==0.21.2
+accelerate==1.15.0

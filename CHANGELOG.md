@@ -1,5 +1,78 @@
 # Changelog
 
+## v0.15.0 — 2026-11-14
+
+The installer-coherence slice (audit tasks T42, T62, T63, T64, T65,
+T66, T67, T68, T69, T130, T132, T133, T134, T135, T136, T137, T138,
+T139, T140): the installer tells the truth about failures, installs
+are pinned and receipted, the icons live in the hicolor theme, and
+there is a double-click installer, an uninstaller, and a doctor.
+
+- T42 — venv failures name the real cause: the python3-venv message
+  prints only when the venv module is actually missing; any other
+  failure prints the real venv error. Cleanup touches only a .venv
+  this run created — a stray file already at .venv is never deleted.
+- T62 — run.sh checks PySide6 before exec: a venv without PySide6
+  prints a plain "run bash install.sh" message (with a zenity or
+  kdialog dialog when there is no terminal to read it in) instead
+  of a raw traceback invisible from the menu.
+- T63 — install is atomic: the final `import stella` check runs
+  before the launcher and symlink are written, so a failed install
+  leaves no launcher behind.
+- T64 — Install Stella.desktop ships in the tree: double-click it
+  to install (it runs install.sh with bash and survives spaced
+  paths). The README install section names the real first step,
+  qualifies the `stella` command (new terminal or log out/in),
+  and documents removal and repair.
+- T65 — the scripts carry exec bits in the tree (run.sh,
+  stella-cli, install.sh, install-training.sh, run_tests.sh,
+  uninstall.sh, Install Stella.desktop), pinned by a test.
+- T66 — `stella doctor` checks the venv, PySide6, launcher,
+  symlink, and icon, and re-links what is stale after a move; a
+  broken venv is reported with the fix named. `--check` only
+  reports, without fixing.
+- T67 — install.sh's pip lines carry `--timeout 120 --retries 10`,
+  like install-training.sh already did.
+- T68 — run_tests.sh refuses on a bare checkout with "run bash
+  install.sh first" instead of pip-installing into system Python.
+- T69 — tests/test_installer.py runs the real installers in a
+  scratch HOME: desktop file, icon resolution, symlink, re-install
+  idempotence, clone without PNGs, and the failure cases.
+- T130 — LICENSE (MIT), pinned requirements (requirements-base.txt:
+  PySide6-Essentials/Addons 6.12.0; requirements-train.txt: torch
+  2.15.0+cpu, transformers 5.22.2, peft 0.21.2, accelerate 1.15.0),
+  both installers consume the pinned files, and a GitHub Actions
+  CI workflow runs the base suite (plus the training-stack suite
+  in its own job). The repo description/topics half is GitHub-side,
+  not tree work.
+- T132 — pip failures end with a Stella line naming the step and
+  the retry, in both installers.
+- T133 — disk-space preflight: the base install refuses below
+  ~500 MB free, the training install below ~3 GB, before
+  downloading anything.
+- T134 — a training re-run with everything already installed
+  prints "Training packages are already installed." and exits in
+  seconds instead of re-resolving the torch index.
+- T135 — the PySide6 check creates a throwaway QApplication
+  offscreen instead of import-only, and surfaces the real stderr
+  on failure so a missing system lib names itself.
+- T136 — the success message reflects reality: the desktop icon
+  is claimed only when the copy landed, `stella` is claimed only
+  when ~/.local/bin is on PATH (otherwise it says to open a new
+  terminal), and the version line is labeled ("Stella 0.15.0").
+- T137 — uninstall.sh removes the launcher, desktop copy, symlink,
+  menu icons, venv, and receipt, and asks about ~/.stella before
+  touching it (default No); the README documents removal.
+- T138 — icons install into the hicolor theme at 16/22/24/32/48/
+  64/128/256/512, rendered by render_icon.py, so the menu icon
+  survives a folder move; the launcher uses the theme name.
+- T139 — install.sh writes an install receipt (.stella-install-
+  receipt): versions, artifact paths, install time. A failed
+  install writes no receipt; install-training.sh refreshes it
+  with the torch versions.
+- T140 — the README documents the upgrade path: unzip the new
+  version, run its install.sh, delete the old folder.
+
 ## v0.14.0 — 2026-11-14
 
 The models + UI-polish slice (audit tasks T43, T45, T47, T49, T50,

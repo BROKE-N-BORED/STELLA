@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Install Stella
+Comment=Install Stella on this PC
+Exec=python3 -c "import os,subprocess,sys; d=os.path.dirname(sys.argv[1]) or os.getcwd(); sys.exit(subprocess.call([sys.executable, os.path.join(d, 'install_launcher.py')]))" %k
+Icon=stella
+Terminal=true
+Categories=Utility;

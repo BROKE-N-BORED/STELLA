@@ -227,7 +227,7 @@ def _dream_prompt(seeds: list[dict], count: int) -> str:
         '{"role": "assistant", "content": "..."}]}\n'
         f"Write {count} NEW examples in the same style and on the same "
         "topics as these real examples. One JSON object per line, "
-        "nothing else — no intro, no numbering, no markdown.\n"
+        "nothing else: no intro, no numbering, no markdown.\n"
         "Real examples:\n"
         f"{seed_lines}\n"
         "New examples:\n"

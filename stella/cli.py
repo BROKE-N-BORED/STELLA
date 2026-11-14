@@ -39,6 +39,9 @@
     stella pc-info                        what this PC can do, and the
                                           training settings Stella picks
                                           for it
+    stella doctor [--check]               check the install and repair
+                                          what a move broke (--check
+                                          only reports, without fixing)
 
 Reads STELLA_HOME for the home dir (default ~/.stella).
 """
@@ -122,6 +125,17 @@ def cmd_pc_info(args) -> int:
     measurement, settings = auto_settings(store.home)
     print(format_report(measurement, settings))
     return 0
+
+
+def cmd_doctor(args) -> int:
+    """Check the install and repair what a move broke (T66)."""
+    from . import doctor as doctor_mod
+
+    checks = doctor_mod.run_checks(
+        doctor_mod.find_install_dir(), Path.home(), fix=not args.check
+    )
+    print(doctor_mod.format_report(checks))
+    return 1 if any(c.status == doctor_mod.BROKEN for c in checks) else 0
 
 
 def cmd_export(args) -> int:
@@ -923,6 +937,19 @@ def build_parser() -> argparse.ArgumentParser:
         "examples:\n  stella pc-info",
     )
     p.set_defaults(func=cmd_pc_info)
+
+    p = _cmd(
+        "doctor",
+        "check the install and repair what a move broke",
+        "examples:\n"
+        "  stella doctor\n"
+        "  stella doctor --check",
+    )
+    p.add_argument(
+        "--check", action="store_true",
+        help="check only: report what is stale without fixing it.",
+    )
+    p.set_defaults(func=cmd_doctor)
 
     p = _cmd(
         "distill",

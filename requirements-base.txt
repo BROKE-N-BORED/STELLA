@@ -1,0 +1,5 @@
+# STELLA base requirements — the GUI stack install.sh installs (T130).
+# Pinned to the versions verified by the v0.15 suite run, so a future
+# release cannot change behavior under the same installer.
+PySide6-Essentials==6.12.0
+PySide6-Addons==6.12.0

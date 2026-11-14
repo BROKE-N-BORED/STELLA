@@ -27,3 +27,6 @@ venv/
 *.zip
 dist/
 build/
+
+# Install receipt (per-install record, T139 — never committed)
+.stella-install-receipt

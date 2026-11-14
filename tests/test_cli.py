@@ -25,7 +25,7 @@ ALL_COMMANDS = [
     "profiles", "projects", "export", "import",
     "create-profile", "create-project", "train", "export-gguf",
     "probe", "sleep", "sleep-status", "chat", "requant",
-    "pc-info", "distill",
+    "pc-info", "distill", "doctor",
 ]
 
 
