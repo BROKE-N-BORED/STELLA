@@ -723,3 +723,249 @@ def test_convert_cancel_between_steps(tmp_path):
         )
     # Only the convert ran; the quantize never started.
     assert len(runner.commands) == 1
+
+
+# -- T97: LFM3 -> GGUF conversion pre-flight --------------------------
+
+
+def _fake_converter_dir(tmp_path, archs):
+    """A fake llama.cpp checkout whose converter registers the
+    given architectures, the way the real convert_hf_to_gguf.py
+    does with @Model.register."""
+    import os
+
+    d = tmp_path / "llama.cpp"
+    (d / "build" / "bin").mkdir(parents=True)
+    lines = ["# fake converter"]
+    for arch in archs:
+        lines.append(f'@Model.register("{arch}")')
+        lines.append(f"class {arch}Model: pass")
+    (d / "convert_hf_to_gguf.py").write_text("\n".join(lines) + "\n")
+    quantize = d / "build" / "bin" / "llama-quantize"
+    quantize.write_text("# fake quantizer\n")
+    os.chmod(quantize, 0o755)
+    return d
+
+
+def test_converter_supported_archs_parses_registrations(tmp_path):
+    from stella.gguf import converter_supported_archs
+
+    d = _fake_converter_dir(
+        tmp_path, ["LlamaForCausalLM", "Lfm2ForCausalLM"]
+    )
+    assert converter_supported_archs(d / "convert_hf_to_gguf.py") == {
+        "LlamaForCausalLM", "Lfm2ForCausalLM",
+    }
+
+
+def test_converter_supported_archs_none_when_unparseable(tmp_path):
+    from stella.gguf import converter_supported_archs
+
+    d = fake_llama_cpp(tmp_path)
+    assert converter_supported_archs(d / "convert_hf_to_gguf.py") is None
+
+
+def test_check_converter_supports_arch_refuses_unknown(tmp_path):
+    from stella.gguf import check_converter_supports_arch
+
+    d = _fake_converter_dir(tmp_path, ["LlamaForCausalLM"])
+    convert = d / "convert_hf_to_gguf.py"
+    with pytest.raises(StellaError) as excinfo:
+        check_converter_supports_arch("WeirdArchForCausalLM", convert)
+    # The arch and the converter are both named.
+    assert "WeirdArchForCausalLM" in str(excinfo.value)
+    assert str(convert) in str(excinfo.value)
+
+
+def test_check_converter_supports_arch_passes_supported(tmp_path):
+    from stella.gguf import check_converter_supports_arch
+
+    d = _fake_converter_dir(tmp_path, ["LlamaForCausalLM"])
+    check_converter_supports_arch(
+        "LlamaForCausalLM", d / "convert_hf_to_gguf.py"
+    )
+
+
+def _seed_trained_project(store, tmp_path):
+    """A project with a (fake) trained adapter, ready to export."""
+    store.create_profile("tiny", base_ref="test/tiny-model")
+    store.create_project("tiny", "proof")
+    adapter = store.project_dir("tiny", "proof") / "adapter"
+    adapter.mkdir()
+    (adapter / "adapter_config.json").write_text("{}\n")
+    return store
+
+
+class _FakeMergedModel:
+    """A merged model that saves a fake HF dir — no torch needed."""
+
+    def merge_and_unload(self):
+        return self
+
+    def save_pretrained(self, path):
+        Path(path).mkdir(parents=True, exist_ok=True)
+        (Path(path) / "config.json").write_text(
+            '{"model_type": "llama"}\n'
+        )
+
+
+class _FakeSaveTokenizer:
+    def save_pretrained(self, path):
+        Path(path).mkdir(parents=True, exist_ok=True)
+        (Path(path) / "tokenizer_config.json").write_text("{}\n")
+
+
+def test_export_gguf_preflight_refuses_unsupported_arch(tmp_path):
+    from stella.model import Store
+
+    d = _fake_converter_dir(tmp_path, ["LlamaForCausalLM"])
+    store = _seed_trained_project(Store(tmp_path / "home"), tmp_path)
+
+    def loader(base_ref, adapter_dir):
+        raise AssertionError("the merge must not run for an unsupported arch")
+
+    with pytest.raises(StellaError) as excinfo:
+        export_gguf(
+            store, "tiny", "proof", tmp_path / "out",
+            _runner=FakeRunner(), _model_loader=loader,
+            llama_cpp=(
+                d / "convert_hf_to_gguf.py",
+                d / "build" / "bin" / "llama-quantize",
+            ),
+            _base_arch="WeirdArchForCausalLM",
+        )
+    assert "WeirdArchForCausalLM" in str(excinfo.value)
+    assert str(d / "convert_hf_to_gguf.py") in str(excinfo.value)
+    # Refused before the merge: no merged dir, no GGUF.
+    assert not (tmp_path / "out" / "proof-merged-hf").exists()
+    assert not (tmp_path / "out" / "proof-q4-k-m.gguf").exists()
+
+
+def test_export_gguf_preflight_passes_supported_arch(tmp_path, monkeypatch):
+    from stella.model import Store
+
+    # The pre-flight needs no torch; stub the deps gate the merge
+    # calls so the test runs on a base install too.
+    import stella.train as train_mod
+
+    monkeypatch.setattr(train_mod, "require_training_deps", lambda: None)
+    d = _fake_converter_dir(tmp_path, ["LlamaForCausalLM"])
+    store = _seed_trained_project(Store(tmp_path / "home"), tmp_path)
+
+    def loader(base_ref, adapter_dir):
+        return _FakeMergedModel(), _FakeSaveTokenizer()
+
+    result = export_gguf(
+        store, "tiny", "proof", tmp_path / "out",
+        _runner=FakeRunner(), _model_loader=loader,
+        llama_cpp=(
+            d / "convert_hf_to_gguf.py",
+            d / "build" / "bin" / "llama-quantize",
+        ),
+        _base_arch="LlamaForCausalLM",
+    )
+    assert Path(result["gguf"]).is_file()
+    assert (tmp_path / "out" / "proof-merged-hf" / "config.json").is_file()
+
+
+def test_export_gguf_preflight_passes_when_list_unreadable(
+    tmp_path, monkeypatch
+):
+    # A converter with no registrations cannot be checked — the
+    # export proceeds rather than refusing on a guess.
+    from stella.model import Store
+
+    import stella.train as train_mod
+
+    monkeypatch.setattr(train_mod, "require_training_deps", lambda: None)
+    d = fake_llama_cpp(tmp_path)
+    store = _seed_trained_project(Store(tmp_path / "home"), tmp_path)
+
+    def loader(base_ref, adapter_dir):
+        return _FakeMergedModel(), _FakeSaveTokenizer()
+
+    result = export_gguf(
+        store, "tiny", "proof", tmp_path / "out",
+        _runner=FakeRunner(), _model_loader=loader,
+        llama_cpp=(
+            d / "convert_hf_to_gguf.py",
+            d / "build" / "bin" / "llama-quantize",
+        ),
+        _base_arch="WeirdArchForCausalLM",
+    )
+    assert Path(result["gguf"]).is_file()
+
+
+# -- T101: quote paths in the Modelfile and the printed command ------
+
+
+def test_write_modelfile_quotes_spaced_paths(tmp_path):
+    import shlex
+
+    dest = tmp_path / "my models"
+    dest.mkdir()
+    gguf = dest / "model-q4_k_m.gguf"
+    gguf.write_bytes(b"fake")
+    modelfile, command = write_modelfile(
+        gguf, dest / "Modelfile", name="tiny-proof"
+    )
+    # The printed command works when pasted: shlex.split recovers
+    # the spaced path as one token.
+    assert shlex.split(command) == [
+        "ollama", "create", "tiny-proof", "-f", str(dest / "Modelfile"),
+    ]
+    # The FROM line carries the quoted path.
+    text = modelfile.read_text()
+    assert text.startswith(f"FROM {shlex.quote(str(gguf.resolve()))}")
+
+
+def test_write_modelfile_plain_paths_unchanged(tmp_path):
+    import shlex
+
+    gguf = tmp_path / "m.gguf"
+    gguf.write_bytes(b"fake")
+    modelfile, command = write_modelfile(
+        gguf, tmp_path / "Modelfile", name="tiny-proof"
+    )
+    # shlex.quote is a no-op without spaces: the old exact strings.
+    assert modelfile.read_text().startswith(f"FROM {gguf.resolve()}")
+    assert command == f"ollama create tiny-proof -f {modelfile}"
+    assert shlex.split(command) == [
+        "ollama", "create", "tiny-proof", "-f", str(modelfile),
+    ]
+
+
+# -- T103: timeout on the converter/quantizer subprocesses ------------
+
+
+def test_run_times_out_on_hung_subprocess():
+    import sys
+    import time
+
+    from stella.gguf import _run
+
+    start = time.monotonic()
+    with pytest.raises(StellaError) as excinfo:
+        _run(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            timeout=0.5, step="quantizer",
+        )
+    # Killed promptly, not waited out — and the step is named.
+    assert time.monotonic() - start < 10
+    assert "quantizer timed out" in str(excinfo.value)
+
+
+def test_run_with_timeout_allows_fast_command():
+    import sys
+
+    from stella.gguf import _run
+
+    _run([sys.executable, "-c", "pass"], timeout=60, step="converter")
+
+
+def test_subprocess_timeout_is_generous():
+    # A real 1.7B convert takes minutes: the bound is minutes, not
+    # seconds.
+    from stella.gguf import SUBPROCESS_TIMEOUT_SECONDS
+
+    assert SUBPROCESS_TIMEOUT_SECONDS >= 600

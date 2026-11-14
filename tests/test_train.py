@@ -1824,3 +1824,335 @@ def test_two_step_lora_run_reports_final_val_loss(need_torch, tmp_path):
         ).read_text()
     )
     assert saved["final_val_loss"] == summary["final_val_loss"]
+
+
+# -- T100: the completion ends with the template's turn terminator --
+
+
+class TemplateTokenizer(FakeTokenizer):
+    """A Qwen-shaped chat-template tokenizer: the template wraps
+    turns in <|im_start|>/<|im_end|> markers, and <|im_end|> is a
+    special token distinct from EOS."""
+
+    IM_START = 200
+    IM_END = 201
+
+    def __init__(self):
+        super().__init__()
+        self.eos_token_id = 0
+        self.all_special_ids = [self.IM_START, self.IM_END]
+
+    def apply_chat_template(
+        self, messages, tokenize=False, add_generation_prompt=False
+    ):
+        text = ""
+        for message in messages:
+            text += (
+                f"<|im_start|>{message['role']}\n"
+                f"{message['content']}<|im_end|>\n"
+            )
+        if add_generation_prompt:
+            text += "<|im_start|>assistant\n"
+        return text
+
+    def encode(self, text, add_special_tokens=True):
+        import re
+
+        ids = []
+        for part in re.split(
+            r"(<\|im_start\|>|<\|im_end\|>)", text
+        ):
+            if part == "<|im_start|>":
+                ids.append(self.IM_START)
+            elif part == "<|im_end|>":
+                ids.append(self.IM_END)
+            elif part:
+                ids.extend(super().encode(part))
+        return ids
+
+
+def test_tokenize_ends_completion_with_template_turn_end():
+    from stella.train import tokenize_example
+
+    example = {
+        "messages": [
+            {"role": "user", "content": "Question?"},
+            {"role": "assistant", "content": "Answer."},
+        ]
+    }
+    out = tokenize_example(TemplateTokenizer(), example, 64)
+    # The completion ends with the template's turn terminator
+    # instead of EOS — the tuned model learns to end its turn the
+    # way the template expects.
+    assert out["input_ids"][-1] == TemplateTokenizer.IM_END
+    assert out["labels"][-1] == TemplateTokenizer.IM_END
+    assert out["truncated"] is False
+
+
+def test_tokenize_turn_end_survives_truncation():
+    from stella.train import tokenize_example
+
+    example = {
+        "messages": [
+            {"role": "user", "content": "Q?"},
+            {"role": "assistant", "content": "A" * 200},
+        ]
+    }
+    out = tokenize_example(TemplateTokenizer(), example, 64)
+    assert len(out["input_ids"]) == 64
+    assert out["truncated"] is True
+    assert out["input_ids"][-1] == TemplateTokenizer.IM_END
+
+
+def test_tokenize_plain_tokenizer_still_ends_with_eos():
+    from stella.train import tokenize_example
+
+    # No template, no terminator: EOS as before.
+    example = {
+        "messages": [
+            {"role": "user", "content": "Question?"},
+            {"role": "assistant", "content": "Answer."},
+        ]
+    }
+    out = tokenize_example(FakeTokenizer(), example, 64)
+    assert out["input_ids"][-1] == 0  # eos
+    assert out["labels"][-1] == 0
+
+
+# -- T98: resume contract — snapshot settings, warn on drift --------
+
+
+def test_checkpoint_state_snapshots_settings(need_torch, tmp_path):
+    from stella.model import Store
+
+    store = _tiny_project(Store(tmp_path / "home"), tmp_path)
+    train_project(
+        store, "tiny", "proof",
+        _model_loader=tiny_model_and_tokenizer,
+        _dtype="float32",
+    )
+    state = json.loads(
+        (
+            store.project_dir("tiny", "proof")
+            / "checkpoints" / "step-3" / "training_state.json"
+        ).read_text()
+    )
+    assert state["settings"]["rank"] == 2
+    assert state["settings"]["epochs"] == 1
+    assert state["settings"]["max_seq_len"] == 128
+    assert state["settings"]["val_fraction"] == 0.25
+    # The per-step checkpoint carries the snapshot too.
+    step1 = json.loads(
+        (
+            store.project_dir("tiny", "proof")
+            / "checkpoints" / "step-1" / "training_state.json"
+        ).read_text()
+    )
+    assert step1["settings"]["rank"] == 2
+
+
+def _pause_after_step(store, stop_at=1):
+    """Train until step `stop_at`, then pause. Returns the summary."""
+    controller = TrainController()
+
+    def stop_after_step(event):
+        if event.get("type") == "step" and event["step"] >= stop_at:
+            controller.request_stop()
+
+    return train_project(
+        store, "tiny", "proof",
+        on_event=stop_after_step,
+        controller=controller,
+        _model_loader=tiny_model_and_tokenizer,
+        _dtype="float32",
+    )
+
+
+def test_resume_warns_on_changed_rank(need_torch, tmp_path):
+    from stella.model import Store
+
+    store = _tiny_project(Store(tmp_path / "home"), tmp_path)
+    paused = _pause_after_step(store, stop_at=1)
+    assert paused["stopped"] is True
+    assert paused["steps"] == 1
+    # The audit's probe: rank 2 -> 4 between pause and resume.
+    store.update_project("tiny", "proof", settings={"rank": 4})
+    events = []
+    resumed = train_project(
+        store, "tiny", "proof",
+        resume=True,
+        on_event=events.append,
+        _model_loader=tiny_model_and_tokenizer,
+        _dtype="float32",
+    )
+    assert resumed["stopped"] is False
+    assert resumed["steps"] == 3
+    warnings = [e for e in events if e.get("type") == "warning"]
+    assert warnings, "no warning event on a changed-rank resume"
+    assert any("rank" in w.get("message", "") for w in warnings)
+    # The warning is in the log too, not just the live events.
+    log = (
+        store.project_dir("tiny", "proof") / "train_log.jsonl"
+    ).read_text()
+    records = [json.loads(line) for line in log.splitlines()]
+    logged = [r for r in records if r.get("event") == "warning"]
+    assert any("rank" in r.get("message", "") for r in logged)
+
+
+def test_resume_warns_on_missing_optimizer(need_torch, tmp_path):
+    from stella.model import Store
+
+    store = _tiny_project(Store(tmp_path / "home"), tmp_path)
+    paused = _pause_after_step(store, stop_at=1)
+    assert paused["stopped"] is True
+    ckpt = store.project_dir("tiny", "proof") / "checkpoints" / "step-1"
+    (ckpt / "optimizer.pt").unlink()
+    events = []
+    resumed = train_project(
+        store, "tiny", "proof",
+        resume=True,
+        on_event=events.append,
+        _model_loader=tiny_model_and_tokenizer,
+        _dtype="float32",
+    )
+    assert resumed["stopped"] is False
+    assert resumed["steps"] == 3
+    warnings = [e for e in events if e.get("type") == "warning"]
+    assert warnings, "no warning event on a missing-optimizer resume"
+    assert any("optimizer" in w.get("message", "") for w in warnings)
+    log = (
+        store.project_dir("tiny", "proof") / "train_log.jsonl"
+    ).read_text()
+    records = [json.loads(line) for line in log.splitlines()]
+    logged = [r for r in records if r.get("event") == "warning"]
+    assert any("optimizer" in r.get("message", "") for r in logged)
+
+
+def test_resume_without_drift_stays_quiet(need_torch, tmp_path):
+    from stella.model import Store
+
+    store = _tiny_project(Store(tmp_path / "home"), tmp_path)
+    _pause_after_step(store, stop_at=1)
+    events = []
+    train_project(
+        store, "tiny", "proof",
+        resume=True,
+        on_event=events.append,
+        _model_loader=tiny_model_and_tokenizer,
+        _dtype="float32",
+    )
+    warnings = [e for e in events if e.get("type") == "warning"]
+    assert warnings == []
+
+
+# -- T109: no stale validation line on a resumed epoch --------------
+
+
+def test_resume_skips_validation_for_untrained_epoch(
+    need_torch, tmp_path
+):
+    from stella.model import Store
+
+    store = _tiny_project(Store(tmp_path / "home"), tmp_path)
+    store.update_project("tiny", "proof", settings={"epochs": 2})
+    # 3 steps/epoch, 6 total. Pause exactly at the end of epoch 1.
+    paused = _pause_after_step(store, stop_at=3)
+    assert paused["stopped"] is True
+    assert paused["steps"] == 3
+    events = []
+    resumed = train_project(
+        store, "tiny", "proof",
+        resume=True,
+        on_event=events.append,
+        _model_loader=tiny_model_and_tokenizer,
+        _dtype="float32",
+    )
+    assert resumed["stopped"] is False
+    assert resumed["steps"] == 6
+    val_epochs = [e["epoch"] for e in events if e.get("type") == "val"]
+    # The resumed run never trained in epoch 1 — no validation
+    # line for it. Epoch 2 ran for real and validates.
+    assert 1 not in val_epochs
+    assert 2 in val_epochs
+
+
+# -- T111: CLI-appropriate error text --------------------------------
+
+
+def test_train_no_dataset_error_names_dataset_flag_on_cli(tmp_path):
+    from stella.model import Store
+
+    store = Store(tmp_path / "home")
+    store.create_profile("p1", base_ref="test/tiny-model")
+    store.create_project("p1", "proj")  # no dataset
+    with pytest.raises(StellaError, match="--dataset"):
+        train_project(store, "p1", "proj", cli=True)
+    # The default (window) wording still names the Train panel.
+    with pytest.raises(StellaError, match="Train panel"):
+        train_project(store, "p1", "proj")
+
+
+def test_estimate_no_dataset_error_names_dataset_flag_on_cli(tmp_path):
+    from stella.model import Store
+
+    store = Store(tmp_path / "home")
+    model_dir = _fake_model_dir(tmp_path / "model")
+    store.create_profile("p1", base_ref=str(model_dir))
+    store.create_project("p1", "proj")  # no dataset
+    with pytest.raises(StellaError, match="--dataset"):
+        estimate_run(store, "p1", "proj", cli=True)
+    with pytest.raises(StellaError, match="Train panel"):
+        estimate_run(store, "p1", "proj")
+
+
+# -- T143: the mode is recorded in training artifacts ----------------
+
+
+def test_training_artifacts_record_mode(need_torch, tmp_path):
+    import warnings
+
+    from stella.model import Store
+
+    store = _tiny_project(Store(tmp_path / "home"), tmp_path)
+    store.update_project("tiny", "proof", metamorph={"mode": "both"})
+    train_project(
+        store, "tiny", "proof",
+        _model_loader=tiny_model_and_tokenizer,
+        _dtype="float32",
+    )
+    adapter_dir = store.project_dir("tiny", "proof") / "adapter"
+    saved = json.loads(
+        (adapter_dir / "training_summary.json").read_text()
+    )
+    assert saved["metamorph_mode"] == "both"
+    config = json.loads((adapter_dir / "adapter_config.json").read_text())
+    assert config["metamorph_mode"] == "both"
+    # And the adapter still loads with the extra key: peft ignores
+    # it (with a warning the CLI filters — see T110).
+    from peft import PeftModel
+
+    base, _ = tiny_model_and_tokenizer()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        loaded = PeftModel.from_pretrained(
+            base, str(adapter_dir), is_trainable=True
+        )
+    assert loaded is not None
+
+
+def test_training_artifacts_record_default_mode(need_torch, tmp_path):
+    from stella.model import Store
+
+    # The tiny project is created with the default mode: the
+    # artifacts record the stored string, "morph", not a guess.
+    store = _tiny_project(Store(tmp_path / "home"), tmp_path)
+    train_project(
+        store, "tiny", "proof",
+        _model_loader=tiny_model_and_tokenizer,
+        _dtype="float32",
+    )
+    adapter_dir = store.project_dir("tiny", "proof") / "adapter"
+    saved = json.loads(
+        (adapter_dir / "training_summary.json").read_text()
+    )
+    assert saved["metamorph_mode"] == "morph"

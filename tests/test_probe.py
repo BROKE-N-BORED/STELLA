@@ -334,7 +334,9 @@ def test_probe_project_before_after_with_fakes(tmp_path):
     )
     assert result["before"]["refusals"] == 0
     assert result["after"]["refusals"] == 3
-    assert result["delta"] == pytest.approx(3 / n_prompts)
+    # The delta is rounded to 3 decimals (0.167 for 3/18): compare
+    # against the rounded value, not the raw fraction.
+    assert result["delta"] == round(3 / n_prompts, 3)
     saved = json.loads(
         (store.project_dir("tiny", "proof") / "probe_results.json").read_text()
     )
@@ -567,3 +569,19 @@ def test_is_governing_profile():
     assert is_governing_profile({"role": "judge"}) is False
     assert is_governing_profile({"role": ""}) is False
     assert is_governing_profile({}) is False
+
+
+# -- T109: each probe pass opens with a phase event --------------------
+
+
+def test_probe_project_emits_a_phase_event_per_pass(tmp_path, monkeypatch):
+    # T109: the before pass and the after pass each open with a
+    # phase event, so the CLI can print a line per pass and a
+    # multi-minute probe is never silent.
+    store = _probe_store(tmp_path)
+    events = []
+    _run_fake_probe(store, monkeypatch, on_event=events.append)
+    phases = [
+        e["phase"] for e in events if e.get("type") == "phase"
+    ]
+    assert phases == ["before", "after"]

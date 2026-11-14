@@ -131,6 +131,18 @@ job, export it as a usable package.
   replies before committing. A proof-run button starts a
   5-step smoke test, and finished runs report the val loss
   next to the training loss.
+- v0.17.0 training-engine honesty (2026-11-14): resume warns
+  when settings drifted since the pause or the optimizer file
+  is gone (settings are snapshotted into every checkpoint);
+  the probe prints a line per pass, GGUF export a line per
+  phase, and a paused run says "Paused after N steps"; the
+  converter and quantizer time out after 30 minutes naming
+  the hung step; the GGUF pre-flight refuses an architecture
+  the installed converter does not support before the merge;
+  completions end with the chat template's turn terminator;
+  the printed `ollama create` command works with spaced
+  paths; library warnings stay off stderr; and the mode a run
+  trained with is recorded in its summary and adapter config.
 
 ## Install
 

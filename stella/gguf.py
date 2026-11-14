@@ -20,6 +20,7 @@ file. Tests inject a fake converter runner instead of llama.cpp.
 from __future__ import annotations
 
 import json
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -29,6 +30,10 @@ from .model import StellaError, Store
 from .train import RAM_LIMIT_BYTES
 
 DEFAULT_QUANT = "Q4_K_M"
+
+# A hung converter/quantizer fails instead of hanging forever
+# (T103): generous, a real 1.7B convert takes minutes.
+SUBPROCESS_TIMEOUT_SECONDS = 30 * 60
 
 # Headroom for the OS + Stella itself while a merge or a converter
 # runs (T31). The training estimator uses the same shape.
@@ -106,6 +111,50 @@ def find_llama_cpp() -> tuple[Path, Path]:
             + LLAMA_CPP_HINT
         )
     return convert, quantize
+
+
+def converter_supported_archs(convert_path: str | Path) -> set[str] | None:
+    """The architectures the installed converter supports (T97),
+    read from the converter's own registrations: modern
+    convert_hf_to_gguf.py registers each model class with
+    @Model.register("LlamaForCausalLM"). None when the script
+    carries no registrations (an old converter, or one whose
+    format changed) — the check cannot be made, so it does not
+    refuse on a guess."""
+    import re
+
+    try:
+        text = Path(convert_path).read_text(
+            encoding="utf-8", errors="replace"
+        )
+    except OSError:
+        return None
+    found = set(
+        re.findall(
+            r"@Model\.register\(\s*[\"']([^\"']+)[\"']\s*\)", text
+        )
+    )
+    return found or None
+
+
+def check_converter_supports_arch(
+    arch: str, convert_path: str | Path
+) -> None:
+    """Refuse (T97) when the installed converter does not support
+    the base model's architecture — before the merge, not after
+    it. The arch and the converter are both named. When the
+    converter's list cannot be read, the check passes: the
+    converter itself will fail loudly if the arch is unsupported."""
+    supported = converter_supported_archs(convert_path)
+    if supported is None:
+        return
+    if arch not in supported:
+        raise StellaError(
+            f"the converter at {convert_path} does not support the "
+            f"{arch} architecture, so this base model cannot be "
+            "exported to GGUF with it. Update llama.cpp to one that "
+            "supports it, or export from a supported base model."
+        )
 
 
 def _gb(n: int) -> str:
@@ -215,17 +264,38 @@ def merge_adapter(
     return out_dir
 
 
-def _run(cmd: list[str], *, _runner=None, should_stop=None) -> None:
+def _timeout_text(seconds: float) -> str:
+    """A timeout as plain words ("30 minutes", "5 seconds")."""
+    if seconds >= 60:
+        return f"{seconds / 60:.0f} minutes"
+    return f"{seconds:g} seconds"
+
+
+def _run(
+    cmd: list[str],
+    *,
+    _runner=None,
+    should_stop=None,
+    timeout: float | None = None,
+    step: str = "converter",
+) -> None:
     """Run a converter command, or hand it to the injected fake.
 
     `should_stop` (a no-arg callable, T74) cancels a long command:
     the process is polled and killed when the flag flips, so the
     job card's Cancel button stops the converter instead of
     waiting for it. A Ctrl+C kills the child too before re-raising.
+    `timeout` (T103) bounds the wait: a hung converter is killed
+    and fails with a StellaError naming the step, instead of
+    hanging the export — and the GUI job, which has no cancel —
+    forever.
     """
     if _runner is not None:
         _runner(cmd)
         return
+    import time
+
+    deadline = None if timeout is None else time.monotonic() + timeout
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
     )
@@ -239,6 +309,15 @@ def _run(cmd: list[str], *, _runner=None, should_stop=None) -> None:
                     proc.kill()
                     proc.wait()
                     raise StellaError("Cancelled.")
+                if deadline is not None and time.monotonic() >= deadline:
+                    proc.kill()
+                    proc.wait()
+                    raise StellaError(
+                        f"the {step} timed out after "
+                        f"{_timeout_text(timeout)}. The export was "
+                        "stopped. Try again, or check the llama.cpp "
+                        "install."
+                    )
     except KeyboardInterrupt:
         proc.kill()
         proc.wait()
@@ -312,6 +391,8 @@ def convert_to_gguf(
             ],
             _runner=_runner,
             should_stop=should_stop,
+            timeout=SUBPROCESS_TIMEOUT_SECONDS,
+            step="GGUF converter",
         )
         if _runner is None and not tmp_f16.is_file():
             raise StellaError(
@@ -327,6 +408,8 @@ def convert_to_gguf(
             [str(quantize), str(tmp_f16), str(out_path), quant],
             _runner=_runner,
             should_stop=should_stop,
+            timeout=SUBPROCESS_TIMEOUT_SECONDS,
+            step="quantizer",
         )
         if _runner is None and not out_path.is_file():
             raise StellaError(
@@ -361,11 +444,18 @@ def write_modelfile(
 ) -> tuple[Path, str]:
     """Write an Ollama Modelfile for a GGUF file.
 
-    Returns (modelfile_path, ollama_create_command).
+    Returns (modelfile_path, ollama_create_command). The paths
+    are shlex-quoted (T101): a spaced path used to split the
+    printed command at the space, so the exact command Stella
+    prints for copy-paste failed. shlex.quote leaves a plain
+    path untouched, so unspaced exports read exactly as before.
+    Whether Ollama's Modelfile parser accepts a quoted FROM is
+    unprobed without Ollama — the shell-command fix is the
+    certain half; the FROM line wants a real-Ollama check.
     """
     gguf_path = Path(gguf_path).expanduser().resolve()
     out_path = Path(out_path)
-    lines = [f"FROM {gguf_path}"]
+    lines = [f"FROM {shlex.quote(str(gguf_path))}"]
     if template:
         lines.append(f'TEMPLATE """{template}"""')
     if system:
@@ -373,7 +463,7 @@ def write_modelfile(
     lines.append("PARAMETER temperature 0.7")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    command = f"ollama create {name} -f {out_path}"
+    command = f"ollama create {name} -f {shlex.quote(str(out_path))}"
     return out_path, command
 
 
@@ -393,6 +483,7 @@ def export_gguf(
     _runner=None,
     _model_loader=None,
     _dtype: str = "bfloat16",
+    _base_arch: str | None = None,
 ) -> dict:
     """Full round-trip for one trained project.
 
@@ -410,6 +501,11 @@ def export_gguf(
     --force, before the merge runs. The previous output cost a
     merge + convert + quantize to produce; it is never deleted
     silently. `force=True` overwrites deliberately.
+
+    The conversion pre-flight (T97) runs before the merge too:
+    the base's architecture (from its config, or `_base_arch`
+    in tests) must be one the installed converter supports, or
+    the export is refused naming the arch and the converter.
     """
     from .requant import validate_quant
     from .train import LFM3_HF_REPO
@@ -468,20 +564,31 @@ def export_gguf(
     # the converter loads the model again as a separate process,
     # and on a tight export the user should close other apps
     # first. Skipped when the metadata cannot be read (a test fake
-    # world): the merge guard raises its own error there.
-    warnings: list[str] = []
+    # world): the merge guard raises its own error there. The same
+    # metadata read feeds the architecture pre-flight (T97).
+    meta = None
     if _model_loader is None:
         try:
             from .train import load_model_metadata
 
-            warnings = merge_warnings(
-                load_model_metadata(base_ref)["base_bytes"]
-            )
+            meta = load_model_metadata(base_ref)
         except StellaError:
-            warnings = []
+            meta = None
+    warnings = merge_warnings(meta["base_bytes"]) if meta else []
     for warning in warnings:
         if on_warning is not None:
             on_warning(warning)
+    # The conversion pre-flight (T97): confirm the base's
+    # architecture is one the installed converter supports —
+    # before the merge, not after it. The arch comes from the base
+    # config (or the _base_arch test hook); when it cannot be
+    # read, the check is skipped rather than guessed.
+    base_arch = _base_arch
+    if base_arch is None and meta is not None:
+        archs = meta.get("architectures") or []
+        base_arch = archs[0] if archs else None
+    if base_arch is not None and llama_cpp is not None:
+        check_converter_supports_arch(base_arch, llama_cpp[0])
 
     def emit(event: dict):
         if on_event is not None:

@@ -24,6 +24,8 @@ import sys
 import time
 from pathlib import Path
 
+from stella.model import STELLA_VERSION
+
 ROOT = Path(__file__).resolve().parent.parent
 REAL_PYTHON = sys.executable
 
@@ -351,12 +353,12 @@ def test_install_end_to_end(tmp_path):
         capture_output=True, text=True, check=False,
     )
     assert res.returncode == 0
-    assert res.stdout.strip() == "stella 0.16.0"
+    assert res.stdout.strip() == f"stella {STELLA_VERSION}"
 
     receipt = tree / ".stella-install-receipt"
     assert receipt.is_file()
     receipt_text = receipt.read_text()
-    assert "stella_version: 0.16.0" in receipt_text
+    assert f"stella_version: {STELLA_VERSION}" in receipt_text
     assert "pyside6: 6.12.0" in receipt_text
     assert "installed_at:" in receipt_text
     assert f"launcher: {launcher}" in receipt_text
@@ -372,7 +374,7 @@ def test_install_success_message_reflects_reality(tmp_path):
     tree = copy_tree(tmp_path)
     home = make_home(tmp_path, desktop=False)
     res = installed(tree, home)
-    assert "Stella 0.16.0 is installed." in res.stdout
+    assert f"Stella {STELLA_VERSION} is installed." in res.stdout
     assert "double-click Stella on the desktop" not in res.stdout
     assert "open a new terminal" in res.stdout
     assert "Traceback" not in res.stdout + res.stderr
@@ -606,7 +608,7 @@ def test_install_stella_desktop_runs_installer(tmp_path):
         input="\n", timeout=300, check=False,
     )
     assert res.returncode == 0, res.stdout + res.stderr
-    assert "Stella 0.16.0 is installed." in res.stdout
+    assert f"Stella {STELLA_VERSION} is installed." in res.stdout
     assert (home / ".local" / "share" / "applications"
             / "stella.desktop").is_file()
     assert (home / ".local" / "bin" / "stella").is_symlink()
@@ -751,7 +753,7 @@ def test_doctor_repairs_after_move(tmp_path):
         [str(link), "--version"], cwd=moved,
         capture_output=True, text=True, check=False,
     )
-    assert res.stdout.strip() == "stella 0.16.0"
+    assert res.stdout.strip() == f"stella {STELLA_VERSION}"
     assert resolve_desktop_icon(launcher, home) is not None
     receipt = (moved / ".stella-install-receipt").read_text()
     assert f"install_dir: {moved}" in receipt

@@ -279,6 +279,7 @@ def cmd_train(args) -> int:
         estimate = estimate_run(
             store, args.profile, args.project,
             dataset_path=args.dataset, base_ref=args.base,
+            cli=True,
         )
         print(format_estimate(estimate))
         return 0
@@ -353,6 +354,7 @@ def cmd_train(args) -> int:
             target_modules=target_modules,
             on_event=on_event,
             controller=controller,
+            cli=True,
         )
     finally:
         signal.signal(signal.SIGINT, old_handler)
@@ -363,13 +365,25 @@ def cmd_train(args) -> int:
     # training loss.
     val_loss = summary.get("final_val_loss")
     val_text = f"{val_loss:.4f}" if val_loss is not None else "n/a"
-    print(
-        f"Trained {summary['steps']} steps, "
-        f"final loss {loss_text}, val loss {val_text}, "
-        f"{summary['trainable_params']:,} trainable params, "
-        # T35: this is the pre-run estimate, not a measurement.
-        f"about {summary['ram_estimate_gb']} GB RAM (estimated)."
-    )
+    # T109: a paused run's tail says Paused, not Trained — the old
+    # line reused the completed-run wording, so a user scanning
+    # the tail saw a run that looked finished.
+    if summary.get("stopped"):
+        print(
+            f"Paused after {summary['steps']} steps, "
+            f"final loss {loss_text}, val loss {val_text}, "
+            f"{summary['trainable_params']:,} trainable params, "
+            # T35: this is the pre-run estimate, not a measurement.
+            f"about {summary['ram_estimate_gb']} GB RAM (estimated)."
+        )
+    else:
+        print(
+            f"Trained {summary['steps']} steps, "
+            f"final loss {loss_text}, val loss {val_text}, "
+            f"{summary['trainable_params']:,} trainable params, "
+            # T35: this is the pre-run estimate, not a measurement.
+            f"about {summary['ram_estimate_gb']} GB RAM (estimated)."
+        )
     return 0
 
 
@@ -377,6 +391,13 @@ def cmd_export_gguf(args) -> int:
     from .gguf import export_gguf
 
     store = _store()
+
+    def on_event(event: dict):
+        # T109: a line per phase, so a multi-minute export is never
+        # silent — the merge line first, then convert, then quantize.
+        if event.get("type") == "phase" and event.get("message"):
+            print(event["message"], flush=True)
+
     result = export_gguf(
         store,
         args.profile,
@@ -386,6 +407,7 @@ def cmd_export_gguf(args) -> int:
         from_checkpoint=args.from_checkpoint,
         force=args.force,
         on_warning=print,  # T31: the converter warning, before the merge
+        on_event=on_event,
     )
     print(f"Merged HF weights: {result['merged_hf']}")
     print(
@@ -404,9 +426,20 @@ def cmd_probe(args) -> int:
     from .probe import probe_gate, probe_project
 
     store = _store()
+
+    def on_event(event: dict):
+        # T109: a line when each pass starts, so a probe that loads
+        # two models and runs 24 generations is never silent.
+        if event.get("type") == "phase":
+            if event.get("phase") == "before":
+                print("Probing before tuning...", flush=True)
+            elif event.get("phase") == "after":
+                print("Probing after tuning...", flush=True)
+
     result = probe_project(
         store, args.profile, args.project,
         informational=args.informational,
+        on_event=on_event,
     )
     before = result["before"]
     after = result["after"]
@@ -1046,7 +1079,62 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _silence_library_warnings() -> None:
+    """Filter the known-noisy library warnings (T110) so stderr
+    carries Stella's messages, not the libraries': transformers
+    deprecation notices (`torch_dtype`, gradient-checkpointing
+    renames), peft's fan_in_fan_out note, and the notice peft
+    prints for the metamorph_mode key Stella records in the
+    adapter config (T143 — peft ignores the key, the warning is
+    noise). Advisory warnings go off at the source
+    (TRANSFORMERS_NO_ADVISORY_WARNINGS); tqdm bars go off too
+    (TQDM_DISABLE). setdefault: a user-set value wins. Called at
+    the top of main(), before any heavy import, so the env vars
+    are read while they still take effect. (The train.py:642
+    float() fix this task also named already landed: both loss
+    accumulations use .detach(), so this task is the filtering
+    only.)
+
+    The GUI entry point (gui.main) calls this too, so a probe or
+    merge loading an adapter does not print the peft notice into
+    the window's stderr either.
+    """
+    import os
+    import warnings
+
+    os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
+    os.environ.setdefault("TQDM_DISABLE", "1")
+    warnings.filterwarnings(
+        "ignore", message=".*torch_dtype.*is deprecated.*"
+    )
+    warnings.filterwarnings(
+        "ignore", message=".*fan_in_fan_out.*"
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=".*Unexpected keyword arguments.*metamorph_mode.*",
+    )
+    # Library deprecation warnings in general (transformers/peft
+    # internals rename things between releases): the user cannot
+    # act on them, and a redirected stderr log should not be
+    # mostly chatter. Scoped to the two libraries' modules, so
+    # Stella's own warnings still show.
+    warnings.filterwarnings(
+        "ignore", category=FutureWarning, module="transformers.*"
+    )
+    warnings.filterwarnings(
+        "ignore", category=DeprecationWarning, module="transformers.*"
+    )
+    warnings.filterwarnings(
+        "ignore", category=FutureWarning, module="peft.*"
+    )
+    warnings.filterwarnings(
+        "ignore", category=DeprecationWarning, module="peft.*"
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
+    _silence_library_warnings()
     parser = build_parser()
     args = parser.parse_args(argv)
     try:

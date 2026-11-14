@@ -2832,6 +2832,7 @@ accounts for their findings.)
 - **Origin:** audit #8 T23
 - **Covers:** A8-G11
 - **Effort:** S
+- **Status:** DONE in v0.17.0 (2026-11-14) — the GGUF export checks the converter supports the model's architecture first (parses @Model.register from the installed converter) and refuses an unsupported arch naming it. LFM3 arch support in the real llama.cpp converter needs his PC.
 - **Problem:** `convert_hf_to_gguf.py` must support the `lfm3`
   architecture, and nothing in Stella checks that before the
   merge — the first sign of an unsupported arch would be a
@@ -2853,6 +2854,7 @@ accounts for their findings.)
 - **Origin:** audit #8 T10
 - **Covers:** A8-W10, A8-W11, A8-D8
 - **Effort:** S
+- **Status:** DONE in v0.17.0 (2026-11-14) — resume snapshots settings into training_state.json and warns (never refuses) on drift, and warns on a missing optimizer.pt.
 - **Problem:** On the resume path, `train_project` loads the
   checkpoint's adapter (`train.py:899`) and never applies the
   freshly built `peft_config` — it is constructed
@@ -2909,6 +2911,7 @@ accounts for their findings.)
 - **Origin:** audit #8 T16
 - **Covers:** A8-W17, A8-D14
 - **Effort:** S
+- **Status:** DONE in v0.17.0 (2026-11-14) — the tuned model learns to end its turn the way the chat template expects (renders a probe assistant turn and appends the turn terminator instead of EOS when defined). End-to-end with a real chat-template tokenizer needs his PC.
 - **Problem:** The prompt is rendered through the chat template
   (`train.py:420`), but the completion is the raw assistant
   content plus EOS (`train.py:430-432`) — the template's own
@@ -2933,6 +2936,7 @@ accounts for their findings.)
 - **Origin:** audit #8 T14
 - **Covers:** A8-W15, A8-D12
 - **Effort:** S
+- **Status:** DONE in v0.17.0 (2026-11-14) — the printed Ollama command works when pasted (shlex.quote on the Modelfile FROM + printed command). Whether Ollama's Modelfile parser accepts a quoted FROM needs real Ollama.
 - **Problem:** `write_modelfile` (`gguf.py:193`) writes the GGUF
   path and the command with no quoting. Probed with dest `my
   models`: Modelfile line `FROM /home/…/my models/model-q4_k_m.gguf`,
@@ -2979,6 +2983,7 @@ accounts for their findings.)
 - **Origin:** audit #8 T22
 - **Covers:** A8-G7
 - **Effort:** S
+- **Status:** DONE in v0.17.0 (2026-11-14) — a 30-minute timeout on the converter/quantizer subprocesses, naming the hung step, instead of hanging forever.
 - **Problem:** `_run` calls `subprocess.run` with no timeout
   (`gguf.py:132`). A hung llama.cpp hangs the export — and the
   GUI job, which has no cancel — forever. The failure mode is
@@ -3108,6 +3113,7 @@ accounts for their findings.)
 - **Origin:** audit #5 T14
 - **Covers:** A5-U6, A5-U7, A5-U8, A5-D14
 - **Effort:** S
+- **Status:** DONE in v0.17.0 (2026-11-14) — long runs print what phase they're in and the paused summary says how far it got.
 - **Problem:** `probe` prints nothing at all while it loads two
   models and runs 24 generations (12 prompts, before and after) —
   on the tiny model that was a ~6-minute silence (only tqdm bars
@@ -3143,6 +3149,7 @@ accounts for their findings.)
 - **Origin:** audit #5 T12
 - **Covers:** A5-U4, A5-D12
 - **Effort:** S
+- **Status:** DONE in v0.17.0 (2026-11-14) — stderr carries Stella's messages, not the libraries' warnings (filtering only; the .detach() fix was verified already landed).
 - **Problem:** Every `train`, `probe`, and `export-gguf` run prints
   transformers deprecation warnings (`torch_dtype` is deprecated),
   a peft `UserWarning` about `fan_in_fan_out`, the `train.py:642`
@@ -3169,6 +3176,7 @@ accounts for their findings.)
 - **Origin:** audit #5 T13
 - **Covers:** A5-U5, A5-D13
 - **Effort:** S
+- **Status:** DONE in v0.17.0 (2026-11-14) — the CLI's no-dataset error names --dataset; the Train panel wording is kept in the window.
 - **Problem:** `train` on a project with no dataset prints:
   `stella: project 'nodata' has no dataset set — pick a .jsonl
   dataset in the Train panel, or use the sample dataset`. A
@@ -3855,6 +3863,7 @@ accounts for their findings.)
 - **Origin:** audit #7 T13
 - **Covers:** A7-G5, A7-D11
 - **Effort:** S
+- **Status:** DONE in v0.17.0 (2026-11-14) — corrupt-block tests pin T37's reader for every reader (no reader fixes needed; save heals the block to the default).
 - **Problem:** The suite tests valid modes, a bad mode string, and
   the round-trip — but no test covers `null`, missing-key, or
   wrong-type metamorph in `project.json` or a manifest. All three
@@ -3899,6 +3908,7 @@ accounts for their findings.)
 - **Origin:** audit #7 T11
 - **Covers:** A7-G3, A7-D5
 - **Effort:** S
+- **Status:** DONE in v0.17.0 (2026-11-14) — the stored mode string is recorded in training_summary.json + adapter config; no reading picked.
 - **Problem:** Adapter, checkpoints, `train_log.jsonl`, and
   `training_summary.json` never record the mode (scanned clean,
   audit #7 P8). After a run, nothing in the artifacts says which

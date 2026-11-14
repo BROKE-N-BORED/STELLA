@@ -40,7 +40,7 @@ from pathlib import Path
 
 from .autoconfig import compute_settings, measure_pc
 from .job_lock import job_lock
-from .model import STELLA_VERSION, StellaError, Store
+from .model import STELLA_VERSION, StellaError, Store, metamorph_mode
 
 # First proof target — confirmed from the live model card, not guessed.
 LFM3_HF_REPO = "LiquidAI/LFM3-1.7B"
@@ -539,6 +539,13 @@ def _metadata_from_config(config: dict, base_bytes: int) -> dict:
         config.get("torch_dtype") or config.get("dtype") or "bfloat16"
     ).lower()
     bpp = _DTYPE_BYTES.get(dtype, 2)
+    # The architecture names (T97): the GGUF pre-flight checks the
+    # first one against the installed converter's supported list.
+    # A config without the field, or a non-list value, reads as no
+    # architectures — the check is skipped, never guessed.
+    archs = config.get("architectures")
+    if not isinstance(archs, list):
+        archs = []
     return {
         "params": max(1, base_bytes // bpp),
         "hidden_size": hidden,
@@ -546,6 +553,7 @@ def _metadata_from_config(config: dict, base_bytes: int) -> dict:
         "intermediate_size": intermediate,
         "base_bytes": base_bytes,
         "bytes_per_param": bpp,
+        "architectures": [str(a) for a in archs],
     }
 
 
@@ -751,6 +759,23 @@ def _effective_settings_for_estimate(
     return settings
 
 
+def _no_dataset_error(project: str, *, cli: bool) -> StellaError:
+    """The no-dataset error, worded for the frontend asking (T111).
+
+    A terminal user has no Train panel, so the CLI names the CLI
+    fix (--dataset); the window names the panel, as before."""
+    if cli:
+        return StellaError(
+            f"project {project!r} has no dataset set. Use "
+            "--dataset <file> to train with a .jsonl dataset, or "
+            "create-project --dataset <file> when creating a project."
+        )
+    return StellaError(
+        f"project {project!r} has no dataset set. Pick a .jsonl "
+        "dataset in the Train panel, or use the sample dataset"
+    )
+
+
 def estimate_run(
     store: Store,
     profile: str,
@@ -758,6 +783,7 @@ def estimate_run(
     *,
     dataset_path: str | Path | None = None,
     base_ref: str | None = None,
+    cli: bool = False,
 ) -> dict:
     """The pre-train estimate (T84/T85), from metadata only.
 
@@ -806,10 +832,7 @@ def estimate_run(
     else:
         dataset_ref = proj.get("dataset_ref") or ""
         if not dataset_ref:
-            raise StellaError(
-                f"project {project!r} has no dataset set. Pick a .jsonl "
-                "dataset in the Train panel, or use the sample dataset"
-            )
+            raise _no_dataset_error(project, cli=cli)
         data_path = resolve_dataset_ref(store, profile, project, dataset_ref)
     examples, info = load_dataset(data_path)
     train_examples, val_examples = split_dataset(
@@ -1063,6 +1086,51 @@ def _render_fallback(messages: list[dict]) -> tuple[str, str]:
     return prompt, completion
 
 
+# The probe content _chat_turn_end_ids renders through the
+# template: distinctive, so find() lands on the content and not
+# on template text.
+_TURN_END_PROBE = "StellaTurnEndProbe"
+
+
+def _chat_turn_end_ids(tokenizer) -> list[int]:
+    """The tokens the tokenizer's chat template appends after an
+    assistant message's content (T100) — e.g. [<|im_end|>] for a
+    Qwen-shaped template. Found by rendering one probe assistant
+    turn through the template and reading the tokens after the
+    probe content. [] when there is no template, the template
+    defines no terminator, or the terminator cannot be told from
+    a turn separator: only special tokens count, so a trailing
+    newline (the template's separator between turns) is never
+    mistaken for one. A tokenizer with no special-token list
+    yields [] rather than a guess."""
+    if not hasattr(tokenizer, "apply_chat_template"):
+        return []
+    try:
+        rendered = tokenizer.apply_chat_template(
+            [{"role": "assistant", "content": _TURN_END_PROBE}],
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+    except Exception:
+        return []
+    if not isinstance(rendered, str):
+        return []
+    idx = rendered.find(_TURN_END_PROBE)
+    if idx < 0:
+        return []
+    suffix = rendered[idx + len(_TURN_END_PROBE):]
+    if not suffix:
+        return []
+    try:
+        ids = tokenizer.encode(suffix, add_special_tokens=False)
+    except Exception:
+        return []
+    special = getattr(tokenizer, "all_special_ids", None)
+    if special is None:
+        return []
+    return [i for i in ids if i in special]
+
+
 def tokenize_example(tokenizer, example: dict, max_seq_len: int) -> dict:
     """Tokenize one example into input_ids + labels.
 
@@ -1084,9 +1152,18 @@ def tokenize_example(tokenizer, example: dict, max_seq_len: int) -> dict:
         prompt_text, completion_text = _render_fallback(messages)
     prompt_ids = tokenizer.encode(prompt_text)
     completion_ids = tokenizer.encode(completion_text, add_special_tokens=False)
+    # End the completion the way the template ends a turn (T100):
+    # when the chat template defines an assistant-turn end token
+    # (<|im_end|> for a Qwen-shaped template), it goes on instead
+    # of EOS — the tuned model learns to end its turn the way the
+    # template expects, instead of running on in Ollama. With no
+    # template terminator, EOS as before.
+    turn_end = _chat_turn_end_ids(tokenizer)
     eos = tokenizer.eos_token_id
-    if eos is not None:
-        completion_ids = completion_ids + [eos]
+    tail = list(turn_end)
+    if not tail and eos is not None:
+        tail = [eos]
+    completion_ids = completion_ids + tail
     # Bound the completion too (T99): the old code truncated only
     # the prompt, so a completion longer than max_seq_len sailed
     # through whole — a 200-char completion at max_seq_len=64 came
@@ -1097,10 +1174,8 @@ def tokenize_example(tokenizer, example: dict, max_seq_len: int) -> dict:
     truncated = False
     if len(completion_ids) > max_seq_len:
         truncated = True
-        if eos is not None:
-            completion_ids = completion_ids[: max_seq_len - 1] + [eos]
-        else:
-            completion_ids = completion_ids[:max_seq_len]
+        head_len = max(0, max_seq_len - len(tail))
+        completion_ids = completion_ids[:head_len] + tail
     if len(prompt_ids) + len(completion_ids) > max_seq_len:
         keep = max(0, max_seq_len - len(completion_ids))
         prompt_ids = prompt_ids[-keep:] if keep else []
@@ -1247,6 +1322,41 @@ def _append_log(project_dir: Path, record: dict) -> None:
         fh.write(json.dumps(record, sort_keys=True) + "\n")
 
 
+def _settings_drift(stored: dict, current: dict) -> list[str]:
+    """Keys whose value changed between the stored run settings
+    and the current ones (T98), in stored order. A stored key the
+    current run does not carry counts as drift too."""
+    return [
+        key
+        for key, value in stored.items()
+        if key not in current or current[key] != value
+    ]
+
+
+def _record_mode_in_adapter_config(adapter_dir: Path, mode: str) -> None:
+    """Write the training mode into the adapter's own config
+    (T143). peft writes adapter_config.json, so the mode is added
+    with a post-write edit; peft ignores the extra key on load
+    (it warns, and the CLI filters that notice — see
+    cli._silence_library_warnings). A config that cannot be read
+    back is left alone: the summary already carries the mode."""
+    config_path = Path(adapter_dir) / "adapter_config.json"
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(config, dict):
+        return
+    config["metamorph_mode"] = mode
+    try:
+        config_path.write_text(
+            json.dumps(config, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        return
+
+
 # -- the training loop ----------------------------------------------
 
 class TrainController:
@@ -1288,6 +1398,7 @@ def run_training_loop(
     optimizer=None,
     max_steps: int | None = None,
     extending: bool = False,
+    mode: str | None = None,
 ) -> dict:
     """The loop itself, separated from model loading so tests can pass
     a tiny random model. Returns a summary dict (steps, total_steps,
@@ -1296,11 +1407,26 @@ def run_training_loop(
     reaching the cap is completion, not a pause — the adapter is
     saved and the run reports done. `extending` (T25) marks a
     resume on a project that already finished training: the loop
-    announces the extension and the new total before starting."""
+    announces the extension and the new total before starting.
+    `mode` (T143) is the project's stored metamorph mode string,
+    recorded in the training summary and the adapter config at
+    train time; None records nothing."""
     # Validate first, before the torch import: a bad value is
     # refused with a plain message naming the setting, never a raw
     # ValueError/ZeroDivisionError from a bare int()/float() (T6).
     checked = validate_run_settings(config)
+    # The run's settings, snapshotted into every checkpoint state
+    # (T98): on resume, the stored settings are compared with the
+    # run's fresh ones, so a changed rank (or any other knob) is
+    # warned about instead of silently dropped. val_fraction rides
+    # along: it shapes the train/val split, which resume rebuilds.
+    snapshot_settings = dict(checked)
+    try:
+        snapshot_settings["val_fraction"] = float(
+            config.get("val_fraction", 0.1)
+        )
+    except (TypeError, ValueError):
+        snapshot_settings["val_fraction"] = 0.1
     import torch
 
     def emit(event: dict):
@@ -1396,6 +1522,11 @@ def run_training_loop(
         micro_idx = 0
         accum_loss = 0.0
         accum_count = 0
+        # Steps taken in this epoch (T109): a resumed epoch the
+        # run never trained in — paused exactly at its end — has
+        # none, and re-validating it would print a stale line for
+        # an epoch the resumed run did not train.
+        steps_this_epoch = 0
         while micro_idx < len(order):
             batch_idx = order[micro_idx : micro_idx + batch_size]
             micro_idx += len(batch_idx)
@@ -1428,6 +1559,7 @@ def run_training_loop(
             accum_loss = 0.0
             accum_count = 0
             step += 1
+            steps_this_epoch += 1
             record = {
                 "step": step,
                 # The run total, so the GUI can re-render this line
@@ -1456,6 +1588,7 @@ def run_training_loop(
                     "loss": last_loss,
                     "examples_seen_in_epoch": examples_seen,
                     "stella_version": STELLA_VERSION,
+                    "settings": snapshot_settings,
                 }
                 ckpt = project_dir / "checkpoints" / f"step-{step}"
                 _save_checkpoint(model, optimizer, ckpt, state)
@@ -1470,6 +1603,14 @@ def run_training_loop(
                 break
         if stopped:
             break
+        if steps_this_epoch == 0:
+            # No new steps in this epoch (a resume that landed
+            # exactly at its end): skip the validation, or the
+            # output claims an epoch finished that this run never
+            # trained (T109).
+            if step >= total_steps:
+                break
+            continue
         val_loss = evaluate()
         if val_loss is not None:
             last_val_loss = val_loss
@@ -1488,6 +1629,7 @@ def run_training_loop(
         "loss": last_loss,
         "examples_seen_in_epoch": examples_seen,
         "stella_version": STELLA_VERSION,
+        "settings": snapshot_settings,
     }
     ckpt = project_dir / "checkpoints" / f"step-{step}"
     _save_checkpoint(model, optimizer, ckpt, state)
@@ -1499,20 +1641,24 @@ def run_training_loop(
             shutil.rmtree(adapter_dir)
         model.save_pretrained(str(adapter_dir))
         tokenizer.save_pretrained(str(adapter_dir))
+        # Provenance (T143): the mode the project was in when it
+        # trained, recorded as stored — so a future "was this
+        # adapter compressed?" has an answer in the artifacts. The
+        # adapter config carries it too, via a post-write edit
+        # (peft writes that file, not Stella).
+        summary_data = {
+            "steps": step,
+            "epochs": epochs,
+            "final_loss": last_loss,
+            "final_val_loss": last_val_loss,
+            "rank": rank,
+            "stella_version": STELLA_VERSION,
+        }
+        if mode is not None:
+            summary_data["metamorph_mode"] = mode
+            _record_mode_in_adapter_config(adapter_dir, mode)
         (adapter_dir / "training_summary.json").write_text(
-            json.dumps(
-                {
-                    "steps": step,
-                    "epochs": epochs,
-                    "final_loss": last_loss,
-                    "final_val_loss": last_val_loss,
-                    "rank": rank,
-                    "stella_version": STELLA_VERSION,
-                },
-                indent=2,
-                sort_keys=True,
-            )
-            + "\n",
+            json.dumps(summary_data, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
         emit({"type": "done", "steps": step, "adapter": str(adapter_dir)})
@@ -1550,6 +1696,7 @@ def train_project(
     settings_override: dict | None = None,
     target_modules: list[str] | None = None,
     _skip_job_lock: bool = False,
+    cli: bool = False,
 ) -> dict:
     """Train one project end to end. Returns a summary dict.
 
@@ -1570,6 +1717,8 @@ def train_project(
     auto-detection. `_skip_job_lock` skips the one-job lock (T29):
     sleep passes it because it already holds the lock for the
     whole cycle.
+    `cli` (T111) words the no-dataset error for the terminal
+    (--dataset) instead of the window (the Train panel).
     """
     # The step cap is validated first, before the training deps
     # are even required (T56): 0 or a negative number is refused
@@ -1652,10 +1801,7 @@ def train_project(
     else:
         dataset_ref = proj.get("dataset_ref") or ""
         if not dataset_ref:
-            raise StellaError(
-                f"project {project!r} has no dataset set. Pick a .jsonl "
-                "dataset in the Train panel, or use the sample dataset"
-            )
+            raise _no_dataset_error(project, cli=cli)
         data_path = resolve_dataset_ref(store, profile, project, dataset_ref)
     examples, info = load_dataset(data_path)
     train_examples, val_examples = split_dataset(
@@ -1747,6 +1893,28 @@ def train_project(
             start_step = int(state.get("step", 0))
             start_epoch = int(state.get("epoch", 1)) - 1
             skip_in_epoch = int(state.get("examples_seen_in_epoch", 0))
+            # The resume contract (T98): the checkpoint carries the
+            # settings the paused run trained with. When the
+            # project's current settings differ, the run continues
+            # with the checkpoint's adapter (its rank is baked in),
+            # so the drift is warned about — event + log — never
+            # silently dropped. Old checkpoints (before v0.17.0)
+            # carry no settings and resume as before, unwarned.
+            stored_settings = state.get("settings")
+            if isinstance(stored_settings, dict):
+                drift = _settings_drift(stored_settings, settings)
+                if drift:
+                    message = (
+                        "training settings changed since the pause "
+                        f"({', '.join(drift)}). Resuming with the "
+                        "checkpoint's adapter, which keeps the "
+                        "settings it was paused with."
+                    )
+                    if on_event is not None:
+                        on_event({"type": "warning", "message": message})
+                    _append_log(
+                        work_dir, {"event": "warning", "message": message}
+                    )
             trainable = [p for p in model.parameters() if p.requires_grad]
             optimizer = torch.optim.AdamW(
                 trainable, lr=float(settings.get("learning_rate", 0.0002)),
@@ -1777,6 +1945,21 @@ def train_project(
                 rng_state = saved.get("rng_state")
                 if rng_state is not None:
                     torch.set_rng_state(rng_state)
+            else:
+                # A missing optimizer file restarts the optimizer
+                # from scratch (T98): the Adam moments reset
+                # mid-run and the loss curve jumps. Warn (event +
+                # log) instead of silently starting fresh.
+                message = (
+                    f"checkpoint {ckpt_dir.name} has no optimizer "
+                    "file, so the optimizer starts fresh. The loss "
+                    "may jump for a few steps."
+                )
+                if on_event is not None:
+                    on_event({"type": "warning", "message": message})
+                _append_log(
+                    work_dir, {"event": "warning", "message": message}
+                )
         else:
             # Seed everything (T32): the seed drives the LoRA init
             # (A/B matrices) and every dropout draw, so a fresh run
@@ -1828,6 +2011,10 @@ def train_project(
                     resume and update_status
                     and proj.get("status") == "done"
                 ),
+                # The project's stored mode string (T143), recorded
+                # in the summary and the adapter config at train
+                # time — as stored, no reading picked.
+                mode=metamorph_mode(proj),
             )
         except Exception:
             # A crash is not a pause (T53): a run that errors is

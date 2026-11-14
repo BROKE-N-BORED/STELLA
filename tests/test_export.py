@@ -967,3 +967,53 @@ def test_format_preview_lines(seeded, tmp_path):
     assert "tag: yours is 'other:9b', the package has 'lfm3:1.7b'." in text
     assert "not installed on this PC" in text
     assert "\u2014" not in text
+
+
+# -- T141: corrupt-block tests for export + verify --------------------
+
+
+def test_export_wrong_type_metamorph(seeded, tmp_path):
+    # T141: a wrong-type metamorph in project.json (a string, not
+    # an object) exports with the default mode, like the null and
+    # missing-key cases T38 already pins.
+    _corrupt_project_json(
+        seeded, "lfm3-tool", "tool-calls",
+        lambda d: d.update(metamorph="both"),
+    )
+    out = export_mod.export_project(seeded, "lfm3-tool", "tool-calls", tmp_path)
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert manifest["project"]["metamorph"]["mode"] == "morph"
+    assert (out / "README.md").is_file()
+
+
+def _corrupt_manifest(out, mutate):
+    manifest = json.loads((out / "manifest.json").read_text())
+    mutate(manifest)
+    (out / "manifest.json").write_text(json.dumps(manifest))
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda m: m["project"].update(metamorph=None),
+        lambda m: m["project"].pop("metamorph"),
+    ],
+)
+def test_verify_accepts_null_or_missing_metamorph(seeded, tmp_path, mutate):
+    # T141: a null or missing metamorph block in a manifest reads
+    # as the default — verify passes, it does not crash.
+    out = export_mod.export_project(seeded, "lfm3-tool", "tool-calls", tmp_path)
+    _corrupt_manifest(out, mutate)
+    manifest = export_mod.verify_export(out)
+    assert manifest["project"]["name"] == "tool-calls"
+
+
+@pytest.mark.parametrize("bad", ["both", 42, ["morph"]])
+def test_verify_rejects_wrong_type_metamorph(seeded, tmp_path, bad):
+    # T141: a wrong-type metamorph block in a manifest is refused
+    # with a plain error naming the field — never an AttributeError
+    # downstream.
+    out = export_mod.export_project(seeded, "lfm3-tool", "tool-calls", tmp_path)
+    _corrupt_manifest(out, lambda m: m["project"].update(metamorph=bad))
+    with pytest.raises(StellaError, match="must be an object"):
+        export_mod.verify_export(out)

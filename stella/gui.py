@@ -255,6 +255,10 @@ def _friendly_log_line(line: str) -> str:
         return line
     if not isinstance(record, dict):
         return line
+    if record.get("event") == "warning":
+        # A resume warning (T98: changed settings, missing
+        # optimizer) renders as its message, not raw JSON.
+        return f"Warning: {record.get('message', '')}"
     if "val_loss" in record:
         try:
             return (
@@ -6527,6 +6531,13 @@ class MainWindow(QMainWindow):
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Silence the library warnings (T110) before anything heavy
+    # loads, so a probe or merge loading an adapter does not print
+    # peft's notice about the metamorph_mode key (T143) into the
+    # window's stderr.
+    from .cli import _silence_library_warnings
+
+    _silence_library_warnings()
     app = QApplication(sys.argv if argv is None else argv)
     app.setApplicationName("Stella")
     app.setOrganizationName("BrokeNBored")

@@ -1,5 +1,73 @@
 # Changelog
 
+## v0.17.0 — 2026-11-14
+
+The training-engine honesty slice (audit tasks T97, T98, T100, T101,
+T103, T109, T110, T111, T141, T143): the engine tells the truth about
+what it is doing — resume warns when settings drifted or the
+optimizer file is gone, long phases print a line each, a paused run
+says Paused, and the mode a run trained with is recorded in its
+artifacts.
+
+- T97 — LFM3 to GGUF conversion pre-flight: before the merge, the
+  base's architecture (from its config) is checked against the
+  installed converter's own supported-arch list, parsed from its
+  @Model.register lines. An unsupported arch is refused naming
+  the arch and the converter; a converter whose list cannot be
+  read is not refused on a guess. Whether the installed llama.cpp
+  supports LFM3 still wants a real-PC check.
+- T98 — resume contract: every checkpoint state now snapshots the
+  run's training settings, and a resume warns (event + log) when
+  the project's settings changed since the pause instead of
+  silently training on with the checkpoint's adapter. A missing
+  optimizer.pt warns the same way instead of silently restarting
+  the optimizer. Old checkpoints carry no settings and resume as
+  before, unwarned.
+- T100 — the completion ends with the template's turn terminator:
+  when the tokenizer's chat template defines an assistant-turn end
+  token (<|im_end|> for a Qwen-shaped template), it goes on
+  instead of EOS, so the tuned model learns to end its turn the
+  way the template expects. No template terminator means EOS as
+  before. End-to-end confirmation needs a real chat-template
+  tokenizer.
+- T101 — paths in the Modelfile and the printed command are
+  shlex-quoted, so `ollama create` works when pasted with a spaced
+  path. Plain paths read exactly as before. Whether Ollama's
+  Modelfile parser accepts a quoted FROM still wants a real-Ollama
+  check.
+- T103 — the converter and quantizer subprocesses time out after
+  30 minutes each, failing with a plain error naming the step
+  that hung, instead of hanging the export forever.
+- T109 — progress for long phases, honest paused/resumed output:
+  the probe prints a line per pass ("Probing before tuning...",
+  "Probing after tuning..."), the GGUF export prints a line per
+  phase, a paused run's closing line says "Paused after N steps"
+  instead of reusing the completed-run wording, and a resumed run
+  skips the validation line for an epoch it trained no new steps
+  in.
+- T110 — the library warnings are silenced on stderr: the CLI
+  entry point filters the transformers/peft notices
+  (torch_dtype deprecation, fan_in_fan_out, the peft notice for
+  the metamorph_mode key), sets TRANSFORMERS_NO_ADVISORY_WARNINGS
+  and TQDM_DISABLE, and filters library Future/Deprecation
+  warnings from the two libraries' modules. The train.py float()
+  fix this task also named had already landed (.detach() on both
+  loss accumulations), so this task was the filtering only.
+- T111 — CLI-appropriate error text: the no-dataset error on the
+  CLI names --dataset (and create-project --dataset); the window
+  still names the Train panel. The other error strings were
+  audited for GUI pointers the same way — the no-dataset error
+  was the only one.
+- T141 — corrupt-block tests for every reader: null, missing-key,
+  and wrong-type metamorph in project.json and in manifests,
+  exercised against the CLI list, the GUI list + detail fill +
+  save, export, and verify. Pins T37's defensive reader.
+- T143 — the mode is recorded in training artifacts: the
+  project's stored mode string goes into training_summary.json
+  and the adapter config (a post-write edit, since peft writes
+  that file) at train time. Recorded as stored — no MetaMorphAi
+  reading picked.
+
 ## v0.16.0 — 2026-11-14
 
 The pre-train estimates + probe cluster (audit tasks T83, T84, T85,

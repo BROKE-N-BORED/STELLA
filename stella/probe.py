@@ -387,7 +387,9 @@ def probe_project(
     `_generate` replaces real generation (see run_probe).
     `on_event` (T74) gets {"type": "prompt", "done", "total",
     "phase"} per prompt across both passes; `should_stop` (a
-    no-arg callable) cancels between prompts.
+    no-arg callable) cancels between prompts. Each pass also
+    opens with {"type": "phase", "phase": "before"|"after"}
+    (T109), so the CLI can print a line per pass.
 
     `informational` (T90) records the run's mode in the saved
     result: an informational probe reports counts and change, no
@@ -434,7 +436,14 @@ def probe_project(
         # Progress across both passes (T74): the before pass is the
         # first half, the after pass the second. The per-prompt event
         # carries the overall done/total so the job card shows one bar.
+        # Each pass also opens with a phase event (T109), so the CLI
+        # can print a line per pass and a multi-minute probe is never
+        # silent.
         total_prompts = 2 * len(REFUSAL_PROMPTS)
+
+        def _phase(phase):
+            if on_event is not None:
+                on_event({"type": "phase", "phase": phase})
 
         def _before_event(event):
             if on_event is not None:
@@ -453,6 +462,7 @@ def probe_project(
 
         if _model_loader is not None:
             base_model, tokenizer = _model_loader(base_ref, None)
+            _phase("before")
             before = run_probe(
                 base_model, tokenizer, _generate=_generate,
                 max_new_tokens=max_new_tokens,
@@ -461,6 +471,7 @@ def probe_project(
             del base_model
             gc.collect()
             tuned_model, _ = _model_loader(base_ref, adapter_dir)
+            _phase("after")
             after = run_probe(
                 tuned_model, tokenizer, _generate=_generate,
                 max_new_tokens=max_new_tokens,
@@ -472,6 +483,7 @@ def probe_project(
             from peft import PeftModel
 
             base_model, tokenizer = load_base_model(base_ref)
+            _phase("before")
             before = run_probe(
                 base_model, tokenizer, _generate=_generate,
                 max_new_tokens=max_new_tokens,
@@ -482,6 +494,7 @@ def probe_project(
             tuned_model = PeftModel.from_pretrained(
                 load_base_model(base_ref)[0], str(adapter_dir)
             )
+            _phase("after")
             after = run_probe(
                 tuned_model, tokenizer, _generate=_generate,
                 max_new_tokens=max_new_tokens,

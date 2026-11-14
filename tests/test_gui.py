@@ -5631,3 +5631,67 @@ def test_export_without_probe_results_skips_preview(
     assert window._job_worker is not None
     window._job_worker.wait(5000)
     qapp.processEvents()
+
+
+# -- T141: corrupt-block tests for the GUI list + detail fill + save --
+
+
+@pytest.mark.parametrize(
+    "mutate, warns",
+    [
+        (lambda d: d.update(metamorph=None), True),
+        (lambda d: d.pop("metamorph"), False),
+        (lambda d: d.update(metamorph="both"), True),
+    ],
+)
+def test_tree_survives_corrupt_metamorph(
+    window, seeded, qapp, mutate, warns
+):
+    # T141: null / missing-key / wrong-type metamorph in
+    # project.json — the tree shows the row, warns when the block
+    # is broken (a missing key just means the default), and never
+    # crashes.
+    seeded.create_project("lfm3-tool", "broken")
+    _corrupt_project_json(seeded, "lfm3-tool", "broken", mutate)
+    window.refresh_tree()
+    qapp.processEvents()
+    top = window.tree.topLevelItem(0)
+    rows = {top.child(i).text(0) for i in range(top.childCount())}
+    assert top.childCount() == 2
+    assert any(r.startswith("broken") for r in rows)
+    warned = [r for r in rows if "warning" in r]
+    if warns:
+        assert len(warned) == 1
+        assert "broken" in warned[0]
+    else:
+        assert warned == []
+    # The good project lists normally, with its status and no warning.
+    assert any(r == "tool-calls (draft)" for r in rows)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda d: d.update(metamorph=None),
+        lambda d: d.pop("metamorph"),
+        lambda d: d.update(metamorph="both"),
+    ],
+)
+def test_project_window_survives_corrupt_metamorph(
+    window, seeded, qapp, mutate
+):
+    # T141: null / missing-key / wrong-type metamorph — the detail
+    # fill reads through the defensive reader (the window shows no
+    # metamorph control, so there is no note and nothing to fill
+    # wrong), and saving heals the block to the default on disk.
+    _corrupt_project_json(seeded, "lfm3-tool", "tool-calls", mutate)
+    win = window.open_project_window("lfm3-tool", "tool-calls")
+    qapp.processEvents()
+    assert win.display_edit.text() == "tool-calls"
+    assert win.dataset_edit.text() == "forge-traces.jsonl"
+    assert win._load_note.text() == ""
+    assert not win._load_note.isVisible()
+    assert win.save() is True
+    data = seeded.get_project("lfm3-tool", "tool-calls")
+    assert data["metamorph"]["mode"] == "morph"
+    win.close()

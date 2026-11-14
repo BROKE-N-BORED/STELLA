@@ -1140,3 +1140,195 @@ def test_cli_train_help_names_dry_run(home):
     res = run_cli(home, "train", "--help")
     assert res.returncode == 0
     assert "--dry-run" in res.stdout
+
+
+# -- T109: progress for long phases; honest paused output -------------
+
+
+def test_cli_probe_prints_a_line_per_pass(home, monkeypatch, capsys):
+    # In-process: the stubbed probe emits the phase events, and the
+    # CLI prints a line when each pass starts.
+    import stella.cli as cli_mod
+    import stella.probe as probe_mod
+
+    monkeypatch.setenv("STELLA_HOME", str(home))
+
+    def fake_probe(store, profile, project, informational=False,
+                   on_event=None, **kwargs):
+        if on_event is not None:
+            on_event({"type": "phase", "phase": "before"})
+            on_event({"type": "phase", "phase": "after"})
+        return {
+            "before": {"refusals": 0, "total": 12, "rate": 0.0},
+            "after": {"refusals": 0, "total": 12, "rate": 0.0},
+            "delta": 0.0,
+        }
+
+    monkeypatch.setattr(probe_mod, "probe_project", fake_probe)
+    code = cli_mod.main(["probe", "p1", "proj"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "Probing before tuning..." in out
+    assert "Probing after tuning..." in out
+    # The pass lines come before the results.
+    assert out.index("Probing before tuning...") < out.index("Before tuning:")
+    assert out.index("Probing after tuning...") < out.index("After tuning:")
+
+
+def test_cli_train_paused_summary_says_paused(home, monkeypatch, capsys):
+    # A paused run's closing line says Paused, not Trained.
+    import stella.cli as cli_mod
+    import stella.train as train_mod
+
+    monkeypatch.setenv("STELLA_HOME", str(home))
+    monkeypatch.setattr(
+        train_mod, "train_project",
+        lambda *a, **k: {
+            "steps": 4, "final_loss": 5.5, "final_val_loss": 5.0,
+            "trainable_params": 12345, "ram_estimate_gb": 4.2,
+            "stopped": True,
+        },
+    )
+    _setup_train_project(home)
+    code = cli_mod.main(["train", "p1", "proj"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "Paused after 4 steps" in out
+    assert "Trained 4 steps" not in out
+
+
+def test_cli_export_gguf_prints_merge_line(home, monkeypatch, capsys):
+    # In-process: the stubbed export emits the merge phase event,
+    # and the CLI prints its line before the result lines.
+    import stella.cli as cli_mod
+    import stella.gguf as gguf_mod
+
+    monkeypatch.setenv("STELLA_HOME", str(home))
+
+    def fake_export(store, profile, project, dest, **kwargs):
+        kwargs["on_event"]({
+            "type": "phase", "phase": "merge",
+            "message": "Merging the adapter into the base model...",
+        })
+        return {
+            "merged_hf": "/tmp/fake/merged",
+            "gguf": "/tmp/fake/model.gguf",
+            "quant": "Q4_K_M",
+            "gguf_bytes": 1234,
+            "modelfile": "/tmp/fake/Modelfile",
+            "ollama_name": "p1-proj",
+            "ollama_create": "ollama create p1-proj -f /tmp/fake/Modelfile",
+        }
+
+    monkeypatch.setattr(gguf_mod, "export_gguf", fake_export)
+    run_cli(home, "create-profile", "p1", "--base", "test/tiny-model")
+    run_cli(home, "create-project", "p1", "proj")
+    code = cli_mod.main(
+        ["export-gguf", "p1", "proj", str(home / "out")]
+    )
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "Merging the adapter into the base model..." in out
+    assert (
+        out.index("Merging the adapter")
+        < out.index("Merged HF weights")
+    )
+
+
+# -- T110: silence the library warnings on stderr ---------------------
+
+
+def test_silence_library_warnings_filters_noisy_notices(monkeypatch):
+    # The helper filters the known-noisy transformers/peft notices
+    # and turns the advisory warnings + tqdm bars off at the source,
+    # while a warning Stella should hear still gets through.
+    import os
+    import warnings
+
+    import stella.cli as cli_mod
+
+    monkeypatch.delenv("TRANSFORMERS_NO_ADVISORY_WARNINGS", raising=False)
+    monkeypatch.delenv("TQDM_DISABLE", raising=False)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        cli_mod._silence_library_warnings()
+        warnings.warn(
+            "`torch_dtype` is deprecated, use `dtype` instead",
+            FutureWarning,
+        )
+        warnings.warn(
+            "fan_in_fan_out is set to False but the target module "
+            "is `Conv1D`.",
+            UserWarning,
+        )
+        warnings.warn(
+            "Unexpected keyword arguments ['metamorph_mode'] for "
+            "class LoraConfig, these are ignored.",
+            UserWarning,
+        )
+        warnings.warn("something Stella should still hear", UserWarning)
+    assert [str(w.message) for w in caught] == [
+        "something Stella should still hear"
+    ]
+    assert os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] == "1"
+    assert os.environ["TQDM_DISABLE"] == "1"
+
+
+# -- T111: CLI-appropriate error text ---------------------------------
+
+
+def test_cli_train_no_dataset_names_dataset_flag(home):
+    run_cli(home, "create-profile", "p1", "--base", "test/tiny-model")
+    run_cli(home, "create-project", "p1", "proj")
+    res = run_cli(home, "train", "p1", "proj")
+    assert res.returncode == 1
+    assert "--dataset" in res.stderr
+    assert "Train panel" not in res.stderr
+
+
+def test_cli_error_strings_name_no_gui_controls():
+    # T111 audit: no CLI error string points at a GUI control. The
+    # one "Train panel" mention in cli.py is a code comment (the
+    # pre-train check note), not a user-facing string.
+    lines = (ROOT / "stella" / "cli.py").read_text().splitlines()
+    hits = [line for line in lines if "Train panel" in line]
+    assert hits, "the comment moved; re-audit"
+    assert all(line.strip().startswith("#") for line in hits)
+
+
+# -- T141: corrupt-block tests for the CLI list -----------------------
+
+
+@pytest.mark.parametrize(
+    "mutate, warns",
+    [
+        (lambda d: d.update(metamorph=None), True),
+        (lambda d: d.pop("metamorph"), False),
+        (lambda d: d.update(metamorph="both"), True),
+    ],
+)
+def test_cli_projects_survives_corrupt_metamorph(home, mutate, warns):
+    # T141: null / missing-key / wrong-type metamorph in
+    # project.json — the CLI list shows the row, warns when the
+    # block is broken (a missing key just means the default), and
+    # never crashes.
+    run_cli(home, "create-profile", "p1", "--tag", "x:1b")
+    run_cli(home, "create-project", "p1", "good")
+    run_cli(home, "create-project", "p1", "broken")
+    manifest = (
+        Path(home) / "profiles" / "p1" / "projects" / "broken"
+        / "project.json"
+    )
+    data = json.loads(manifest.read_text())
+    mutate(data)
+    manifest.write_text(json.dumps(data))
+    res = run_cli(home, "projects", "p1")
+    assert res.returncode == 0
+    assert "good" in res.stdout
+    assert "broken" in res.stdout
+    assert "Traceback" not in res.stderr
+    if warns:
+        assert "warning" in res.stdout
+        assert "metamorph" in res.stdout
+    else:
+        assert "warning" not in res.stdout
