@@ -260,7 +260,11 @@ def test_cli_distill_missing_prompts_exit_1(home, tmp_path):
     assert "No prompts file" in res.stderr
 
 
-def test_cli_distill_teacher_unreachable_exit_1(home, tmp_path):
+def test_cli_distill_teacher_unreachable_exit_1(home, tmp_path, monkeypatch):
+    # The subprocess must see Ollama down even when a live Ollama
+    # answers on this machine: point it at a dead port, so the
+    # test does not depend on the machine's Ollama state.
+    monkeypatch.setenv("STELLA_OLLAMA_URL", "http://127.0.0.1:9")
     from stella.model import Store
 
     store = Store(home)
@@ -315,3 +319,194 @@ def test_distill_emits_prompt_events(seeded, teacher_up, tmp_path):
     ]
     assert events[-1]["type"] == "done"
     assert events[-1]["rows"] == 3
+
+
+# -- S3: the timeout knob + S4: keep the teacher warm -----------------
+
+
+def test_distill_passes_timeout_to_generate(seeded, teacher_up, tmp_path,
+                                            monkeypatch):
+    """The timeout reaches ollama.generate: a fake generate records
+    the timeout it was called with."""
+    import stella.distill as distill_mod
+
+    seen = []
+
+    def fake_generate(model, prompt, url=None, timeout=None, **kwargs):
+        seen.append({"timeout": timeout, **kwargs})
+        return f"answer to {prompt}"
+
+    monkeypatch.setattr(
+        distill_mod.ollama_client, "generate", fake_generate
+    )
+    prompts = make_prompts(tmp_path, ["a", "b"])
+    distill_dataset(
+        seeded, "lfm3-tool", "tool-calls", TEACHER, prompts,
+        timeout=600,
+    )
+    assert [call["timeout"] for call in seen] == [600, 600]
+
+
+def test_distill_default_timeout_is_300(seeded, teacher_up, tmp_path,
+                                        monkeypatch):
+    """No timeout passed: generate gets the 300-second default."""
+    import stella.distill as distill_mod
+    from stella.distill import DEFAULT_TIMEOUT_SECONDS
+
+    assert DEFAULT_TIMEOUT_SECONDS == 300.0
+    seen = []
+
+    def fake_generate(model, prompt, url=None, timeout=None, **kwargs):
+        seen.append(timeout)
+        return f"answer to {prompt}"
+
+    monkeypatch.setattr(
+        distill_mod.ollama_client, "generate", fake_generate
+    )
+    prompts = make_prompts(tmp_path, ["a", "b"])
+    distill_dataset(
+        seeded, "lfm3-tool", "tool-calls", TEACHER, prompts,
+    )
+    assert seen == [300.0, 300.0]
+
+
+def test_distill_keeps_teacher_warm(seeded, teacher_up, tmp_path,
+                                    monkeypatch):
+    """S4: every prompt's call carries the run's keep-alive, so
+    the teacher stays loaded across prompts."""
+    import stella.distill as distill_mod
+    from stella.distill import DISTILL_KEEP_ALIVE
+
+    assert DISTILL_KEEP_ALIVE == "30m"
+    # Never forever: the model must unload after the run on an
+    # 8 GB PC.
+    assert DISTILL_KEEP_ALIVE != "-1"
+    seen = []
+
+    def fake_generate(model, prompt, url=None, timeout=None, **kwargs):
+        seen.append(kwargs.get("keep_alive"))
+        return f"answer to {prompt}"
+
+    monkeypatch.setattr(
+        distill_mod.ollama_client, "generate", fake_generate
+    )
+    prompts = make_prompts(tmp_path, ["a", "b"])
+    distill_dataset(
+        seeded, "lfm3-tool", "tool-calls", TEACHER, prompts,
+    )
+    assert seen == ["30m", "30m"]
+
+
+# -- S3: the CLI --timeout flag reaches the engine --------------------
+
+
+def _fake_cli_distill(seen):
+    """A distill_dataset stand-in for in-process CLI tests: records
+    its keyword arguments and reports a finished run."""
+
+    def fake_distill(store, profile, project, teacher, prompts, **kwargs):
+        seen.update(kwargs)
+        on_event = kwargs.get("on_event")
+        if on_event is not None:
+            on_event(
+                {"type": "prompt", "index": 1, "total": 2, "prompt": "a"}
+            )
+            on_event(
+                {"type": "prompt", "index": 2, "total": 2, "prompt": "b"}
+            )
+        return {
+            "teacher": teacher, "prompts": 2, "asked": 2,
+            "skipped_empty": 0, "skipped_dup": 0, "skipped_resumed": 0,
+            "rows": 2, "dataset": "/tmp/x/distilled.jsonl",
+        }
+
+    return fake_distill
+
+
+def test_cli_distill_timeout_reaches_engine(home, monkeypatch, capsys):
+    import stella.cli as cli_mod
+    import stella.distill as distill_mod
+
+    monkeypatch.setenv("STELLA_HOME", str(home))
+    seen = {}
+    monkeypatch.setattr(
+        distill_mod, "distill_dataset", _fake_cli_distill(seen)
+    )
+    run_cli(home, "create-profile", "lfm3-tool", "--tag", "lfm3:1.7b")
+    run_cli(home, "create-project", "lfm3-tool", "tool-calls")
+    code = cli_mod.main([
+        "distill", "lfm3-tool", "tool-calls",
+        "--teacher", TEACHER, "--prompts", "/tmp/prompts.txt",
+        "--timeout", "600",
+    ])
+    assert code == 0
+    assert seen["timeout"] == 600.0
+
+
+def test_cli_distill_timeout_defaults_to_300(home, monkeypatch, capsys):
+    import stella.cli as cli_mod
+    import stella.distill as distill_mod
+
+    monkeypatch.setenv("STELLA_HOME", str(home))
+    seen = {}
+    monkeypatch.setattr(
+        distill_mod, "distill_dataset", _fake_cli_distill(seen)
+    )
+    run_cli(home, "create-profile", "lfm3-tool", "--tag", "lfm3:1.7b")
+    run_cli(home, "create-project", "lfm3-tool", "tool-calls")
+    code = cli_mod.main([
+        "distill", "lfm3-tool", "tool-calls",
+        "--teacher", TEACHER, "--prompts", "/tmp/prompts.txt",
+    ])
+    assert code == 0
+    assert seen["timeout"] == 300.0
+
+
+# -- S21: the CLI distill ETA -----------------------------------------
+
+
+def test_cli_distill_shows_eta_after_two_prompts(home, monkeypatch, capsys):
+    """The prompt lines gain a time-left tail once two prompts
+    have been answered (a rate from one sample would be bogus).
+    The clock is faked: 30 seconds per prompt, 10 prompts."""
+    import time
+
+    import stella.cli as cli_mod
+    import stella.distill as distill_mod
+
+    monkeypatch.setenv("STELLA_HOME", str(home))
+    now = [1000.0]
+
+    def fake_distill(store, profile, project, teacher, prompts, **kwargs):
+        on_event = kwargs["on_event"]
+        for index in range(1, 6):
+            now[0] += 30.0
+            on_event({
+                "type": "prompt", "index": index, "total": 10,
+                "prompt": f"prompt {index}",
+            })
+        return {
+            "teacher": teacher, "prompts": 10, "asked": 5,
+            "skipped_empty": 0, "skipped_dup": 0, "skipped_resumed": 0,
+            "rows": 5, "dataset": "/tmp/x/distilled.jsonl",
+        }
+
+    monkeypatch.setattr(distill_mod, "distill_dataset", fake_distill)
+    run_cli(home, "create-profile", "lfm3-tool", "--tag", "lfm3:1.7b")
+    run_cli(home, "create-project", "lfm3-tool", "tool-calls")
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    code = cli_mod.main([
+        "distill", "lfm3-tool", "tool-calls",
+        "--teacher", TEACHER, "--prompts", "/tmp/prompts.txt",
+    ])
+    assert code == 0
+    out = capsys.readouterr().out
+    lines = [line for line in out.splitlines() if line.startswith("prompt ")]
+    assert len(lines) == 5
+    # No ETA yet: 0 and 1 prompts done.
+    assert lines[0] == "prompt 1 of 10"
+    assert lines[1] == "prompt 2 of 10"
+    # Prompt 3: 2 done in 60s, 8 to go at 30s each: 4 minutes.
+    assert lines[2] == "prompt 3 of 10, about 4 minutes left"
+    # Prompt 5: 4 done in 120s, 6 to go: 3 minutes.
+    assert lines[4] == "prompt 5 of 10, about 3 minutes left"

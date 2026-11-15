@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -194,57 +195,102 @@ def _read_gguf_source_quant(path: Path) -> tuple[str | None, float | None]:
     most common tensor type, or (None, None) when the header cannot
     be read. Never raises: a failed read just means the disk
     estimate falls back to a cautious guess.
+
+    The header is read by streaming, in 1 MB chunks, instead of
+    truncating the file at 1 MB: a real Ollama GGUF blob's
+    metadata alone is 7.85 MB (the tokenizer vocab arrays), so a
+    1 MB cap dies mid-metadata and every real model reads as
+    "unknown". Only the header is ever buffered — the weights are
+    never read — and the buffer stops at 64 MB, past which the
+    header is treated as unreadable.
     """
     _VALUE_SIZES = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4,
                     7: 1, 10: 8, 11: 8, 12: 8}
+    _CHUNK = 1 * 1024 * 1024
+    _MAX_HEADER = 64 * 1024 * 1024
     try:
-        data = path.read_bytes()[:1 * 1024 * 1024]
+        handle = open(path, "rb")
     except OSError:
         return None, None
-    if len(data) < 24 or data[:4] != b"GGUF":
-        return None, None
+    buf = bytearray()
+    pos = 0
     try:
-        pos = 8  # magic + version
-        tensor_count = struct.unpack_from("<Q", data, pos)[0]
-        pos += 8
-        kv_count = struct.unpack_from("<Q", data, pos)[0]
-        pos += 8
+        def need(count: int) -> None:
+            """Grow the buffer until `count` bytes past `pos`
+            are available, or raise EOFError."""
+            nonlocal buf
+            while len(buf) < pos + count:
+                if len(buf) >= _MAX_HEADER:
+                    raise EOFError("header over 64 MB")
+                chunk = handle.read(
+                    max(_CHUNK, pos + count - len(buf))
+                )
+                if not chunk:
+                    raise EOFError("short file")
+                buf += chunk
 
-        def read_string(buf, off):
-            (length,) = struct.unpack_from("<Q", buf, off)
-            off += 8
-            return buf[off:off + length].decode("utf-8", "replace"), off + length
+        def read_string() -> str:
+            nonlocal pos
+            need(8)
+            (length,) = struct.unpack_from("<Q", buf, pos)
+            pos += 8
+            need(length)
+            text = bytes(buf[pos:pos + length]).decode(
+                "utf-8", "replace"
+            )
+            pos += length
+            return text
 
-        def skip_value(buf, off, vtype):
+        def skip_value(vtype: int) -> None:
+            nonlocal pos
             if vtype == 8:  # string
-                _, off = read_string(buf, off)
-                return off
+                read_string()
+                return
             if vtype == 9:  # array: element type + count + elements
-                etype = struct.unpack_from("<I", buf, off)[0]
-                off += 4
-                count = struct.unpack_from("<Q", buf, off)[0]
-                off += 8
+                need(4)
+                etype = struct.unpack_from("<I", buf, pos)[0]
+                pos += 4
+                need(8)
+                count = struct.unpack_from("<Q", buf, pos)[0]
+                pos += 8
                 for _ in range(count):
-                    off = skip_value(buf, off, etype)
-                return off
-            return off + _VALUE_SIZES[vtype]
+                    skip_value(etype)
+                return
+            pos += _VALUE_SIZES[vtype]
+
+        need(24)
+        if len(buf) < 24 or bytes(buf[:4]) != b"GGUF":
+            return None, None
+        pos = 8  # magic + version
+        need(8)
+        tensor_count = struct.unpack_from("<Q", buf, pos)[0]
+        pos += 8
+        need(8)
+        kv_count = struct.unpack_from("<Q", buf, pos)[0]
+        pos += 8
 
         for _ in range(kv_count):
-            _, pos = read_string(data, pos)
-            vtype = struct.unpack_from("<I", data, pos)[0]
+            read_string()
+            need(4)
+            vtype = struct.unpack_from("<I", buf, pos)[0]
             pos += 4
-            pos = skip_value(data, pos, vtype)
+            skip_value(vtype)
 
         counts: dict[int, int] = {}
         for _ in range(min(tensor_count, 10000)):
-            _, pos = read_string(data, pos)
-            n_dims = struct.unpack_from("<I", data, pos)[0]
+            read_string()
+            need(4)
+            n_dims = struct.unpack_from("<I", buf, pos)[0]
             pos += 4 + 8 * n_dims
-            ttype = struct.unpack_from("<I", data, pos)[0]
+            need(4)
+            ttype = struct.unpack_from("<I", buf, pos)[0]
             pos += 4 + 8  # type + offset
             counts[ttype] = counts.get(ttype, 0) + 1
-    except (struct.error, IndexError, KeyError, ValueError):
+    except (struct.error, IndexError, KeyError, ValueError, EOFError,
+            OSError):
         return None, None
+    finally:
+        handle.close()
     if not counts:
         return None, None
     common = max(counts, key=counts.get)
@@ -344,39 +390,135 @@ def validate_new_tag(tag: str) -> str:
 
 
 def _run(cmd: list[str], *, what: str, _runner=None,
-         should_stop=None) -> None:
+         should_stop=None, on_progress=None,
+         _still_working_seconds: float = 30.0) -> None:
     """Run a command, or hand it to the injected fake (tests).
 
     `should_stop` (a no-arg callable, T74) cancels a long command:
     the process is polled and killed when the flag flips, so the
     job card's Cancel button stops the quantizer instead of
     waiting for it. A Ctrl+C kills the child too before re-raising.
+
+    The child's output streams (S21): a reader thread hands each
+    line to the main loop as it arrives, and per-tensor lines
+    ("[ 12/ 287] ...", the format llama-quantize really prints,
+    on stderr) become {"type": "quantize_progress", "done", "total"}
+    events via `on_progress`, so the CLI/GUI never go quiet for
+    minutes. When no parseable count has appeared for
+    `_still_working_seconds` (30 by default), a {"type":
+    "still_working"} event is emitted instead, at most once per
+    interval. A failure is translated to plain words (S22) with
+    the raw tail kept as a detail line.
     """
     if _runner is not None:
         _runner(cmd)
         return
+    import queue
+    import threading
+    import time
+
+    # llama-quantize prints its progress to stderr, not stdout,
+    # so the streams are merged: one reader sees every line.
+    # errors="replace": the metadata dump can carry raw
+    # non-UTF-8 bytes (tokenizer vocab), which must not kill the
+    # reader thread mid-run.
     proc = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, errors="replace", bufsize=1,
     )
+    lines: list[str] = []
+    pending: queue.Queue = queue.Queue()
+    _MISSING = object()
+
+    def reader() -> None:
+        try:
+            for line in proc.stdout:
+                lines.append(line)
+                pending.put(line)
+        except Exception:
+            pass
+        finally:
+            pending.put(None)
+
+    thread = threading.Thread(target=reader, daemon=True)
+    thread.start()
+    started = time.monotonic()
+    last_still_working = started
+    saw_count = False
+    last_done = -1
     try:
         while True:
             try:
-                out, err = proc.communicate(timeout=0.2)
+                line = pending.get(timeout=0.2)
+            except queue.Empty:
+                line = _MISSING
+            if line is None:  # the reader hit end of output
                 break
-            except subprocess.TimeoutExpired:
-                if should_stop is not None and should_stop():
-                    proc.kill()
-                    proc.wait()
-                    raise StellaError("Cancelled.")
+            if line is not _MISSING:
+                parsed = _parse_quantize_progress(line)
+                if parsed is not None:
+                    done, total = parsed
+                    saw_count = True
+                    if done != last_done and on_progress is not None:
+                        last_done = done
+                        on_progress({
+                            "type": "quantize_progress",
+                            "done": done,
+                            "total": total,
+                        })
+            if should_stop is not None and should_stop():
+                proc.kill()
+                proc.wait()
+                raise StellaError("Cancelled.")
+            if (
+                on_progress is not None
+                and not saw_count
+                and time.monotonic() - last_still_working
+                >= _still_working_seconds
+            ):
+                last_still_working = time.monotonic()
+                on_progress({
+                    "type": "still_working",
+                    "message": "Still working...",
+                })
+        proc.wait()
     except KeyboardInterrupt:
         proc.kill()
         proc.wait()
         raise
     if proc.returncode != 0:
-        tail = ((err or out) or "").strip().splitlines()[-5:]
+        from .tool_errors import translate_tool_error
+
         raise StellaError(
-            f"{what} failed ({proc.returncode}).\n" + "\n".join(tail)
+            translate_tool_error(
+                "".join(lines), what=what, code=proc.returncode
+            )
         )
+
+
+_QUANTIZE_PROGRESS_RES = (
+    # The format llama-quantize really prints (on stderr):
+    # "[  12/ 287] blk.0.attn_q.weight - [...], type = q4_K, ..."
+    re.compile(r"\[\s*(\d+)\s*/\s*(\d+)\s*\]"),
+    re.compile(r"tensor\s+(\d+)\s+of\s+(\d+)", re.IGNORECASE),
+    re.compile(r"(\d+)\s+of\s+(\d+)\s+tensors?", re.IGNORECASE),
+    re.compile(r"(\d+)\s*/\s*(\d+)\s+tensors?", re.IGNORECASE),
+)
+
+
+def _parse_quantize_progress(line: str) -> tuple[int, int] | None:
+    """A "tensor N of M" count from one quantizer output line,
+    or None when the line carries no count. A count is only
+    believed when it is sane (a positive total, done within it):
+    a stray "[ 1/ 2 ]" in a tensor name must not fake progress."""
+    for pattern in _QUANTIZE_PROGRESS_RES:
+        match = pattern.search(line)
+        if match is None:
+            continue
+        done, total = int(match.group(1)), int(match.group(2))
+        if 0 < total and 0 <= done <= total:
+            return done, total
+    return None
 
 
 def _format_size(n: int) -> str:
@@ -471,6 +613,20 @@ def requant_model(
         if on_event is not None:
             on_event(event)
 
+    # llama-quantize's own warning, in plain words: re-quantizing
+    # an already-quantized model rounds the weights a second time,
+    # which can cost noticeably more quality than quantizing from
+    # the original 16-bit or 32-bit weights. Every Ollama model is
+    # already quantized, so this warns unless the source is
+    # positively known to be unquantized (F32/F16/BF16).
+    requantize_warning = None
+    if source_bpw is None or source_bpw < 16.0:
+        requantize_warning = (
+            "Heads up: this model is already quantized, so shrinking "
+            "it rounds the weights a second time. It can lose "
+            "noticeably more quality than quantizing from the "
+            "original 16-bit or 32-bit weights."
+        )
     emit({
         "type": "found",
         "source_tag": tag,
@@ -478,16 +634,41 @@ def requant_model(
         "source_quant": source_quant,
         "quant": quant,
         "new_tag": new_tag,
+        "requantize_warning": requantize_warning,
     })
     if should_stop is not None and should_stop():
         raise StellaError("Cancelled.")
-    _run(
-        [str(quantize), str(source), str(out_path), quant],
-        what=f"Shrinking {tag!r} to {quant}",
-        _runner=_runner,
-        should_stop=should_stop,
-    )
+    # --allow-requantize: every Ollama model is already quantized,
+    # and llama-quantize refuses to requantize already-quantized
+    # tensors without it ("requantizing from type q4_K is
+    # disabled"). Without the flag, requant fails on every real
+    # Ollama model.
+    try:
+        _run(
+            [str(quantize), "--allow-requantize", str(source),
+             str(out_path), quant],
+            what=f"Shrinking {tag!r} to {quant}",
+            _runner=_runner,
+            should_stop=should_stop,
+            # S21: the quantizer's per-tensor lines stream through
+            # as progress events, so the run never goes quiet.
+            on_progress=emit,
+        )
+    except StellaError:
+        # A failed or cancelled run leaves a partial file behind;
+        # remove it so a half-written model never sits in the work
+        # folder.
+        try:
+            out_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
     if not out_path.is_file() or out_path.stat().st_size == 0:
+        # Empty output is no output: clear it before complaining.
+        try:
+            out_path.unlink(missing_ok=True)
+        except OSError:
+            pass
         raise StellaError(
             f"The quantizer finished but wrote no file for {tag!r}. "
             "Try again, and check the disk is not full."

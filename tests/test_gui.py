@@ -900,9 +900,21 @@ def test_create_profile_from_hf_repo(window, seeded):
     assert data["role"] == ""
 
 
-def test_create_profile_from_ollama_tag(window, seeded):
+def test_create_profile_from_ollama_tag(window, seeded, monkeypatch,
+                                      seed_models):
+    from PySide6.QtWidgets import QMessageBox
+
     from stella.gui import NewProfileDialog
 
+    # Seeded: with a live Ollama the cache fills with the real
+    # installed list, "qwen3.5:4b" is not in it, and the soft tag
+    # check opens a modal confirm nobody clicks in a test (hang).
+    seed_models(["lfm3:1.7b", "qwen3.5:4b"])
+
+    def _no_prompt(*a, **k):
+        raise AssertionError("no warning for an installed, unused tag")
+
+    monkeypatch.setattr(QMessageBox, "question", _no_prompt)
     dialog = NewProfileDialog(window)
     dialog.type_edit.setText("qwen3.5:4b")
     window._create_profile_from(dialog)
@@ -933,10 +945,22 @@ def test_create_profile_empty_model_warns(window, monkeypatch):
     assert [p["name"] for p in window.store.list_profiles()] == ["lfm3-tool"]
 
 
-def test_new_profile_enter_creates(window, seeded):
+def test_new_profile_enter_creates(window, seeded, monkeypatch,
+                                 seed_models):
     """Enter in the model field creates the profile (T11: Enter works)."""
+    from PySide6.QtWidgets import QMessageBox
+
     from stella.gui import NewProfileDialog
 
+    # Seeded: with a live Ollama the cache fills with the real
+    # installed list, "qwen3.5:4b" is not in it, and the soft tag
+    # check opens a modal confirm nobody clicks in a test (hang).
+    seed_models(["lfm3:1.7b", "qwen3.5:4b"])
+
+    def _no_prompt(*a, **k):
+        raise AssertionError("no warning for an installed, unused tag")
+
+    monkeypatch.setattr(QMessageBox, "question", _no_prompt)
     dialog = NewProfileDialog(window)
     assert dialog.create_btn.isDefault()
     dialog.create_btn.clicked.connect(lambda: window._create_profile_from(dialog))
@@ -2369,6 +2393,83 @@ def test_distill_dialog_needs_teacher_and_prompts(window, monkeypatch, seed_mode
     assert dialog.prompts_path() == "/tmp/prompts.txt"
     assert dialog.start_btn.isEnabled() is True
     dialog.close()
+
+
+def test_distill_dialog_timeout_defaults_to_300(window, seed_models):
+    """S3: the wait-per-answer control sits in the distill dialog
+    (the job start), plain words, 300 seconds unless changed."""
+    from stella.gui import DistillDialog
+
+    seed_models(["lfm3:1.7b", "qwen3.5:4b"])
+    dialog = DistillDialog(window)
+    assert dialog.timeout() == 300
+    labels = [
+        w.text() for w in dialog.findChildren(QLabel)
+    ]
+    assert "How long to wait for each answer (seconds)" in labels
+    dialog.timeout_spin.setValue(600)
+    assert dialog.timeout() == 600
+    dialog.close()
+
+
+def test_distill_job_card_shows_prompt_progress(window, monkeypatch, qapp):
+    """S21 GUI half, verified ALREADY DONE: the distill job card's
+    bar moves with the prompt events (prompt N of M), and the log
+    names each prompt. The dialog is stubbed (teacher + prompts +
+    timeout), the engine is faked and emits three prompt events."""
+    from PySide6.QtWidgets import QDialog
+
+    import stella.distill as distill_mod
+    import stella.gui as gui_mod
+
+    class _FakeDialog:
+        def __init__(self, parent=None):
+            pass
+
+        def exec(self):
+            return QDialog.Accepted
+
+        def teacher(self):
+            return "qwen3.5:4b"
+
+        def prompts_path(self):
+            return "/tmp/prompts.txt"
+
+        def timeout(self):
+            return 300
+
+    seen = {}
+
+    def _fake_distill(store, profile, project, teacher, prompts,
+                      **kwargs):
+        seen.update(kwargs)
+        on_event = kwargs["on_event"]
+        for index in range(1, 4):
+            on_event({
+                "type": "prompt", "index": index, "total": 3,
+                "prompt": f"prompt {index}",
+            })
+        return {
+            "teacher": teacher, "prompts": 3, "asked": 3,
+            "skipped_empty": 0, "skipped_dup": 0, "skipped_resumed": 0,
+            "rows": 3, "dataset": "/tmp/x/distilled.jsonl",
+        }
+
+    monkeypatch.setattr(gui_mod, "DistillDialog", _FakeDialog)
+    monkeypatch.setattr(distill_mod, "distill_dataset", _fake_distill)
+    _select_session(window)
+    window._checklist_dismiss()
+    window._start_distill()
+    assert window.job_card.title_label.text() == "Teaching a small model"
+    _wait_for_job(window, qapp)
+    # The bar reached 3 of 3, and the log named the prompts.
+    assert window.job_card.progress.maximum() == 3
+    assert window.job_card.progress.value() == 3
+    log = window.train_log.toPlainText()
+    assert "Asking the teacher: prompt 2 of 3." in log
+    assert "Distilled 3 examples from qwen3.5:4b" in log
+    # S3: the dialog's timeout reached the engine.
+    assert seen["timeout"] == 300
 
 
 # -- T16: settings leave every screen ---------------------------------
@@ -5219,9 +5320,16 @@ def _estimable_session(window, seeded, tmp_path, total_size=3_460_000_000):
 
 
 def test_estimate_label_shows_fit_for_small_model(
-    window, seeded, tmp_path, qapp
+    window, seeded, tmp_path, qapp, monkeypatch
 ):
     # T84: the defaults on an LFM3-shaped base show "fits".
+    # S6: the estimate judges against free RAM, so the test pins
+    # a box with plenty free.
+    import stella.train as train_mod
+
+    monkeypatch.setattr(
+        train_mod, "available_ram_bytes", lambda: 8 * 1024**3
+    )
     _estimable_session(window, seeded, tmp_path)
     qapp.processEvents()
     text = window.train_estimate_label.text()
@@ -5244,9 +5352,16 @@ def test_estimate_label_shows_will_not_fit_for_huge_model(
 
 
 def test_estimate_label_updates_when_project_changes(
-    window, seeded, tmp_path, qapp
+    window, seeded, tmp_path, qapp, monkeypatch
 ):
     # T84: the estimate updates when the selection changes.
+    # S6: the estimate judges against free RAM, so the test pins
+    # a box with plenty free.
+    import stella.train as train_mod
+
+    monkeypatch.setattr(
+        train_mod, "available_ram_bytes", lambda: 8 * 1024**3
+    )
     _estimable_session(window, seeded, tmp_path)
     qapp.processEvents()
     assert "Fits in 8 GB" in window.train_estimate_label.text()

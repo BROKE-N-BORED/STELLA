@@ -263,7 +263,10 @@ def test_ram_estimate_lfm3_lora_fits():
         num_layers=24,
     )
     assert total < 8 * 1024**3  # fits the 8 GB ceiling
-    assert breakdown["base_weights"] == 1_730_000_000 * 2
+    # S6: only half the weights count as resident (mmap streams
+    # them from disk); the full size is still in the breakdown.
+    assert breakdown["base_weights"] == 1_730_000_000
+    assert breakdown["base_weights_full"] == 1_730_000_000 * 2
     check_ram_fit(total)  # must not raise
 
 
@@ -284,6 +287,120 @@ def test_ram_guard_boundary():
     check_ram_fit(8 * 1024**3)  # exactly at the ceiling: allowed
     with pytest.raises(StellaError):
         check_ram_fit(8 * 1024**3 + 1)
+
+
+# -- S6: recalibrated estimate + free-RAM limit ----------------------
+
+def _probe_estimate(params, hidden, layers, intermediate, seq_len):
+    """The probe-recipe estimate: rank 4, batch 1, bf16 base."""
+    from stella.train import estimate_lora_params
+
+    trainable = estimate_lora_params(
+        hidden_size=hidden, intermediate_size=intermediate,
+        num_layers=layers, rank=4,
+    )
+    total, breakdown = estimate_training_bytes(
+        params=params, trainable_params=trainable,
+        base_bytes_per_param=2, seq_len=seq_len, batch_size=1,
+        hidden_size=hidden, num_layers=layers,
+    )
+    return total, breakdown
+
+
+def test_ram_estimate_probe_models_pinned():
+    # S6: the 2026-11-15 training probe's models, pinned to the
+    # byte so a future change cannot silently re-inflate or
+    # understate the estimate. Old formula (full weights) gave
+    # 2.30 / 4.65 / 8.06 / 7.46 GB; the recalibrated formula
+    # counts resident weights at 0.5x.
+    # Qwen2.5-Coder-0.5B: 988,097,824 weight bytes, rank 4, seq 512.
+    total, _ = _probe_estimate(494_048_912, 896, 24, 4864, 512)
+    assert total == 1_979_684_496  # 1.84 GB
+    # Qwen2.5-Coder-1.5B: 3,087,467,144 weight bytes, rank 4, seq 512.
+    total, _ = _probe_estimate(1_543_733_572, 1536, 28, 8960, 512)
+    assert total == 3_444_605_252  # 3.21 GB
+    # Qwen2.5-3B: 6,171,877,376 weight bytes, rank 4, seq 512.
+    total, _ = _probe_estimate(3_085_938_688, 2048, 36, 11008, 512)
+    assert total == 5_571_129_344  # 5.19 GB
+    # Qwen2.5-3B, seq 256.
+    total, _ = _probe_estimate(3_085_938_688, 2048, 36, 11008, 256)
+    assert total == 4_929_400_832  # 4.59 GB
+
+
+def test_ram_estimate_still_overstates_measured_peak():
+    # S6: the recalibrated 0.5B estimate (1.84 GB) still overstates
+    # the probe's measured peak RSS (0.85 GB) by a clear margin —
+    # the guard never understates.
+    total, _ = _probe_estimate(494_048_912, 896, 24, 4864, 512)
+    measured_peak = int(0.85 * 1024**3)
+    assert total > measured_peak * 1.5
+
+
+def test_ram_estimate_3b_now_fits_but_old_formula_refused():
+    # S6: the 3B model was refused at 8.06 GB (seq 512) but fits
+    # in reality. The recalibrated estimate fits; the old
+    # full-weights total (estimate + resident weights again)
+    # still crosses the ceiling.
+    total, breakdown = _probe_estimate(
+        3_085_938_688, 2048, 36, 11008, 512
+    )
+    check_ram_fit(total)  # must not raise
+    old_total = total + breakdown["base_weights"]
+    assert old_total > 8 * 1024**3
+    with pytest.raises(StellaError):
+        check_ram_fit(old_total)
+
+
+def test_effective_ram_limit_uses_free_ram(monkeypatch):
+    import stella.train as train_mod
+    from stella.train import effective_ram_limit_bytes
+
+    # Unknown free RAM: the ceiling on its own.
+    monkeypatch.setattr(train_mod, "available_ram_bytes", lambda: None)
+    assert effective_ram_limit_bytes() == 8 * 1024**3
+    # 2 GB free: the limit is what is free.
+    assert effective_ram_limit_bytes(2 * 1024**3) == 2 * 1024**3
+    # 16 GB free: the ceiling still caps it.
+    assert effective_ram_limit_bytes(16 * 1024**3) == 8 * 1024**3
+    # Exactly at the ceiling: the ceiling.
+    assert effective_ram_limit_bytes(8 * 1024**3) == 8 * 1024**3
+
+
+def test_check_ram_fit_names_free_ram_when_it_binds():
+    # S6: when free RAM is the binding limit, the refusal says
+    # what is free and that closing programs is the fix.
+    with pytest.raises(StellaError) as excinfo:
+        check_ram_fit(
+            4 * 1024**3, available_bytes=2 * 1024**3
+        )
+    message = str(excinfo.value)
+    assert "only 2.00 GB" in message
+    assert "free right now" in message
+    assert "Close other programs" in message
+    # Plenty free: the ceiling message, as before.
+    check_ram_fit(4 * 1024**3, available_bytes=16 * 1024**3)
+    with pytest.raises(StellaError, match="over the 8.00 GB ceiling"):
+        check_ram_fit(9 * 1024**3, available_bytes=16 * 1024**3)
+
+
+def test_estimate_run_uses_free_ram_as_limit(monkeypatch, tmp_path):
+    # S6: an LFM3-shaped base fits the 8 GB ceiling but not a
+    # busy box with 2 GB free — the dry run says so.
+    import stella.train as train_mod
+    from stella.model import Store
+
+    monkeypatch.setattr(
+        train_mod, "available_ram_bytes", lambda: 2 * 1024**3
+    )
+    store = _estimable_project(Store(tmp_path / "home"), tmp_path)
+    estimate = estimate_run(store, "p1", "proj")
+    assert estimate["fits"] is False
+    assert estimate["limit_bytes"] == 2 * 1024**3
+    assert estimate["ram_available_bytes"] == 2 * 1024**3
+    report = format_estimate(estimate)
+    assert "only 2.00 GB free right now" in report
+    short = format_estimate_short(estimate)
+    assert short.startswith("Will not fit right now")
 
 
 # -- dependency gate ------------------------------------------------
@@ -1102,7 +1219,10 @@ def test_estimate_training_from_metadata_lfm3_fits(tmp_path):
         str(d), {"rank": 8, "max_seq_len": 1024, "batch_size": 1}
     )
     assert total < 8 * 1024**3
-    assert breakdown["base_weights"] == 3_460_000_000
+    # S6: only half the weights count as resident (mmap streams
+    # them from disk); the full size is still in the breakdown.
+    assert breakdown["base_weights"] == 1_730_000_000
+    assert breakdown["base_weights_full"] == 3_460_000_000
     # The LoRA estimate assumes all 7 targets: ~9M trainable for
     # LFM3 at rank 8 (the old hand-counted figure was 8.1M).
     assert breakdown["optimizer_states"] > 0
@@ -1128,6 +1248,10 @@ def test_train_refuses_before_loading_when_it_wont_fit(
     from stella.model import Store
 
     monkeypatch.setattr(train_mod, "require_training_deps", lambda: None)
+    # S6: free RAM is unknown here, so the refusal names the
+    # 8 GB ceiling (the available-RAM message is pinned by its
+    # own test).
+    monkeypatch.setattr(train_mod, "available_ram_bytes", lambda: None)
     monkeypatch.setattr(
         train_mod, "load_base_model",
         lambda *a, **k: (_ for _ in ()).throw(
@@ -1143,12 +1267,20 @@ def test_train_refuses_before_loading_when_it_wont_fit(
         train_project(store, "big", "proof")
 
 
-def test_train_metadata_estimate_then_loads_tiny_model(need_torch, tmp_path):
+def test_train_metadata_estimate_then_loads_tiny_model(
+    need_torch, tmp_path, monkeypatch
+):
     # The fits path, end to end with no injected loader: the
     # metadata estimate runs on a real saved tiny model, it fits,
     # the model loads, and the run completes.
+    import stella.train as train_mod
     from stella.model import Store
 
+    # S6: plenty of RAM free, so the pre-load guard passes no
+    # matter how busy the box running the suite is.
+    monkeypatch.setattr(
+        train_mod, "available_ram_bytes", lambda: 8 * 1024**3
+    )
     base, tokenizer = tiny_model_and_tokenizer()
     model_dir = tmp_path / "tiny-model"
     base.save_pretrained(str(model_dir))
@@ -1224,6 +1356,160 @@ def test_remote_metadata_unreadable_config_refuses(monkeypatch):
     monkeypatch.setattr(train_mod, "_fetch_hf_file", fake_fetch)
     with pytest.raises(StellaError, match="could not check whether"):
         load_model_metadata("someone/some-model")
+
+
+# -- S24: single-file models report no sibling sizes ----------------
+
+class _FakeSibling:
+    def __init__(self, rfilename, size):
+        self.rfilename = rfilename
+        self.size = size
+
+
+def _fake_hf_api(monkeypatch, siblings):
+    """Patch huggingface_hub.HfApi to return these siblings."""
+
+    class _FakeInfo:
+        pass
+
+    class _FakeApi:
+        def model_info(self, repo):
+            info = _FakeInfo()
+            info.siblings = siblings
+            return info
+
+    monkeypatch.setattr("huggingface_hub.HfApi", _FakeApi)
+
+
+def _single_file_config(monkeypatch, tmp_path):
+    """Config fetchable, no safetensors index (a single-file
+    model): _fetch_hf_file answers config.json and raises for
+    the index."""
+    import stella.train as train_mod
+
+    config_file = tmp_path / "config.json"
+    config_file.write_text(
+        json.dumps(
+            {
+                "hidden_size": 1536,
+                "num_hidden_layers": 28,
+                "intermediate_size": 8960,
+                "torch_dtype": "bfloat16",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_fetch(repo, filename):
+        if filename == "config.json":
+            return config_file
+        raise FileNotFoundError(filename)
+
+    monkeypatch.setattr(train_mod, "_fetch_hf_file", fake_fetch)
+
+
+def test_remote_metadata_single_file_sizes_via_head(
+    monkeypatch, tmp_path
+):
+    # S24: the Hub returns size None for every sibling of a
+    # single-file model, so the old sum came out 0 and training
+    # refused. The size now comes from a HEAD request per weight
+    # file (faked here).
+    import stella.train as train_mod
+    from stella.train import load_model_metadata
+
+    _single_file_config(monkeypatch, tmp_path)
+    _fake_hf_api(monkeypatch, [
+        _FakeSibling("model.safetensors", None),
+        _FakeSibling("config.json", None),
+        _FakeSibling("tokenizer.json", None),
+    ])
+    seen = []
+    monkeypatch.setattr(
+        train_mod, "_fetch_hf_file_size",
+        lambda repo, name: seen.append(name) or 3_087_467_144,
+    )
+    meta = load_model_metadata("Qwen/Qwen2.5-Coder-1.5B")
+    assert meta["base_bytes"] == 3_087_467_144
+    assert meta["params"] == 3_087_467_144 // 2
+    assert meta["hidden_size"] == 1536
+    # Only the weight file is resolved, never the small files.
+    assert seen == ["model.safetensors"]
+
+
+def test_remote_metadata_sibling_sizes_used_when_present(
+    monkeypatch, tmp_path
+):
+    # When the Hub DOES report sizes, no HEAD request is made.
+    import stella.train as train_mod
+    from stella.train import load_model_metadata
+
+    _single_file_config(monkeypatch, tmp_path)
+    _fake_hf_api(monkeypatch, [
+        _FakeSibling("model.safetensors", 2_000_000_000),
+    ])
+
+    def no_network(repo, name):
+        raise AssertionError("no HEAD request should happen")
+
+    monkeypatch.setattr(train_mod, "_fetch_hf_file_size", no_network)
+    meta = load_model_metadata("someone/some-model")
+    assert meta["base_bytes"] == 2_000_000_000
+
+
+def test_remote_metadata_single_file_unresolvable_refuses(
+    monkeypatch, tmp_path
+):
+    # Every size lookup failing refuses with the same plain
+    # words as before — the guard would rather refuse than guess.
+    import stella.train as train_mod
+    from stella.train import load_model_metadata
+
+    _single_file_config(monkeypatch, tmp_path)
+    _fake_hf_api(monkeypatch, [
+        _FakeSibling("model.safetensors", None),
+    ])
+    monkeypatch.setattr(
+        train_mod, "_fetch_hf_file_size", lambda repo, name: None
+    )
+    with pytest.raises(
+        StellaError, match="size of its weights could not be read"
+    ):
+        load_model_metadata("someone/some-model")
+
+
+def test_fetch_hf_file_size_head_refused_ranged_get_works(monkeypatch):
+    # S24: a refused HEAD falls back to a one-byte ranged GET.
+    import stella.train as train_mod
+
+    monkeypatch.setattr(
+        train_mod, "_hf_file_size_via_head", lambda url: None
+    )
+    monkeypatch.setattr(
+        train_mod, "_hf_file_size_via_range",
+        lambda url: 2_000_000_000,
+    )
+    assert (
+        train_mod._fetch_hf_file_size("someone/some-model",
+                                      "model.safetensors")
+        == 2_000_000_000
+    )
+
+
+def test_fetch_hf_file_size_both_fail_is_none(monkeypatch):
+    import stella.train as train_mod
+
+    monkeypatch.setattr(
+        train_mod, "_hf_file_size_via_head", lambda url: None
+    )
+    monkeypatch.setattr(
+        train_mod, "_hf_file_size_via_range", lambda url: None
+    )
+    assert (
+        train_mod._fetch_hf_file_size("someone/some-model",
+                                      "model.safetensors")
+        is None
+    )
 
 
 # -- T33: every split keeps at least one validation row --------------
@@ -1716,11 +2002,22 @@ def _estimable_project(store, tmp_path, total_size=3_460_000_000, rows=20):
     return store
 
 
-def test_estimate_run_fits_small_model(tmp_path):
+def _plenty_of_ram(monkeypatch):
+    """S6: the estimate judges against free RAM, so tests that
+    pin the 8 GB wording need a box with plenty free."""
+    import stella.train as train_mod
+
+    monkeypatch.setattr(
+        train_mod, "available_ram_bytes", lambda: 8 * 1024**3
+    )
+
+
+def test_estimate_run_fits_small_model(tmp_path, monkeypatch):
     # T84/T85: an LFM3-shaped base on the defaults fits — and the
     # estimate names steps, disk, and time, not just RAM.
     from stella.model import Store
 
+    _plenty_of_ram(monkeypatch)
     store = _estimable_project(Store(tmp_path / "home"), tmp_path)
     estimate = estimate_run(store, "p1", "proj")
     assert estimate["fits"] is True
@@ -1758,6 +2055,7 @@ def test_estimate_run_never_loads_the_model(tmp_path, monkeypatch):
         raise AssertionError("the estimate loaded the model")
 
     monkeypatch.setattr(train_mod, "load_base_model", _boom)
+    _plenty_of_ram(monkeypatch)
     store = _estimable_project(Store(tmp_path / "home"), tmp_path)
     estimate = estimate_run(store, "p1", "proj")
     assert estimate["fits"] is True
@@ -1791,10 +2089,11 @@ def test_estimate_run_refuses_bad_dataset(tmp_path):
         estimate_run(store, "p1", "proj")
 
 
-def test_format_estimate_names_fit_steps_and_disk(tmp_path):
+def test_format_estimate_names_fit_steps_and_disk(tmp_path, monkeypatch):
     # T85: the dry-run report answers all three questions.
     from stella.model import Store
 
+    _plenty_of_ram(monkeypatch)
     store = _estimable_project(Store(tmp_path / "home"), tmp_path)
     report = format_estimate(estimate_run(store, "p1", "proj"))
     assert "RAM: about" in report
@@ -1804,10 +2103,11 @@ def test_format_estimate_names_fit_steps_and_disk(tmp_path):
     assert "Time: roughly" in report
 
 
-def test_format_estimate_warns_when_it_wont_fit(tmp_path):
+def test_format_estimate_warns_when_it_wont_fit(tmp_path, monkeypatch):
     # T85: an over-budget dry run warns before the run starts.
     from stella.model import Store
 
+    _plenty_of_ram(monkeypatch)
     store = _estimable_project(
         Store(tmp_path / "home"), tmp_path, total_size=100_000_000_000
     )
@@ -1816,11 +2116,12 @@ def test_format_estimate_warns_when_it_wont_fit(tmp_path):
     assert "will not fit this PC" in report
 
 
-def test_format_estimate_short_shows_fit_not_settings(tmp_path):
+def test_format_estimate_short_shows_fit_not_settings(tmp_path, monkeypatch):
     # T84/T16: the one-liner shows fit and time — no settings
     # (no rank, no seq len, no batch) anywhere in it.
     from stella.model import Store
 
+    _plenty_of_ram(monkeypatch)
     store = _estimable_project(Store(tmp_path / "home"), tmp_path)
     short = format_estimate_short(estimate_run(store, "p1", "proj"))
     assert short.startswith("Fits in 8 GB")

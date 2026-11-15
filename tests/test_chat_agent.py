@@ -681,6 +681,63 @@ def test_distill_tool_failure_is_plain_words(
     assert "Ollama is not running" in result
 
 
+def test_distill_tool_timeout_reaches_engine(agent, store, seeded,
+                                             monkeypatch):
+    """S3: an optional timeout in the tool args reaches
+    distill_dataset; without one, no timeout is passed and the
+    engine keeps its usual default."""
+    seen = {}
+
+    def fake_distill(store, profile, project, teacher, prompts, **kwargs):
+        seen.update(kwargs)
+        return {
+            "teacher": teacher, "prompts": 3, "asked": 3,
+            "skipped_empty": 0, "skipped_dup": 0, "skipped_resumed": 0,
+            "rows": 3, "dataset": "/tmp/x/distilled.jsonl",
+        }
+
+    monkeypatch.setattr(chat_mod, "distill_dataset", fake_distill)
+    agent.call_tool(
+        "distill",
+        {"profile": "lfm3-tool", "project": "tool-calls",
+         "teacher": "qwen3.5:4b", "prompts": "/tmp/prompts.txt",
+         "timeout": 900},
+    )
+    assert seen["timeout"] == 900.0
+    seen.clear()
+    agent.call_tool(
+        "distill",
+        {"profile": "lfm3-tool", "project": "tool-calls",
+         "teacher": "qwen3.5:4b", "prompts": "/tmp/prompts.txt"},
+    )
+    assert "timeout" not in seen
+
+
+@pytest.mark.parametrize("bad", ["soon", -5, 0, True, None])
+def test_distill_tool_bad_timeout_keeps_default(agent, store, seeded,
+                                                monkeypatch, bad):
+    """S3: a timeout that is not a positive number is ignored, not
+    passed on: a bad model value never breaks the run."""
+    seen = {}
+
+    def fake_distill(store, profile, project, teacher, prompts, **kwargs):
+        seen.update(kwargs)
+        return {
+            "teacher": teacher, "prompts": 3, "asked": 3,
+            "skipped_empty": 0, "skipped_dup": 0, "skipped_resumed": 0,
+            "rows": 3, "dataset": "/tmp/x/distilled.jsonl",
+        }
+
+    monkeypatch.setattr(chat_mod, "distill_dataset", fake_distill)
+    agent.call_tool(
+        "distill",
+        {"profile": "lfm3-tool", "project": "tool-calls",
+         "teacher": "qwen3.5:4b", "prompts": "/tmp/prompts.txt",
+         "timeout": bad},
+    )
+    assert "timeout" not in seen
+
+
 def test_requant_tool(agent, store, seeded, monkeypatch):
     seen = {}
 

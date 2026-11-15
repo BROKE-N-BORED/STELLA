@@ -71,7 +71,10 @@
                                           model to a smaller quant (default
                                           Q4_K_M) and register it as a new
                                           tag; the original is untouched
+    stella bridge <tag>                   find the Hugging Face repo to
+                                          train from for an Ollama tag
     stella distill <profile> <project> --teacher <tag> --prompts <file>
+                                          [--timeout <seconds>]
                                           ask a teacher model each prompt
                                           and save the answers as the
                                           project's dataset
@@ -96,6 +99,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 from . import export as export_mod
@@ -966,6 +970,11 @@ def cmd_train(args) -> int:
     controller = TrainController()
     events = {"last": 0}
     quiet = _is_quiet(args)
+    # S21: the ETA anchors on the first step event seen, not on the
+    # run's start: a resumed run's steps continue from the
+    # checkpoint, so only steps completed in THIS run measure the
+    # rate. The anchor is (step, clock) at the first step event.
+    clock: dict = {"step": None, "at": None}
 
     def on_event(event: dict):
         kind = event.get("type")
@@ -986,12 +995,22 @@ def cmd_train(args) -> int:
             # run; the started/done lines still print.
             if quiet:
                 return
-            print(
+            if clock["step"] is None:
+                clock["step"] = event["step"]
+                clock["at"] = time.monotonic()
+            eta = _eta_text(
+                time.monotonic() - clock["at"],
+                event["step"] - clock["step"],
+                event["total_steps"] - event["step"],
+            )
+            line = (
                 f"step {event['step']}/{event['total_steps']} "
                 f"epoch {event['epoch']} loss {event['loss']:.4f} "
-                f"lr {event['lr']:.2e}",
-                flush=True,
+                f"lr {event['lr']:.2e}"
             )
+            if eta:
+                line += f", {eta}"
+            print(line, flush=True)
         elif kind == "checkpoint":
             if quiet:
                 return
@@ -1513,6 +1532,16 @@ def cmd_requant(args) -> int:
                 f"({_fmt_size(event['source_bytes'])}, {source_quant}). "
                 f"Shrinking to {event['quant']} as {event['new_tag']}..."
             )
+            if event.get("requantize_warning"):
+                print(event["requantize_warning"])
+        elif kind == "quantize_progress":
+            print(
+                f"shrinking... tensor {event['done']} of "
+                f"{event['total']}",
+                flush=True,
+            )
+        elif kind == "still_working":
+            print("Still shrinking the model...", flush=True)
         elif kind == "quantized":
             print(
                 f"Shrunk: {_fmt_size(event['source_bytes'])} -> "
@@ -1538,11 +1567,23 @@ def cmd_requant(args) -> int:
     return 0
 
 
+def cmd_bridge(args) -> int:
+    from .ollama_bridge import format_bridge_report
+
+    print(format_bridge_report(args.tag))
+    return 0
+
+
 def cmd_distill(args) -> int:
     from .distill import distill_dataset
 
     store = _store()
     quiet = _is_quiet(args)
+    # S21: the ETA anchors on the first prompt event. A prompt
+    # event fires BEFORE its prompt is asked, so at prompt N,
+    # N - 1 prompts are done and total - (N - 1) are still to go
+    # (the one about to be asked included).
+    clock: dict = {"at": None}
 
     def on_event(event: dict):
         kind = event.get("type")
@@ -1550,10 +1591,18 @@ def cmd_distill(args) -> int:
             # T172 --quiet: the per-prompt lines go silent.
             if quiet:
                 return
-            print(
-                f"prompt {event['index']} of {event['total']}",
-                flush=True,
+            if clock["at"] is None:
+                clock["at"] = time.monotonic()
+            done = event["index"] - 1
+            eta = _eta_text(
+                time.monotonic() - clock["at"],
+                done,
+                event["total"] - done,
             )
+            line = f"prompt {event['index']} of {event['total']}"
+            if eta:
+                line += f", {eta}"
+            print(line, flush=True)
 
     report = distill_dataset(
         store,
@@ -1561,6 +1610,7 @@ def cmd_distill(args) -> int:
         args.project,
         args.teacher,
         args.prompts,
+        timeout=args.timeout,
         on_event=on_event,
     )
     print()
@@ -1602,6 +1652,52 @@ def _positive_int(value: str) -> int:
     if number <= 0:
         raise argparse.ArgumentTypeError("--steps must be at least 1.")
     return number
+
+
+def _positive_timeout(value: str) -> float:
+    """Argparse type for distill --timeout (S3): a number of
+    seconds, more than 0. Anything else is refused by argparse
+    with a plain message, before the command runs."""
+    try:
+        number = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"{value!r} is not a number of seconds."
+        ) from None
+    if number <= 0:
+        raise argparse.ArgumentTypeError(
+            "--timeout must be more than 0 seconds."
+        )
+    return number
+
+
+def _format_duration(seconds: float) -> str:
+    """Seconds as plain words: 40 seconds, 3 minutes,
+    1 hour 5 minutes. (The GUI's run-stats label formats the same
+    way; this is the terminal's copy.)"""
+    total = int(max(0, round(seconds)))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours} hour{'s' if hours != 1 else ''} {minutes} minutes"
+    if minutes:
+        return f"{minutes} minute{'s' if minutes != 1 else ''}"
+    return f"{secs} second{'s' if secs != 1 else ''}"
+
+
+def _eta_text(
+    elapsed: float, done: int, remaining: int, *, min_samples: int = 2
+) -> str:
+    """The time-left tail for a progress line (S21): "about 25
+    minutes left", from the rate so far (done units in elapsed
+    seconds) times the units still to go. Empty when the rate is
+    not meaningful yet: fewer than min_samples completed units,
+    nothing left, or no time measured. A single sample never
+    produces an ETA, so no line ever shows a bogus one."""
+    if done < min_samples or remaining <= 0 or elapsed <= 0:
+        return ""
+    seconds_left = remaining * (elapsed / done)
+    return f"about {_format_duration(seconds_left)} left"
 
 
 def _global_flags_parser() -> argparse.ArgumentParser:
@@ -2140,6 +2236,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_requant)
 
     p = _cmd(
+        "bridge",
+        "find the Hugging Face repo to train from for an Ollama "
+        "tag (training needs HF weights, never a GGUF file)",
+        "examples:\n"
+        "  stella bridge qwen3.5:4b\n"
+        "  stella bridge lfm3",
+    )
+    p.add_argument("tag", help="installed Ollama tag, e.g. qwen3.5:4b")
+    p.set_defaults(func=cmd_bridge)
+
+    p = _cmd(
         "pc-info",
         "what this PC can do, and the training settings "
         "Stella picks for it",
@@ -2174,6 +2281,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="installed Ollama tag to learn from")
     p.add_argument("--prompts", required=True,
                    help="plain text file, one prompt per line")
+    # S3: the default matches distill.DEFAULT_TIMEOUT_SECONDS (a
+    # test pins the two together); the distill module is imported
+    # lazily by cmd_distill, so the parser carries the number.
+    p.add_argument("--timeout", type=_positive_timeout, default=300.0,
+                   help="seconds to wait for each answer "
+                   "(default 300)")
     p.set_defaults(func=cmd_distill)
     return parser
 

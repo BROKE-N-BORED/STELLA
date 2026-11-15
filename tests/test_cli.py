@@ -30,7 +30,7 @@ ALL_COMMANDS = [
     "show-profile", "rename-project", "delete-project",
     "update-project", "show-project",
     "export-recipe", "export-adapter", "import-adapter",
-    "pull-weights",
+    "pull-weights", "bridge",
 ]
 
 
@@ -1122,6 +1122,11 @@ def test_cli_train_dry_run_prints_estimate_without_training(
             AssertionError("a dry run started training")
         ),
     )
+    # S6: the dry run judges against free RAM, so the test pins
+    # a box with plenty free to keep the 8 GB wording.
+    monkeypatch.setattr(
+        train_mod, "available_ram_bytes", lambda: 8 * 1024**3
+    )
     model_dir = tmp_path / "model"
     model_dir.mkdir()
     (model_dir / "config.json").write_text(json.dumps({
@@ -1982,3 +1987,145 @@ def test_cli_export_profile_reports_size(home, tmp_path):
     assert res.returncode == 0
     lines = [ln for ln in res.stdout.splitlines() if "Package size:" in ln]
     assert len(lines) == 2
+
+
+# -- S3: distill --timeout --------------------------------------------
+
+
+def test_cli_distill_timeout_default_is_300():
+    from stella.cli import build_parser
+    from stella.distill import DEFAULT_TIMEOUT_SECONDS
+
+    args = build_parser().parse_args([
+        "distill", "p1", "proj",
+        "--teacher", "qwen3.5:4b", "--prompts", "prompts.txt",
+    ])
+    assert args.timeout == 300.0
+    # The parser's default and the engine's default stay the same
+    # number: a drift here would silently change the wait.
+    assert args.timeout == DEFAULT_TIMEOUT_SECONDS
+
+
+def test_cli_distill_timeout_parses():
+    from stella.cli import build_parser
+
+    args = build_parser().parse_args([
+        "distill", "p1", "proj",
+        "--teacher", "qwen3.5:4b", "--prompts", "prompts.txt",
+        "--timeout", "600",
+    ])
+    assert args.timeout == 600.0
+    args = build_parser().parse_args([
+        "distill", "p1", "proj",
+        "--teacher", "qwen3.5:4b", "--prompts", "prompts.txt",
+        "--timeout", "90.5",
+    ])
+    assert args.timeout == 90.5
+
+
+@pytest.mark.parametrize("bad, message", [
+    ("0", "--timeout must be more than 0 seconds."),
+    ("-5", "--timeout must be more than 0 seconds."),
+    ("soon", "'soon' is not a number of seconds."),
+])
+def test_cli_distill_timeout_bad_refused(home, bad, message):
+    # Argparse refuses before any project lookup: no setup needed.
+    res = run_cli(
+        home, "distill", "p1", "proj",
+        "--teacher", "qwen3.5:4b", "--prompts", "prompts.txt",
+        "--timeout", bad,
+    )
+    assert res.returncode == 2
+    assert message in res.stderr
+    assert "Traceback" not in res.stderr
+
+
+# -- S21: the ETA -----------------------------------------------------
+
+
+def test_eta_text_from_rate():
+    from stella.cli import _eta_text
+
+    # 10 done in 60s (6s each), 90 to go: 540s, 9 minutes.
+    assert _eta_text(60.0, 10, 90) == "about 9 minutes left"
+    # 2 done in 120s (60s each), 7 to go: 420s, 7 minutes.
+    assert _eta_text(120.0, 2, 7) == "about 7 minutes left"
+    # Seconds, not minutes, when the wait is short.
+    assert _eta_text(10.0, 5, 2) == "about 4 seconds left"
+    # Hours when the wait is long.
+    assert _eta_text(3600.0, 2, 4) == "about 2 hours 0 minutes left"
+
+
+def test_eta_text_suppressed_before_enough_samples():
+    from stella.cli import _eta_text
+
+    # One sample is not a rate: no ETA, never a bogus one.
+    assert _eta_text(60.0, 1, 90) == ""
+    assert _eta_text(60.0, 0, 90) == ""
+
+
+def test_eta_text_suppressed_when_nothing_left_or_no_time():
+    from stella.cli import _eta_text
+
+    assert _eta_text(60.0, 10, 0) == ""
+    assert _eta_text(0.0, 5, 5) == ""
+
+
+def test_cli_format_duration():
+    from stella.cli import _format_duration
+
+    assert _format_duration(0) == "0 seconds"
+    assert _format_duration(1) == "1 second"
+    assert _format_duration(40) == "40 seconds"
+    assert _format_duration(60) == "1 minute"
+    assert _format_duration(150) == "2 minutes"
+    assert _format_duration(3600) == "1 hour 0 minutes"
+    assert _format_duration(3900) == "1 hour 5 minutes"
+
+
+def test_cli_train_shows_eta_after_two_steps(home, monkeypatch, capsys):
+    """The step lines gain a time-left tail once two steps have
+    run in this run (the rate anchors on the first step event, so
+    a resumed run measures only its own steps). The clock is
+    faked: 60 seconds per step, 10 steps."""
+    import time
+
+    import stella.cli as cli_mod
+    import stella.train as train_mod
+
+    monkeypatch.setenv("STELLA_HOME", str(home))
+    now = [1000.0]
+
+    def fake_train(store, profile, project, **kwargs):
+        on_event = kwargs["on_event"]
+        on_event({"type": "started", "total_steps": 10, "rank": 2})
+        for step in range(1, 6):
+            now[0] += 60.0
+            on_event({
+                "type": "step", "step": step, "total_steps": 10,
+                "epoch": 1, "loss": 5.0, "lr": 1e-4,
+            })
+        on_event({"type": "done", "adapter": "/tmp/fake/adapter"})
+        return {
+            "steps": 5,
+            "final_loss": 5.0,
+            "trainable_params": 12345,
+            "ram_estimate_gb": 4.2,
+        }
+
+    monkeypatch.setattr(train_mod, "train_project", fake_train)
+    run_cli(home, "create-profile", "p1", "--base", "test/tiny-model")
+    run_cli(home, "create-project", "p1", "proj")
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    code = cli_mod.main(["train", "p1", "proj"])
+    assert code == 0
+    out = capsys.readouterr().out
+    lines = [line for line in out.splitlines() if line.startswith("step ")]
+    assert len(lines) == 5
+    # No ETA yet: 0 and 1 steps measured since the anchor.
+    assert "left" not in lines[0]
+    assert "left" not in lines[1]
+    # Step 3: 2 steps in 120s, 7 to go at 60s each: 7 minutes.
+    assert lines[2].endswith(", about 7 minutes left")
+    # Step 5: 4 steps in 240s, 5 to go: 5 minutes.
+    assert lines[4].endswith(", about 5 minutes left")

@@ -400,7 +400,9 @@ def _run(
 
     deadline = None if timeout is None else time.monotonic() + timeout
     proc = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, errors="replace",  # converter output can
+        # carry raw non-UTF-8 bytes (tokenizer vocab)
     )
     try:
         while True:
@@ -426,10 +428,14 @@ def _run(
         proc.wait()
         raise
     if proc.returncode != 0:
-        tail = ((err or out) or "").strip().splitlines()[-5:]
+        from .tool_errors import translate_tool_error
+
         raise StellaError(
-            f"command failed ({proc.returncode}): {' '.join(cmd)}\n"
-            + "\n".join(tail)
+            translate_tool_error(
+                (err or out) or "",
+                what=f"the {step}",
+                code=proc.returncode,
+            )
         )
 
 
@@ -574,7 +580,7 @@ def create_in_ollama(
     try:
         proc = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True,
+            text=True, errors="replace",
         )
     except OSError as exc:
         raise StellaError(f"could not run ollama: {exc}") from exc
@@ -600,9 +606,15 @@ def create_in_ollama(
         proc.wait()
         raise
     if proc.returncode != 0:
+        from .tool_errors import translate_tool_error
+
         detail = ((err or out) or "").strip()
         raise StellaError(
-            f"ollama create failed: {detail or 'no error reported'}"
+            translate_tool_error(
+                detail or "no error reported",
+                what="ollama create",
+                code=proc.returncode,
+            )
         )
     return (out or "").strip()
 

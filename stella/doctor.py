@@ -55,6 +55,45 @@ def _run(cmd: list[str], env: dict | None = None, timeout: int = 120):
     )
 
 
+# S19: system libraries the Qt window code needs, mapped to the
+# Debian/Ubuntu package that provides each one. Order matters:
+# the specific names come before the generic ones they contain
+# (libxcb-xkb before libxcb, libxkbcommon-x11 before libxkbcommon),
+# so the first match is the most specific. Every package here is
+# a real Debian package name (libegl1/libgl1/libgles2 are the
+# libglvnd dispatch libraries; the libxcb/libxkbcommon set is
+# what the Qt xcb platform plugin loads).
+_MISSING_LIBRARY_PACKAGES = (
+    ("libxcb-cursor", "libxcb-cursor0"),
+    ("libxcb-icccm", "libxcb-icccm4"),
+    ("libxcb-image", "libxcb-image0"),
+    ("libxcb-keysyms", "libxcb-keysyms1"),
+    ("libxcb-render-util", "libxcb-render-util0"),
+    ("libxcb-util", "libxcb-util1"),
+    ("libxcb-xkb", "libxcb-xkb1"),
+    ("libxkbcommon-x11", "libxkbcommon-x11-0"),
+    ("libxkbcommon", "libxkbcommon0"),
+    ("libxcb", "libxcb1"),
+    ("libEGL.so", "libegl1"),
+    ("libGLESv2.so", "libgles2"),
+    ("libGL.so", "libgl1"),
+    ("libX11.so", "libx11-6"),
+)
+
+
+def _missing_library(output: str) -> tuple[str, str] | None:
+    """The (library, package) the failure names, or None. The
+    library name is matched as a substring of the whole output,
+    so both "libEGL.so.1: cannot open shared object file" and
+    "libxcb-cursor0 ... is needed to load the Qt xcb platform
+    plugin" are caught. None means the error names no library
+    this map knows: no diagnosis is invented then."""
+    for library, package in _MISSING_LIBRARY_PACKAGES:
+        if library in output:
+            return library, package
+    return None
+
+
 def _check_pyside6(venv_python: Path) -> Check:
     """The same throwaway-QApplication check install.sh runs (T135):
     import-only would pass where creating a window fails."""
@@ -73,8 +112,29 @@ def _check_pyside6(venv_python: Path) -> Check:
                      "run bash install.sh again")
     if res.returncode == 0:
         return Check("pyside6", OK, "PySide6 starts a window")
-    tail = (res.stderr or res.stdout or "").strip().splitlines()
-    cause = tail[-1].strip() if tail else "unknown error"
+    output = res.stderr or res.stdout or ""
+    lines = output.strip().splitlines()
+    cause = lines[-1].strip() if lines else "unknown error"
+    # S19: a missing system library is NOT fixed by reinstalling
+    # Stella, so the old advice ("run bash install.sh again")
+    # sent the user around in a loop. When the error names a
+    # library this map knows, name the package and the exact
+    # command that fixes it on this PC instead.
+    found = _missing_library(output)
+    if found is not None:
+        library, package = found
+        # The line naming the library is the cause worth showing:
+        # the last line is often just "Aborted".
+        for line in lines:
+            if library in line:
+                cause = line.strip()
+                break
+        name = library.split(".so")[0]
+        return Check("pyside6", BROKEN,
+                     f"PySide6 cannot start a window ({cause}). "
+                     f"The system library {name} is missing from "
+                     "this PC. Install it with: "
+                     f"sudo apt install {package}")
     return Check("pyside6", BROKEN,
                  f"PySide6 cannot start a window ({cause}); "
                  "run bash install.sh again")

@@ -1,5 +1,96 @@
 # Changelog
 
+## v0.24.0 — 2026-11-15
+
+The Stella half of the Stella + OST improvement list (from hands-on
+use of v0.23.0 against a live Ollama server): the requant fix, the
+single-file Hugging Face defect, the RAM recalibration, the Ollama
+bridge, the distill timeout and keep-alive, live progress, tool
+errors in plain words, and a doctor that names the real fix. The
+OST items from that list belong to the OST thread and are not built
+here. Full record: docs/stella-ost-improvement-list-2026-11-15.md.
+
+- S1 — Ship the requant fix: llama-quantize is called with
+  --allow-requantize, so re-quantizing an already-quantized model
+  works instead of failing in ~14 seconds. Every Ollama model is
+  already quantized, so as released requant failed on all of them.
+  Proven live: 1.04 GB -> 718 MB, loads and answers, original
+  untouched.
+- S24 — Fix the single-file Hugging Face defect (the highest-priority
+  unfixed item): the Hub API returns size: None for every sibling of
+  a single-file model, so training by repo id refused with "the size
+  of its weights could not be read" — including LFM3-1.7B, Stella's
+  own first target. The remote metadata path now resolves each weight
+  file's size with a HEAD request (ranged-GET fallback) instead of
+  trusting the siblings' size field. Verified live against
+  Qwen/Qwen2.5-Coder-1.5B (3,087,467,144 bytes, exact match).
+- S6 — Check RAM before training, recalibrated: the estimate counted
+  base weights in full, but safetensors weights stream from disk —
+  a real 0.5B run peaked at 0.85 GB against a 2.30 GB estimate. The
+  weights term now counts the probe-grounded resident fraction
+  (0.5x, against a measured ~0.36x), and the limit is the RAM
+  actually free, not just the 8 GB ceiling — so a run no longer
+  starts when Ollama is holding half the machine. A 3B model at
+  seq 512, refused before at 8.06 GB, now fits at 5.57 GB. The
+  guard still overstates every measured peak.
+- S23 — Bridge from Ollama to training: an Ollama tag or GGUF file
+  as base_ref used to fail with a misleading "config could not be
+  read (no network...)" error. It now says plainly that training
+  needs Hugging Face weights, never a GGUF file, and `stella bridge
+  <tag>` suggests the HF repo for known models (curated, each repo
+  verified on the Hub; the user confirms — Stella never guesses a
+  repo silently). Models with no verifiable repo stay unknown rather
+  than guessed.
+- S3 — Distill timeout knob: `stella-cli distill --timeout <seconds>`
+  (default 300), plus the Distill dialog's "How long to wait for
+  each answer (seconds)" and an optional timeout on the chat
+  distill tool. A slow CPU that answers one token in 115 seconds
+  no longer times out through no fault of the model.
+- S4 — Keep the teacher warm: distill sets keep_alive ("30m") on
+  every teacher call, so the model stays loaded across prompts
+  instead of reloading (30-60 seconds each) between them. It
+  unloads on its own after the run; never kept forever.
+- S15 — Fix the "unknown" quant reading: the GGUF parser read only
+  the first 1 MB of the file, but a real Ollama blob's metadata is
+  7.85 MB (tokenizer vocab), so every real model read as "unknown"
+  and size estimates were guesses. The header is now streamed, and
+  the parser reads the real quant (verified live: Q5_K, 5.5 bits
+  per weight). Note: the file's manifest name said Q4_K_M, but its
+  tensors say Q5_K — the parser reports what the file is.
+- S21 — Live progress on long jobs: the requant run streams the
+  quantizer's own per-tensor progress ("shrinking... tensor N of
+  M", plus a "still working" line when no count is parsed), and the
+  train and distill terminal lines carry an ETA ("about 25 minutes
+  left") once enough units have finished to measure a rate. The
+  GUI distill job card already showed prompt N of M (verified).
+- S22 — Tool errors in plain words: the requant and GGUF-export
+  runners translated raw tool output verbatim ("requantizing from
+  type q4_K is disabled"). Known errors now lead with a plain-words
+  explanation and what to do; the raw lines stay as detail, never
+  hidden.
+- S19 — Doctor names the fix: a missing system library (libEGL,
+  libxcb, libGL, ...) used to report the raw error plus "run
+  install.sh again", which never fixes a library problem. The
+  doctor now names the system package and the exact install
+  command (sudo apt install libegl1). Unmapped errors keep the
+  old wording.
+- S14 — Warn before double-quantizing: shrinking an already-quantized
+  model rounds the weights a second time and can lose
+  noticeably more quality. The warning now says so in plain words
+  before the run.
+- S17 — Clean up partial files on failure: a failed requant left a
+  197 MB partial file behind. Partials are removed on failure now,
+  and empty output is cleared before complaining.
+- S16 — Checkpoint and resume for training: already done (engine
+  resume with RNG restore, CLI --resume/--from-checkpoint, GUI
+  Resume button and checkpoint picker, 16 tests). Verified, no
+  build needed.
+- S20 — Make the install survive restarts: no product defect. The
+  restart problem (Qt libraries wiped) exists only on the dev VM;
+  on a real Mint PC the system libraries persist across restarts,
+  and install.sh already checks the window starts. Recorded, not
+  built.
+
 ## v0.23.0 — 2026-11-14
 
 The final UI polish slice (audit #9 R21–R26, tasks T189–T194):

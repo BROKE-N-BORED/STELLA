@@ -91,7 +91,8 @@ def fake_llama_cpp(tmp_path, executable=True):
     q.write_text(
         "#!/usr/bin/env python3\n"
         "import sys\n"
-        "src, dst, quant = sys.argv[1], sys.argv[2], sys.argv[3]\n"
+        "args = [a for a in sys.argv[1:] if not a.startswith('--')]\n"
+        "src, dst, quant = args[0], args[1], args[2]\n"
         "data = open(src, 'rb').read()\n"
         "open(dst, 'wb').write(b'GGUF-' + quant.encode() + b'-fake'\n"
         "                      + data[:10])\n"
@@ -133,7 +134,8 @@ class FakeRunner:
     def __call__(self, cmd):
         self.commands.append(list(cmd))
         if "llama-quantize" in cmd[0]:
-            src, dst, quant = Path(cmd[1]), Path(cmd[2]), cmd[3]
+            pos = [a for a in cmd[1:] if not a.startswith("--")]
+            src, dst, quant = Path(pos[0]), Path(pos[1]), pos[2]
             assert src.is_file(), "quantize got a missing source"
             dst.write_bytes(b"GGUF-" + quant.encode() + b"-fake")
         elif cmd[0] == "ollama" and cmd[1] == "create":
@@ -222,6 +224,33 @@ def test_resolve_blob_via_modelfile_fallback(tmp_path, monkeypatch):
     assert resolve_model_blob("fallback:1b", models) == blob
 
 
+def _gguf_with_big_metadata(tensor_types, token_count=70000):
+    """A GGUF whose metadata is over 1 MB: a tokenizer token
+    array like a real Ollama blob's (7.85 MB on LFM3 1.7B), then
+    one tensor per type in `tensor_types`."""
+    out = bytearray()
+    out += b"GGUF"
+    out += struct.pack("<I", 3)  # version
+    out += struct.pack("<Q", len(tensor_types))  # tensor count
+    out += struct.pack("<Q", 1)  # metadata count
+    key = b"tokenizer.ggml.tokens"
+    out += struct.pack("<Q", len(key)) + key
+    out += struct.pack("<I", 9)  # array
+    out += struct.pack("<I", 8)  # of strings
+    out += struct.pack("<Q", token_count)
+    for i in range(token_count):
+        token = f"tok{i:06d}".encode()
+        out += struct.pack("<Q", len(token)) + token
+    for index, tensor_type in enumerate(tensor_types):
+        name = f"blk.{index}.weight".encode()
+        out += struct.pack("<Q", len(name)) + name
+        out += struct.pack("<I", 1)  # n_dims
+        out += struct.pack("<Q", 128)  # dim 0
+        out += struct.pack("<I", tensor_type)
+        out += struct.pack("<Q", 0)  # offset
+    return bytes(out)
+
+
 def test_read_gguf_source_quant(tmp_path):
     header = tmp_path / "h.gguf"
     header.write_bytes(_gguf_header(8))
@@ -232,6 +261,33 @@ def test_read_gguf_source_quant(tmp_path):
     assert _read_gguf_source_quant(header) == (None, None)
     header.write_bytes(b"not gguf at all")
     assert _read_gguf_source_quant(header) == (None, None)
+
+
+def test_read_gguf_source_quant_big_metadata(tmp_path):
+    # S15: a real Ollama blob's metadata is 7.85 MB, past the old
+    # 1 MB read cap — the parse died mid-metadata and every real
+    # model read as "unknown". The reader streams now, so the
+    # quant past 1 MB of tokenizer tokens still reads.
+    header = tmp_path / "big.gguf"
+    data = _gguf_with_big_metadata([11, 11, 8])
+    assert len(data) > 1024 * 1024
+    header.write_bytes(data)
+    assert _read_gguf_source_quant(header) == ("Q4_K", 4.85)
+
+
+def test_read_gguf_source_quant_truncated_big_metadata(tmp_path):
+    # A file cut off inside the big metadata array is unreadable,
+    # not a crash: the never-raises contract holds.
+    header = tmp_path / "cut.gguf"
+    data = _gguf_with_big_metadata([11, 11, 8])
+    header.write_bytes(data[:600 * 1024])
+    assert _read_gguf_source_quant(header) == (None, None)
+
+
+def test_read_gguf_source_quant_missing_file(tmp_path):
+    assert _read_gguf_source_quant(tmp_path / "ghost.gguf") == (
+        None, None,
+    )
 
 
 # -- llama.cpp discovery ----------------------------------------------
@@ -470,3 +526,264 @@ def test_run_kills_process_on_cancel():
     with pytest.raises(StellaError, match="Cancelled"):
         _run(["sleep", "30"], what="sleeping", should_stop=should_stop)
     assert time.monotonic() - started < 10
+
+
+# -- S1: partial + empty output cleanup --------------------------------
+
+def test_requant_failure_removes_partial_output(env_setup, tmp_path):
+    """A failed quantize leaves no half-written model behind."""
+    work = tmp_path / "work"
+
+    def failing_runner(cmd):
+        if "llama-quantize" in cmd[0]:
+            pos = [a for a in cmd[1:] if not a.startswith("--")]
+            Path(pos[1]).write_bytes(b"half-written")
+            raise StellaError("quantizer failed (fake)")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    with pytest.raises(StellaError, match="quantizer failed"):
+        requant_model(
+            "qwen3.5:4b",
+            work_dir=work, _runner=failing_runner,
+            _models_dir=env_setup["models"],
+        )
+    assert list(work.glob("*.gguf")) == []
+
+
+def test_requant_empty_output_is_cleaned_up(env_setup, tmp_path):
+    """A quantizer that writes an empty file is cleaned up before
+    the complaint, so no 0-byte model sits in the work folder."""
+    work = tmp_path / "work"
+
+    def empty_runner(cmd):
+        if "llama-quantize" in cmd[0]:
+            pos = [a for a in cmd[1:] if not a.startswith("--")]
+            Path(pos[1]).write_bytes(b"")
+            return
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    with pytest.raises(StellaError, match="wrote no file"):
+        requant_model(
+            "qwen3.5:4b",
+            work_dir=work, _runner=empty_runner,
+            _models_dir=env_setup["models"],
+        )
+    assert list(work.glob("*.gguf")) == []
+
+
+def test_requant_found_event_carries_double_quant_warning(
+    env_setup, tmp_path
+):
+    # S1/S14: an already-quantized source (Q8_0 here) warns that
+    # shrinking rounds the weights a second time.
+    events = []
+    requant_model(
+        "qwen3.5:4b",
+        work_dir=tmp_path / "work", on_event=events.append,
+        _runner=FakeRunner(), _models_dir=env_setup["models"],
+    )
+    found = events[0]
+    assert found["type"] == "found"
+    assert found["requantize_warning"] is not None
+    assert "already quantized" in found["requantize_warning"]
+    assert "second time" in found["requantize_warning"]
+
+
+def test_requant_no_warning_for_unquantized_source(
+    env_setup, tmp_path
+):
+    # S1/S14: a positively unquantized source (F16 here) gets no
+    # warning — there is no second rounding to warn about.
+    models, _blob = fake_ollama_models(
+        tmp_path / "f16", blob_bytes=_gguf_header(1) + b"\x00" * 100
+    )
+    events = []
+    requant_model(
+        "qwen3.5:4b",
+        work_dir=tmp_path / "work", on_event=events.append,
+        _runner=FakeRunner(), _models_dir=models,
+    )
+    assert events[0]["requantize_warning"] is None
+
+
+# -- S21: live progress on the requant run ------------------------------
+
+def test_parse_quantize_progress():
+    from stella.requant import _parse_quantize_progress
+
+    # The format llama-quantize really prints (on stderr).
+    assert _parse_quantize_progress(
+        "[  12/ 287] blk.0.attn_q.weight - [2048, 2048], "
+        "type = q4_K, size = 2.250 MiB"
+    ) == (12, 287)
+    assert _parse_quantize_progress("[1/3] a.weight") == (1, 3)
+    assert _parse_quantize_progress("tensor 120 of 339") == (120, 339)
+    assert _parse_quantize_progress("120 of 339 tensors") == (120, 339)
+    # Metadata lines carry no count.
+    assert _parse_quantize_progress(
+        "llama_model_loader: - kv   0: general.architecture str = lfm3"
+    ) is None
+    assert _parse_quantize_progress(
+        "llama_model_loader: loaded meta data with 45 key-value "
+        "pairs and 287 tensors"
+    ) is None
+    assert _parse_quantize_progress("") is None
+    # Insane counts are not believed.
+    assert _parse_quantize_progress("[ 5/ 0 ] x") is None
+    assert _parse_quantize_progress("[ 300/ 287 ] x") is None
+
+
+def test_run_streams_quantize_progress():
+    """Per-tensor lines arrive as progress events while the
+    quantizer runs — from stdout and stderr both."""
+    from stella.requant import _run
+
+    code = (
+        "import sys, time\n"
+        "print('[  1/ 3] a.weight', flush=True)\n"
+        "print('[  2/ 3] b.weight', file=sys.stderr, flush=True)\n"
+        "print('[  3/ 3] c.weight', flush=True)\n"
+    )
+    events = []
+    _run(
+        [sys.executable, "-c", code], what="shrinking",
+        on_progress=events.append,
+    )
+    assert events == [
+        {"type": "quantize_progress", "done": 1, "total": 3},
+        {"type": "quantize_progress", "done": 2, "total": 3},
+        {"type": "quantize_progress", "done": 3, "total": 3},
+    ]
+
+
+def test_run_still_working_when_no_count():
+    """A silent quantizer gets a periodic 'still working' event
+    (interval shortened for the test) so the run never looks dead."""
+    from stella.requant import _run
+
+    code = "import time; time.sleep(0.7)"
+    events = []
+    _run(
+        [sys.executable, "-c", code], what="shrinking",
+        on_progress=events.append, _still_working_seconds=0.2,
+    )
+    kinds = [e["type"] for e in events]
+    assert kinds and all(k == "still_working" for k in kinds)
+
+
+def test_run_no_still_working_once_count_seen():
+    """Once tensor counts are flowing, no 'still working' line is
+    needed — the counts themselves show the run is alive. A
+    'still working' before the first count is fine: the child
+    may take a while to start under load, and the run genuinely
+    has no count yet."""
+    from stella.requant import _run
+
+    code = (
+        "import time\n"
+        "print('[  1/ 3] a.weight', flush=True)\n"
+        "time.sleep(0.6)\n"
+        "print('[  2/ 3] b.weight', flush=True)\n"
+    )
+    events = []
+    _run(
+        [sys.executable, "-c", code], what="shrinking",
+        on_progress=events.append, _still_working_seconds=0.2,
+    )
+    kinds = [e["type"] for e in events]
+    first_count = kinds.index("quantize_progress")
+    assert "still_working" not in kinds[first_count:]
+    assert [
+        e["done"] for e in events
+        if e["type"] == "quantize_progress"
+    ] == [1, 2]
+
+
+def test_run_survives_non_utf8_output():
+    """Raw non-UTF-8 bytes in the tool's output (tokenizer vocab
+    in the metadata dump) must not kill the reader."""
+    from stella.requant import _run
+
+    code = (
+        "import sys\n"
+        "sys.stdout.buffer.write(b'\\xff\\xfe not utf8\\n')\n"
+        "sys.stdout.buffer.flush()\n"
+        "print('[  1/ 1] a.weight', flush=True)\n"
+    )
+    events = []
+    _run(
+        [sys.executable, "-c", code], what="shrinking",
+        on_progress=events.append,
+    )
+    assert events == [
+        {"type": "quantize_progress", "done": 1, "total": 1}
+    ]
+
+
+def test_requant_progress_flows_to_events(env_setup, tmp_path):
+    """End to end with a real subprocess: the fake quantizer's
+    per-tensor lines become progress events between found and
+    quantized."""
+    script = env_setup["cpp"] / "build" / "bin" / "llama-quantize"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "args = [a for a in sys.argv[1:] if not a.startswith('--')]\n"
+        "src, dst, quant = args[0], args[1], args[2]\n"
+        "print('[  1/ 2] a.weight', file=sys.stderr, flush=True)\n"
+        "print('[  2/ 2] b.weight', file=sys.stderr, flush=True)\n"
+        "open(dst, 'wb').write(b'GGUF-' + quant.encode() + b'-fake')\n"
+    )
+    script.chmod(0o755)
+    events = []
+    requant_model(
+        "qwen3.5:4b",
+        work_dir=tmp_path / "work", on_event=events.append,
+        _models_dir=env_setup["models"],
+    )
+    kinds = [e["type"] for e in events]
+    assert kinds == [
+        "found", "quantize_progress", "quantize_progress",
+        "quantized", "created",
+    ]
+    progress = [e for e in events if e["type"] == "quantize_progress"]
+    assert [(e["done"], e["total"]) for e in progress] == [(1, 2), (2, 2)]
+
+
+# -- S22: tool errors in plain words (requant side) --------------------
+
+def test_run_translates_requantize_disabled():
+    """The raw 'requantizing from type q4_K is disabled' becomes
+    a plain-words message — with the raw line kept as a detail."""
+    from stella.requant import _run
+
+    code = (
+        "import sys\n"
+        "sys.stderr.write('error: requantizing from type q4_K '\n"
+        "                 'is disabled\\n')\n"
+        "sys.exit(1)\n"
+    )
+    with pytest.raises(StellaError) as excinfo:
+        _run([sys.executable, "-c", code], what="Shrinking 'x' to Q4_K_M")
+    message = str(excinfo.value)
+    assert "already quantized" in message
+    assert "too old" in message
+    assert "requantizing from type q4_K is disabled" in message
+    assert "The tool said:" in message
+
+
+def test_run_unknown_error_keeps_raw_tail():
+    """An unmapped error still shows its raw tail, behind a
+    plain-words lead."""
+    from stella.requant import _run
+
+    code = (
+        "import sys\n"
+        "sys.stderr.write('weird boom 12345\\n')\n"
+        "sys.exit(1)\n"
+    )
+    with pytest.raises(StellaError) as excinfo:
+        _run([sys.executable, "-c", code], what="Shrinking 'x' to Q4_K_M")
+    message = str(excinfo.value)
+    assert "The tool failed." in message
+    assert "weird boom 12345" in message

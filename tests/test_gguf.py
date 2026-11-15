@@ -963,6 +963,53 @@ def test_run_with_timeout_allows_fast_command():
     _run([sys.executable, "-c", "pass"], timeout=60, step="converter")
 
 
+# -- S22: tool errors in plain words (GGUF side) ----------------------
+
+def test_run_translates_unsupported_architecture():
+    """The converter's raw 'not supported' becomes a plain-words
+    message — with the raw line kept as a detail."""
+    import sys
+
+    from stella.gguf import _run
+    from stella.model import StellaError
+
+    code = (
+        "import sys\n"
+        "sys.stderr.write('Model architecture lfm9 is not '\n"
+        "                 'supported\\n')\n"
+        "sys.exit(1)\n"
+    )
+    with pytest.raises(StellaError) as excinfo:
+        _run(
+            [sys.executable, "-c", code],
+            step="converter",
+        )
+    message = str(excinfo.value)
+    assert message.startswith("the converter failed (1).")
+    assert "does not support this model type" in message
+    assert "architecture lfm9 is not supported" in message
+
+
+def test_run_unknown_error_keeps_raw_tail():
+    """An unmapped converter error still shows its raw tail,
+    behind a plain-words lead."""
+    import sys
+
+    from stella.gguf import _run
+    from stella.model import StellaError
+
+    code = (
+        "import sys\n"
+        "sys.stderr.write('converter exploded mysteriously 777\\n')\n"
+        "sys.exit(1)\n"
+    )
+    with pytest.raises(StellaError) as excinfo:
+        _run([sys.executable, "-c", code], step="quantizer")
+    message = str(excinfo.value)
+    assert "The tool failed." in message
+    assert "converter exploded mysteriously 777" in message
+
+
 def test_subprocess_timeout_is_generous():
     # A real 1.7B convert takes minutes: the bound is minutes, not
     # seconds.

@@ -29,6 +29,11 @@ from .train import load_dataset, validate_dataset_row
 
 DISTILLED_FILENAME = "distilled.jsonl"
 DEFAULT_TIMEOUT_SECONDS = 300.0
+# S4: how long the teacher stays loaded after each answer. Every
+# prompt's call refreshes it, so 30 minutes spans the gaps between
+# prompts without ever pinning the model forever: on an 8 GB PC
+# the teacher must unload after the run, so never -1 (forever).
+DISTILL_KEEP_ALIVE = "30m"
 
 
 def _read_prompts(path: str | Path) -> list[str]:
@@ -114,6 +119,11 @@ def distill_dataset(
     good rows come back (training needs at least 2). `should_stop`
     (a no-arg callable, T74) cancels between prompts: the answers
     so far stay saved, and a re-run picks up where it stopped.
+    `timeout` (S3) is how long to wait for each answer, in seconds.
+    Every prompt's call also carries keep_alive (S4,
+    DISTILL_KEEP_ALIVE): the teacher stays loaded across prompts
+    instead of reloading on each one, and unloads on its own
+    after the run.
     """
     store.get_profile(profile)
     store.get_project(profile, project)
@@ -127,7 +137,8 @@ def distill_dataset(
     if _generate is None:
         def _generate(tag: str, prompt: str) -> str:
             return ollama_client.generate(
-                tag, prompt, url=ollama_url, timeout=timeout
+                tag, prompt, url=ollama_url, timeout=timeout,
+                keep_alive=DISTILL_KEEP_ALIVE,
             )
 
     def emit(event: dict):

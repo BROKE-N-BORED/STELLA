@@ -451,25 +451,31 @@ def generate(
     *,
     num_predict: int = 1024,
     temperature: float = 0.7,
+    keep_alive: str | None = None,
 ) -> str:
     """One /api/generate call, no streaming. Returns the reply text.
 
     Raises StellaError in plain words on any failure: Ollama down,
     the model not installed, or a reply with no text. The default
     timeout is generous on purpose: a local CPU model answers slowly.
+    `keep_alive` (S4) is Ollama's keep-alive for the model, e.g.
+    "30m": how long the model stays loaded after this call. When
+    set it goes into the payload; when absent no keep_alive key is
+    sent at all, so existing callers are unaffected.
     """
     base = (url or ollama_url()).rstrip("/")
-    payload = json.dumps(
-        {
-            "model": model,
-            "prompt": prompt,
-            "stream": False,
-            "options": {
-                "temperature": temperature,
-                "num_predict": num_predict,
-            },
-        }
-    ).encode("utf-8")
+    body = {
+        "model": model,
+        "prompt": prompt,
+        "stream": False,
+        "options": {
+            "temperature": temperature,
+            "num_predict": num_predict,
+        },
+    }
+    if keep_alive is not None:
+        body["keep_alive"] = keep_alive
+    payload = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(
         base + "/api/generate",
         data=payload,

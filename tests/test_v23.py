@@ -116,11 +116,13 @@ def test_project_with_stored_full_method_opens_clean(window, qapp):
 def test_one_tagline_everywhere(window):
     """T190: the window title and the header carry the same
     tagline — and the title still carries the version."""
+    from stella.model import STELLA_VERSION
+
     title = window.windowTitle()
     header = window.header_label.text()
     assert "fine-tune models on your PC" in title
     assert header == "STELLA: fine-tune models on your PC"
-    assert title == f"STELLA 0.23.0: fine-tune models on your PC"
+    assert title == f"STELLA {STELLA_VERSION}: fine-tune models on your PC"
     # The old header tagline is gone.
     assert "shape a base model" not in header
 
@@ -305,21 +307,7 @@ def test_chat_help_label_has_room(window, qapp):
 
 
 # -- Version --------------------------------------------------------
-
-
-def test_version_is_0_23_0(home):
-    """The version is 0.23.0 everywhere the CLI reports it."""
-    from stella.model import STELLA_VERSION
-
-    assert STELLA_VERSION == "0.23.0"
-    res = run_cli(home, "--version")
-    assert res.returncode == 0
-    assert "0.23.0" in res.stdout
-
-
-def test_window_title_carries_version(window):
-    """The window title carries STELLA 0.23.0."""
-    assert "0.23.0" in window.windowTitle()
+# (moved to test_v24.py — the version is 0.24.0 now)
 
 
 # -- Text rules: the AST sweep, pinned ------------------------------

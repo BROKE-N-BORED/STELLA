@@ -187,7 +187,9 @@ TOOL_HELP = {
         'distill {"profile": "lfm3-tool", "project": "tool-calls", '
         '"teacher": "qwen3.5:4b", "prompts": "/home/user/prompts.txt"}: '
         "ask a teacher model each prompt in a file and save the "
-        "answers as the project's dataset."
+        "answers as the project's dataset. Add an optional "
+        '"timeout" in seconds for how long to wait for each answer '
+        "(leave it out for the usual 300)."
     ),
     "requant": (
         'requant {"tag": "qwen3.5:4b", "quant": "Q4_K_M", "new_tag": '
@@ -1093,6 +1095,18 @@ class ChatAgent:
                 "Tell me the prompts file: a plain text file with "
                 "one prompt per line."
             )
+        # S3: an optional timeout in seconds, from the model's args.
+        # Only a positive number is used; anything else (missing,
+        # zero, negative, not a number) keeps the usual default,
+        # so a bad model value never breaks the run.
+        timeout = None
+        raw_timeout = args.get("timeout")
+        if (
+            isinstance(raw_timeout, (int, float))
+            and not isinstance(raw_timeout, bool)
+            and raw_timeout > 0
+        ):
+            timeout = float(raw_timeout)
 
         def on_event(event: dict):
             if self._cancelled:
@@ -1106,9 +1120,12 @@ class ChatAgent:
                 if total and (index == 1 or index % 10 == 0 or index == total):
                     self._progress(f"Prompt {index} of {total}.")
 
+        kwargs = {"on_event": on_event}
+        if timeout is not None:
+            kwargs["timeout"] = timeout
         report = distill_dataset(
             self.store, profile, project, teacher, prompts,
-            on_event=on_event,
+            **kwargs,
         )
         parts = [
             f"Asked the teacher {report['asked']} prompt(s) and kept "

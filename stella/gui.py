@@ -3497,6 +3497,25 @@ class DistillDialog(QDialog):
                 "you want the small model to learn."
             )
         )
+        # S3: how long to wait for each answer. A wait decision,
+        # not a training setting, so it sits here at the job
+        # start. A slow teacher on this PC can take minutes per
+        # answer; if the wait runs out, that prompt fails and the
+        # run stops.
+        layout.addWidget(
+            QLabel("How long to wait for each answer (seconds)")
+        )
+        self.timeout_spin = QSpinBox()
+        self.timeout_spin.setRange(1, 3600)
+        self.timeout_spin.setValue(300)
+        self.timeout_spin.setSingleStep(60)
+        layout.addWidget(self.timeout_spin)
+        layout.addWidget(
+            _help_label(
+                "If the wait runs out, that prompt fails and the "
+                "run stops. Raise it when the teacher is slow."
+            )
+        )
         buttons = QHBoxLayout()
         self.start_btn = QPushButton("Start")
         self.start_btn.setToolTip(
@@ -3513,6 +3532,7 @@ class DistillDialog(QDialog):
         layout.addLayout(buttons)
         _chain_tab_order([
             self.teacher_combo, self.prompts_btn,
+            self.timeout_spin,
             self.start_btn, self.cancel_btn,
         ])
 
@@ -3561,6 +3581,10 @@ class DistillDialog(QDialog):
 
     def prompts_path(self) -> str | None:
         return self._prompts_path
+
+    def timeout(self) -> int:
+        """Seconds to wait for each answer (S3)."""
+        return self.timeout_spin.value()
 
     def _refresh_start(self):
         self.start_btn.setEnabled(
@@ -5957,6 +5981,16 @@ class MainWindow(QMainWindow):
                         f"({provision.format_size(event['source_bytes'])}). "
                         "Shrinking it..."
                     )
+                    if event.get("requantize_warning"):
+                        ctx.log(event["requantize_warning"])
+                elif kind == "quantize_progress":
+                    ctx.progress(event["done"], event["total"])
+                    ctx.log(
+                        f"Shrinking: tensor {event['done']} of "
+                        f"{event['total']}."
+                    )
+                elif kind == "still_working":
+                    ctx.log("Still shrinking the model...")
                 elif kind == "quantized":
                     ctx.log(
                         "Shrunk to "
@@ -5995,6 +6029,7 @@ class MainWindow(QMainWindow):
         prompts = dialog.prompts_path()
         if not teacher or not prompts:
             return
+        timeout = dialog.timeout()
         from .distill import distill_dataset
 
         def job(ctx):
@@ -6008,6 +6043,7 @@ class MainWindow(QMainWindow):
 
             report = distill_dataset(
                 self.store, profile, project, teacher, prompts,
+                timeout=timeout,
                 on_event=on_event, should_stop=ctx.is_cancelled,
             )
             return (

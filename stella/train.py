@@ -42,6 +42,7 @@ from pathlib import Path
 from .autoconfig import compute_settings, measure_pc
 from .job_lock import job_lock
 from .model import STELLA_VERSION, StellaError, Store, metamorph_mode
+from .ollama_bridge import bridge_error_message, classify_base_ref
 
 # First proof target — confirmed from the live model card, not guessed.
 LFM3_HF_REPO = "LiquidAI/LFM3-1.7B"
@@ -57,6 +58,18 @@ TRAINING_INSTALL_HINT = (
 # OS, Python, and the tokenizer so training never swaps the machine dead.
 RAM_LIMIT_BYTES = 8 * 1024**3
 RAM_HEADROOM_BYTES = 1 * 1024**3
+
+# How much of the base weights count as resident RAM in the
+# estimate (S6). The old formula counted every weight byte as
+# resident, which overstated peak RAM about 2.7x: the training
+# probe (2026-11-15, Qwen2.5-Coder-0.5B) measured a 0.85 GB peak
+# against a 2.30 GB estimate, with only 0.36 GB resident at load
+# for ~1 GB of weights — safetensors weights are mmap'd and stream
+# from disk, so they do not all sit in RAM. The probe-grounded
+# resident share at load is ~0.36x; the estimate uses 0.5x to keep
+# a safety margin, and still overstates the measured 0.5B peak
+# more than twofold. Never lower this without a new probe.
+RESIDENT_WEIGHTS_FRACTION = 0.5
 
 # LoRA target suffixes, checked against the model's real module names.
 # Covers standard attention/MLP projections, GPT-2 style, and LLaMA style.
@@ -615,14 +628,32 @@ def check_dataset_fit(
     dataset_bytes: int,
     training_bytes: int,
     limit_bytes: int = RAM_LIMIT_BYTES,
+    *,
+    available_bytes: int | None = None,
 ) -> None:
     """Refuse a run whose dataset would not fit alongside the
     model (T158): the training estimate (T28) plus the dataset
-    estimate, against the same ceiling. The message names both
+    estimate, against the same limit. The message names both
     numbers, so the fix (a smaller dataset, or a smaller base)
-    is obvious."""
+    is obvious. `available_bytes` tightens the limit to what is
+    free right now, as in check_ram_fit."""
+    limit = min(
+        limit_bytes,
+        effective_ram_limit_bytes(available_bytes)
+        if available_bytes is not None else limit_bytes,
+    )
     total = dataset_bytes + training_bytes
-    if total > limit_bytes:
+    if total > limit:
+        if available_bytes is not None and available_bytes < limit_bytes:
+            raise StellaError(
+                f"This dataset would not fit alongside the model: "
+                f"training needs about {_gb(training_bytes)} of RAM "
+                f"and the dataset about {_gb(dataset_bytes)}, "
+                f"together over the {_gb(available_bytes)} free on "
+                "this PC right now.\n"
+                "Close other programs and try again, train on a "
+                "smaller dataset, or use a smaller base model."
+            )
         raise StellaError(
             f"This dataset would not fit alongside the model: "
             f"training needs about {_gb(training_bytes)} of RAM "
@@ -648,7 +679,10 @@ def estimate_training_bytes(
     """Estimate peak training RAM. Returns (total_bytes, breakdown).
 
     Math, all in bytes:
-    - base weights: params x bytes-per-param (bf16 = 2)
+    - base weights: params x bytes-per-param x
+      RESIDENT_WEIGHTS_FRACTION (0.5) — safetensors weights are
+      mmap'd and stream from disk, so only about half count as
+      resident (probe-grounded, see the constant above)
     - gradients: trainable params x 4 (fp32, trainable only)
     - AdamW states: trainable params x 8 (fp32 m + v)
     - fp32 master copy of trainable weights: trainable x 4
@@ -656,7 +690,8 @@ def estimate_training_bytes(
       per layer for backward, deliberately conservative)
     - headroom: 1 GB for the OS, Python, tokenizer
     """
-    weights = params * base_bytes_per_param
+    weights_full = params * base_bytes_per_param
+    weights = int(weights_full * RESIDENT_WEIGHTS_FRACTION)
     grads = trainable_params * 4
     optimizer = trainable_params * 8
     master = trainable_params * 4
@@ -664,6 +699,7 @@ def estimate_training_bytes(
     total = weights + grads + optimizer + master + activations + RAM_HEADROOM_BYTES
     breakdown = {
         "base_weights": weights,
+        "base_weights_full": weights_full,
         "gradients": grads,
         "optimizer_states": optimizer,
         "trainable_master_copy": master,
@@ -678,9 +714,59 @@ def _gb(n: int) -> str:
     return f"{n / 1024**3:.2f} GB"
 
 
-def check_ram_fit(estimate_bytes: int, limit_bytes: int = RAM_LIMIT_BYTES) -> None:
-    """Refuse to train if the estimate does not fit the RAM ceiling."""
-    if estimate_bytes > limit_bytes:
+def available_ram_bytes() -> int | None:
+    """RAM free on this PC right now (MemAvailable), in bytes, via
+    autoconfig's measurement — or None when it cannot be read.
+    A test seam: tests patch this instead of /proc/meminfo."""
+    try:
+        available_gb = measure_pc()["ram_available_gb"]
+    except Exception:
+        return None
+    if available_gb is None:
+        return None
+    return int(available_gb * 1024**3)
+
+
+def effective_ram_limit_bytes(available_bytes: int | None = None) -> int:
+    """The RAM limit a run is actually judged against (S6): the
+    8 GB ceiling, or what is free right now, whichever is smaller.
+    A fixed ceiling alone would start a run the box cannot
+    currently fit — Ollama holding models, for one. Unknown
+    available RAM (None) means the ceiling on its own: the guard
+    never invents a smaller limit it cannot measure."""
+    if available_bytes is None:
+        available_bytes = available_ram_bytes()
+    if available_bytes is None:
+        return RAM_LIMIT_BYTES
+    return min(RAM_LIMIT_BYTES, available_bytes)
+
+
+def check_ram_fit(
+    estimate_bytes: int,
+    limit_bytes: int = RAM_LIMIT_BYTES,
+    *,
+    available_bytes: int | None = None,
+) -> None:
+    """Refuse to train if the estimate does not fit the RAM limit.
+
+    `available_bytes` (MemAvailable, when the caller measured it)
+    tightens the limit to what is free right now, and the refusal
+    then says so — closing other programs is the fix, not a
+    smaller model. Without it, the refusal names the ceiling, as
+    before."""
+    limit = effective_ram_limit_bytes(available_bytes) \
+        if available_bytes is not None else limit_bytes
+    limit = min(limit, limit_bytes)
+    if estimate_bytes > limit:
+        if available_bytes is not None and available_bytes < limit_bytes:
+            raise StellaError(
+                f"Training would need about {_gb(estimate_bytes)} of "
+                f"RAM, and this PC has only {_gb(available_bytes)} "
+                "free right now.\n"
+                "Close other programs and try again (Ollama may be "
+                "holding models in memory). Or lower max_seq_len or "
+                "the LoRA rank, or pick a smaller base model."
+            )
         raise StellaError(
             f"Training would need about {_gb(estimate_bytes)} of RAM, "
             f"over the {_gb(limit_bytes)} ceiling on this PC.\n"
@@ -803,6 +889,61 @@ def _fetch_hf_file(repo: str, filename: str) -> Path:
     return Path(hf_hub_download(repo_id=repo, filename=filename))
 
 
+def _hf_file_size_via_head(url: str) -> int | None:
+    """A Hub file's size from a HEAD request (Content-Length),
+    via huggingface_hub's metadata fetch, which follows the
+    Hub's redirect to the file store. None when the HEAD is
+    refused or answers without a size. Never raises."""
+    try:
+        from huggingface_hub import get_hf_file_metadata
+
+        size = get_hf_file_metadata(url).size
+    except Exception:
+        return None
+    return size if isinstance(size, int) and size > 0 else None
+
+
+def _hf_file_size_via_range(url: str) -> int | None:
+    """A Hub file's size from a one-byte ranged GET (Range:
+    bytes=0-0, total from Content-Range), for when the HEAD is
+    refused. Downloads one byte, never the file. None on any
+    failure. Never raises."""
+    try:
+        import re
+        import urllib.request
+
+        req = urllib.request.Request(
+            url, headers={"Range": "bytes=0-0"}
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            content_range = resp.headers.get("Content-Range") or ""
+            match = re.search(r"/(\d+)\s*$", content_range)
+            if match:
+                return int(match.group(1))
+            length = resp.headers.get("Content-Length")
+            if length is not None and resp.status == 200:
+                # No range support and a full reply: the length
+                # is the file size, but only trust it when the
+                # server answered the whole file in one go.
+                return int(length)
+    except Exception:
+        return None
+    return None
+
+
+def _fetch_hf_file_size(repo: str, filename: str) -> int | None:
+    """One Hub file's size in bytes, HEAD first with a ranged
+    GET as the fallback. A test seam: tests patch this instead
+    of the network. Never raises: None means unknowable."""
+    try:
+        from huggingface_hub import hf_hub_url
+
+        url = hf_hub_url(repo, filename)
+    except Exception:
+        return None
+    return _hf_file_size_via_head(url) or _hf_file_size_via_range(url)
+
+
 def _remote_model_metadata(base_ref: str) -> dict:
     """Metadata of a Hub repo, from its config + weight sizes —
     two small downloads, never the weights."""
@@ -830,15 +971,24 @@ def _remote_model_metadata(base_ref: str) -> dict:
         total_size = None
     if total_size is None:
         # Single-file model, no index: ask the Hub for the file list.
+        # The Hub returns size None for every sibling of
+        # single-file models, so a bare sum comes out 0 — resolve
+        # each weight file's size with a HEAD request instead
+        # (S24: this unblocks Qwen2.5-Coder-1.5B, LFM3-1.7B, and
+        # every other single-file model).
         try:
             from huggingface_hub import HfApi
 
             info = HfApi().model_info(base_ref)
-            total_size = sum(
-                s.size or 0
-                for s in info.siblings
-                if s.rfilename.endswith((".safetensors", ".bin"))
-            ) or None
+            total = 0
+            for s in info.siblings:
+                if not s.rfilename.endswith((".safetensors", ".bin")):
+                    continue
+                size = s.size or _fetch_hf_file_size(
+                    base_ref, s.rfilename
+                )
+                total += size or 0
+            total_size = total or None
         except Exception:
             total_size = None
     if not total_size:
@@ -857,10 +1007,15 @@ def load_model_metadata(base_ref: str) -> dict:
     Returns params, hidden_size, num_layers, intermediate_size,
     base_bytes, bytes_per_param. Raises StellaError when the size
     cannot be found out — the guard would rather refuse than guess.
+    An Ollama tag or GGUF file is refused with the bridge error
+    (S23), not the misleading "config could not be read".
     """
     path = Path(base_ref).expanduser()
     if path.is_dir():
         return _local_model_metadata(path)
+    kind, _detail = classify_base_ref(base_ref)
+    if kind in ("gguf", "ollama"):
+        raise StellaError(bridge_error_message(base_ref))
     return _remote_model_metadata(base_ref)
 
 
@@ -989,7 +1144,8 @@ def estimate_run(
     (no base ref, unreadable model metadata, bad dataset) — the
     caller reports it plainly instead of guessing.
 
-    Returns: fits, estimate_bytes, limit_bytes, ram_gb, steps,
+    Returns: fits, estimate_bytes, limit_bytes, ram_available_bytes,
+    ram_gb, steps,
     disk_bytes, time_note, dataset_count, dataset_format,
     est_tokens, train_examples, val_examples, trainable_params,
     base_bytes.
@@ -1020,6 +1176,11 @@ def estimate_run(
         hidden_size=meta["hidden_size"],
         num_layers=meta["num_layers"],
     )
+    # S6: "fits" is judged against what is free right now, not
+    # just the fixed ceiling — the dry run must not promise a run
+    # the box cannot currently fit.
+    ram_available = available_ram_bytes()
+    limit_bytes = effective_ram_limit_bytes(ram_available)
     if dataset_path is not None:
         data_path = Path(dataset_path).expanduser()
         if not data_path.is_file():
@@ -1064,9 +1225,10 @@ def estimate_run(
         info["avg_prompt_chars"] + info["avg_completion_chars"]
     ) * len(examples)
     return {
-        "fits": estimate_bytes <= RAM_LIMIT_BYTES,
+        "fits": estimate_bytes <= limit_bytes,
         "estimate_bytes": estimate_bytes,
-        "limit_bytes": RAM_LIMIT_BYTES,
+        "limit_bytes": limit_bytes,
+        "ram_available_bytes": ram_available,
         "ram_gb": round(estimate_bytes / 1024**3, 2),
         "steps": total_steps,
         "disk_bytes": disk_bytes,
@@ -1096,11 +1258,17 @@ def format_estimate(estimate: dict) -> str:
     """The dry-run report (T85): RAM fit, steps, disk, time — one
     line each, in plain words. Shared by the CLI flag and the
     Train panel's Estimate button."""
-    fit = (
-        f"fits in {_gb(estimate['limit_bytes'])}"
-        if estimate["fits"]
-        else f"will not fit in {_gb(estimate['limit_bytes'])}"
-    )
+    available = estimate.get("ram_available_bytes")
+    limit = estimate.get("limit_bytes", RAM_LIMIT_BYTES)
+    if estimate["fits"]:
+        fit = f"fits in {_gb(limit)}"
+    elif available is not None and available < RAM_LIMIT_BYTES:
+        fit = (
+            f"will not fit: only {_gb(available)} free right now, "
+            f"and the run needs {_gb(estimate['estimate_bytes'])}"
+        )
+    else:
+        fit = f"will not fit in {_gb(limit)}"
     lines = [
         f"RAM: about {_gb(estimate['estimate_bytes'])} ({fit}).",
         f"Steps: {estimate['steps']} "
@@ -1111,20 +1279,41 @@ def format_estimate(estimate: dict) -> str:
         f"Time: {estimate['time_note']} on this PC (rough).",
     ]
     if not estimate["fits"]:
-        lines.append(
-            "This run will not fit this PC. Pick a smaller base "
-            "model, or train it elsewhere."
-        )
+        if available is not None and available < RAM_LIMIT_BYTES:
+            lines.append(
+                "This run will not fit right now. Close other "
+                "programs and try again, or pick a smaller base model."
+            )
+        else:
+            lines.append(
+                "This run will not fit this PC. Pick a smaller base "
+                "model, or train it elsewhere."
+            )
     return "\n".join(lines)
 
 
 def format_estimate_short(estimate: dict) -> str:
     """The one-line estimate for the Train panel label (T84): fit
     and time, no settings (T16 — the user never sees the knobs)."""
+    available = estimate.get("ram_available_bytes")
+    limit = estimate.get("limit_bytes", RAM_LIMIT_BYTES)
     if estimate["fits"]:
+        if limit >= RAM_LIMIT_BYTES:
+            return (
+                f"Fits in 8 GB (about {estimate['ram_gb']} GB). "
+                f"{estimate['steps']} steps, {estimate['time_note']}."
+            )
+        free = _gb(available) if available is not None else _gb(limit)
         return (
-            f"Fits in 8 GB (about {estimate['ram_gb']} GB). "
+            f"Fits (about {estimate['ram_gb']} GB, "
+            f"{free} free). "
             f"{estimate['steps']} steps, {estimate['time_note']}."
+        )
+    if available is not None and available < RAM_LIMIT_BYTES:
+        return (
+            f"Will not fit right now (about {estimate['ram_gb']} GB, "
+            f"only {_gb(available)} free). Close other programs, "
+            "or pick a smaller model."
         )
     return (
         f"Will not fit in 8 GB (about {estimate['ram_gb']} GB). "
@@ -1135,13 +1324,12 @@ def format_estimate_short(estimate: dict) -> str:
 # -- model loading --------------------------------------------------
 
 def _looks_like_gguf_or_tag(base_ref: str) -> str | None:
-    """Return why a base_ref is NOT trainable HF weights, or None."""
-    if base_ref.lower().endswith(".gguf"):
-        return "a GGUF file"
-    if Path(base_ref).expanduser().exists():
-        return None  # a local folder — assume HF weights live there
-    if "/" not in base_ref:
-        return "an Ollama tag, not a Hugging Face repo"
+    """Return why a base_ref is NOT trainable HF weights, or None.
+    One rule, shared with the bridge (S23): a GGUF file, or an
+    Ollama tag (a ":" version, or a bare name with no "/")."""
+    kind, detail = classify_base_ref(base_ref)
+    if kind in ("gguf", "ollama"):
+        return detail
     return None
 
 
@@ -1154,11 +1342,7 @@ def load_base_model(base_ref: str, *, dtype: str = "bfloat16"):
     require_training_deps()
     bad = _looks_like_gguf_or_tag(base_ref)
     if bad is not None:
-        raise StellaError(
-            f"base_ref {base_ref!r} is {bad} . Training needs Hugging "
-            f"Face transformers weights. Set base_ref to a repo id "
-            f"like {LFM3_HF_REPO!r}, or a local folder of HF weights."
-        )
+        raise StellaError(bridge_error_message(base_ref))
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -2360,13 +2544,11 @@ def train_project(
         )
     # Refuse GGUF / Ollama tags here, not just in load_base_model —
     # the check must hold even when a test injects a model loader.
+    # The bridge error (S23) names the likely Hugging Face repo and
+    # the `stella bridge` command.
     bad = _looks_like_gguf_or_tag(ref)
     if bad is not None:
-        raise StellaError(
-            f"base_ref {ref!r} is {bad} . Training needs Hugging "
-            f"Face transformers weights. Set base_ref to a repo id "
-            f"like {LFM3_HF_REPO!r}, or a local folder of HF weights."
-        )
+        raise StellaError(bridge_error_message(ref))
 
     # Dataset first (cheap), model second (expensive).
     if dataset_path is not None:
@@ -2460,10 +2642,16 @@ def train_project(
         # fake world — and the post-load guard below still applies.)
         if _model_loader is None:
             pre_estimate, _ = estimate_training_from_metadata(ref, settings)
-            check_ram_fit(pre_estimate)
+            # S6: the guard judges against what is free right now,
+            # not just the fixed ceiling — a run Ollama has already
+            # crowded out must refuse before it loads anything.
+            available = available_ram_bytes()
+            check_ram_fit(pre_estimate, available_bytes=available)
             # The dataset fit (T158): the dataset must fit
             # alongside the model, not just the model on its own.
-            check_dataset_fit(dataset_bytes, pre_estimate)
+            check_dataset_fit(
+                dataset_bytes, pre_estimate, available_bytes=available
+            )
 
         # T165: the profile was just used — a real training run
         # (not a sleep consolidation, which passes
@@ -2632,6 +2820,11 @@ def train_project(
             hidden_size=hidden,
             num_layers=layers,
         )
+        # Post-load, the ceiling only: the model is already in
+        # RAM, so free RAM has already dropped by its footprint
+        # and judging the full estimate against what is left
+        # would count the weights twice. The pre-load check above
+        # is the guard that uses free RAM.
         check_ram_fit(estimate)
 
         if update_status:

@@ -226,6 +226,19 @@ job, export it as a usable package.
   no removal — the settings form that offered it was deleted in
   v0.11.0, and old projects with a stored "full" method still
   open.
+- v0.24.0 Stella + OST improvement list, Stella half (2026-11-15):
+  requant works on real Ollama models (--allow-requantize, with a
+  plain-words double-quant warning and partial cleanup on
+  failure); training by Hugging Face repo id works for single-file
+  models (sizes resolved by HEAD request instead of trusting the
+  Hub's empty size field); the RAM guard counts resident weights
+  and the RAM actually free, so a 3B model fits where it was
+  refused before; `stella bridge` finds the HF repo for an Ollama
+  tag; distill has a timeout knob and keeps the teacher warm;
+  requant streams live progress and train/distill lines carry an
+  ETA; tool errors arrive in plain words; and the doctor names the
+  system package a missing library needs. Full record:
+  docs/stella-ost-improvement-list-2026-11-15.md.
 
 ## Install
 
@@ -552,6 +565,8 @@ After install, `stella` works in a terminal:
 `stella chat [--provider ollama|groq|gemini|custom] [--model <name>]`
 
 `stella requant <tag> [--quant Q4_K_M] [--as <tag>]`
+
+`stella bridge <tag>`
 
 `stella pc-info`
 

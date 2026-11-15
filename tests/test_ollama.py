@@ -14,6 +14,7 @@ from stella.ollama import (
     OllamaError,
     chat_stream,
     fetch_show,
+    generate,
     list_model_sizes,
     list_models,
     parse_show_info,
@@ -474,3 +475,60 @@ def test_show_cache_refresh_seed_and_reset():
 
 def test_module_show_cache_singleton_is_a_cache():
     assert isinstance(SHOW_CACHE, ModelShowCache)
+
+
+# -- S4: keep-alive on generate --------------------------------------
+
+
+class _FakeGenerateResponse:
+    """A urlopen stand-in: returns one canned /api/generate body."""
+
+    def __init__(self, payload):
+        self._payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self):
+        return json.dumps(self._payload).encode("utf-8")
+
+
+def _capture_generate(monkeypatch):
+    """Capture the request generate() sends. Returns the list of
+    decoded payloads, in call order."""
+    import urllib.request
+
+    payloads = []
+
+    def _fake_urlopen(req, timeout=None):
+        payloads.append(json.loads(req.data.decode("utf-8")))
+        return _FakeGenerateResponse({"response": "hello there"})
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+    return payloads
+
+
+def test_generate_sends_keep_alive_when_set(monkeypatch):
+    payloads = _capture_generate(monkeypatch)
+    text = generate(
+        "lfm3:1.7b", "hi", url="http://127.0.0.1:9",
+        keep_alive="30m",
+    )
+    assert text == "hello there"
+    assert len(payloads) == 1
+    assert payloads[0]["keep_alive"] == "30m"
+    assert payloads[0]["model"] == "lfm3:1.7b"
+    assert payloads[0]["prompt"] == "hi"
+    assert payloads[0]["stream"] is False
+
+
+def test_generate_sends_no_keep_alive_key_by_default(monkeypatch):
+    # Existing callers pass no keep_alive: the key must be absent
+    # entirely, so Ollama's default behavior is unchanged for them.
+    payloads = _capture_generate(monkeypatch)
+    generate("lfm3:1.7b", "hi", url="http://127.0.0.1:9")
+    assert len(payloads) == 1
+    assert "keep_alive" not in payloads[0]
