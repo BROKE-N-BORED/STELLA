@@ -1,6 +1,6 @@
 STELLA - task list from the full review, 2026-11-15
 
-129 tasks. 0 urgent. 23 important, 52 correctness and polish, 54 nice to have.
+129 tasks, none started yet. 0 urgent. 23 important, 52 correctness and polish, 54 nice to have.
 The 5 marked (needs your PC) can only be done on your machine.
 Full detail for every task - evidence, what to fix, what done looks like -
 is in stella-review-task-list-2026-11-15.md in this same folder.
