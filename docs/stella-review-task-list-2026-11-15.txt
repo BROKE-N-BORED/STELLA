@@ -1,0 +1,144 @@
+STELLA - task list from the full review, 2026-11-15
+
+129 tasks. 0 urgent. 23 important, 52 correctness and polish, 54 nice to have.
+The 5 marked (needs your PC) can only be done on your machine.
+Full detail for every task - evidence, what to fix, what done looks like -
+is in stella-review-task-list-2026-11-15.md in this same folder.
+
+P1 - IMPORTANT
+
+R1. New Profile dialog picks the first model by itself; Enter creates a profile you never picked
+R2. The trash has no way back: no Restore button, and the documented move-back is a trap
+R3. Sleep adapters have no way into a model: the merge path the docs claim does not exist
+R4. The refusal probe gate is never enforced: a tune can reach Ollama without ever passing it
+R5. Vision models silently lose their vision when requanted or exported
+R6. Reading a model's type loads the whole model file into RAM
+R7. One profile with bad characters in its notes breaks the whole profile list
+R8. Healing an orphaned sleep report drops its hashes, so rows get re-slept and the next check is empty
+R9. The doctor writes a launcher with a literal "path" as its icon, and the error is sticky
+R10. The doctor tells the user to install the wrong package for missing libxcb libraries
+R11. The Groq model list is stale: the default model errors for ordinary accounts
+R12. The Gemini model list is stale: all three listed models fail for a new user
+R13. There is no click-only way to install training: the core purpose still needs a terminal
+R14. Chat on the command line goes silent for the whole run: no narration, no progress
+R15. sleep with no dataset tells the user to pick one "in the Train panel"
+R16. Four tests fail on a plain install without the training stack, so CI's base job would go red
+R17. The Ollama-down settings test is genuinely fragile: a background refresh can overwrite its seed
+R18. The button-press test is genuinely fragile: under load it misses the dip entirely
+R19. Run the LFM3 proof run end to end (needs your PC)
+R20. Merge a sleep adapter for real with llama.cpp (needs your PC)
+R21. Create a model in Ollama from a real Stella export (needs your PC)
+R22. Double-click Install Stella.desktop for real on Mint (needs your PC)
+R23. Run the real 2 GB training install (needs your PC)
+
+P2 - CORRECTNESS AND POLISH
+
+R24. The dry-run "fits" answer ignores the dataset's RAM
+R25. Offline, a single-file model link is refused even though the weights are already cached
+R26. Resuming after editing the dataset silently trains the wrong rows
+R27. A hard crash leaves a run showing as "training" forever
+R28. method: full can still be set from the command line, and silently trains LoRA instead
+R29. The GGUF parser picks the quant by tensor count, and a near-tie could pick the wrong one
+R30. A distill timeout or failure aborts the whole run, and the message misleads
+R31. Export has no disk guard at all, and its estimate leaves out the F16 intermediate
+R32. The requant disk estimate leaves out Ollama's blob copy
+R33. Cleanup only runs on Stella's own errors; Ctrl+C or a disk error leaves partial files behind
+R34. The requant subprocess has no timeout
+R35. Teacher answers are silently cut off at 1024 tokens
+R36. Importing a recipe from a finished project warns misleadingly and demotes the project
+R37. The model layer does not type-check what it is given, so bad values land in the store
+R38. Export does not check what it writes, so Stella exports packages its own verify refuses
+R39. Import has no size or disk guard: no zip-bomb cap, no free-space check
+R40. Cloning a profile silently drops its damaged projects, then reports success
+R41. The status bar says "Pick a profile to begin." while a session is live
+R42. The Settings Ollama status text overlaps the Refresh button when the window opens
+R43. The fit verdict calls every model "Too big for this PC", including the recommended starter
+R44. The run-button row is clipped at the bottom edge at 1366x768
+R45. A typed cloud-model pick is dropped when Ollama is down
+R46. Chat history is never shortened: the full history is re-sent (and re-paid for) every turn
+R47. A second tool block's raw JSON leaks into the chat, and the call never runs
+R48. Tool JSON in a json fence, or unclosed, is shown as raw text and never runs
+R49. The template walk is prompt-only: the agent never tracks which step it is on
+R50. Every model call re-fetches the Ollama model list, up to 12 tag fetches per loop
+R51. The curated model lists have no freshness mechanism: they rotted silently
+R52. --json is silently ignored on about 25 commands
+R53. Export commands print "Package size: about 0 bytes." before failing on a missing profile
+R54. Chat's pre-flight failures print to stdout, and there is no CLI way to save a provider key
+R55. There is no CLI for cloning a profile or a project, though the engine and GUI both have it
+R56. The nameless-profile warning says the row shows "(unnamed profile)" when it shows the display name
+R57. The installer's Qt-failure advice never names the package to install
+R58. The doctor repairs launch files for a folder whose venv is broken
+R59. Uninstall removes the launcher and symlink without checking they point at this install
+R60. With no network, the base install waits minutes in silence
+R61. The training install's 3 GB preflight understates the real ~4 GB+ peak
+R62. The training download has no resume
+R63. There is no click-only uninstall
+R64. The probe judge still misjudges 9 of 11 new edge cases
+R65. The probe gate is relative-only and trusts the caller's delta
+R66. Sleep cycles pile up with no delete, prune, or size anywhere
+R67. The governing-seat warning only fires for marked profiles, not role-only ones
+R68. The CLI gates everyone by default while the GUI auto-selects: the two disagree
+R69. README refresh: stale prompt count, missing flags, and the LFM3 probe called "informational"
+R70. How to Use refresh: wrong governing seats, stale prompt count, missing topics, and more
+R71. The v0.24 test fixture opens the real ~/.stella store and real settings
+R72. The HEAD and ranged-GET download helpers are never really executed
+R73. 12 of 30 plain-words error-map entries are untested
+R74. Test fixture teardown does not wait for jobs, so a worker can leak into the next test
+R75. Resume is enabled with nothing to resume, and never offered after a pause or crash
+
+P3 - NICE TO HAVE
+
+R76. An out-of-memory crash mid-run has no plain-words message
+R77. A crash mid-save leaves orphan checkpoint folders nothing can see or delete
+R78. Autoconfig ignores model size, disk, and CPU, and can silently change rank/seq between runs
+R79. There is no free-disk check in the training path
+R80. Raw error text leaks into the user-facing messages on the GGUF paths
+R81. CLI export never shows the estimate the GUI shows
+R82. create_in_ollama is called with no timeout
+R83. Export deletes the merged dir before the job lock, and unlinks the GGUF unconditionally
+R84. The --modelfile fallback breaks on paths with spaces
+R85. Prompts are not stripped of a byte-order mark
+R86. Requant work files can collide by name
+R87. base_ref is never checked against the actual weights
+R88. settings_source is silently lost on a round-trip (auto becomes manual)
+R89. The LFM3 template still carries a dead settings["notes"] key
+R90. CLI --purge has no prompt
+R91. The trash shows no size and has no auto-purge age
+R92. How to Use opens on an empty pane, not Getting started
+R93. A picked job cannot be un-picked; Go stays armed
+R94. No Quit in the File menu, no Ctrl+Q
+R95. The finish moment lasts 250 ms: too brief to read
+R96. How to Use search with no match gives no "nothing found" message
+R97. No drag-and-drop for a dataset file
+R98. No shortcut help: F2-rename and Ctrl+S are undiscoverable
+R99. The cap-hit reply is not recorded in the chat history
+R100. "just do it" only matches at the start of a message
+R101. A custom base URL ending in /chat/completions doubles the path
+R102. The chat-window model buttons are Ollama-only
+R103. The resume / dest tool arguments are accepted but undocumented
+R104. Cloud providers never stream
+R105. A corrupt providers.json silently reads as "no keys"
+R106. No cloud cost or usage visibility for cloud chat
+R107. The setting-flag help says nothing useful
+R108. probe --json prints no JSON on failure
+R109. The stella-cli comment lists 9 of 31 commands
+R110. CLI help says "MetaMorphAi mode" while the GUI follows the no-metamorph-words rule
+R111. Small CLI inconsistencies: delete errors, a stray advisory, doubled "rough", a progress line before its failure
+R112. No CLI for mark-ready/status, notes, viewing probe results, How to Use, or a debug report
+R113. Training settings are CLI-only since the GUI form was deleted, and the window never says so
+R114. The installer file itself shows a generic icon before install
+R115. The uninstall icon-removal fallback never runs on a venv-branch failure
+R116. Uninstall leaves about 2 GB of pip cache behind
+R117. An early-failing re-install deletes the previous good receipt
+R118. The icon render lacks QT_QPA_PLATFORM=offscreen
+R119. The desktop copy only tries ~/Desktop
+R120. CI never runs desktop-file-validate or shellcheck, and has no scheduled runs
+R121. No click-only doctor
+R122. PROMPTS_VERSION is still 2 after the v0.22 battery change
+R123. A typo in the dream-skip string
+R124. The sleep manifest's stella_version is "0.3"
+R125. Substring over-gating: "breakfast" and "screwdriver" gate the probe
+R126. Dreaming can stall the full 120 s on a hung Ollama
+R127. TEST-REPORT.md is stale and the __init__.py docstring still says v0.8.0
+R128. No pytest config file: no timeouts, no markers
+R129. FORMAT.md refresh: the example shows 0.18.0 and omits governing_seat and dataset/
