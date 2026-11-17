@@ -56,14 +56,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import urllib.error
 import urllib.request
 from pathlib import Path
 
-from .job_lock import job_lock
+from .job_lock import job_lock, job_lock_held
 from .model import STELLA_VERSION, StellaError, Store, utc_now
 from .train import (
     TrainController,
+    _dir_size_bytes,
     load_dataset,
     resolve_dataset_ref,
     split_dataset,
@@ -238,8 +240,114 @@ def _cycle_summary(report: dict) -> dict:
 
 
 def list_sleep_cycles(store: Store, profile: str, project: str) -> list[dict]:
-    """Per-cycle summaries, oldest first (from the manifest)."""
-    return list(load_sleep_manifest(store, profile, project)["cycles"])
+    """Per-cycle summaries, oldest first (from the manifest).
+
+    Each entry carries `size_bytes` (R66): the cycle folder's
+    disk use, computed live from the files on disk — the stored
+    summary has no size, so a stored number would go stale the
+    moment a file changed.
+    """
+    sdir = sleep_dir(store, profile, project)
+    out = []
+    for cycle in load_sleep_manifest(store, profile, project)["cycles"]:
+        entry = dict(cycle)
+        entry["size_bytes"] = _dir_size_bytes(
+            sdir / f"cycle-{cycle.get('cycle', 0)}"
+        )
+        out.append(entry)
+    return out
+
+
+def delete_sleep_cycle(
+    store: Store, profile: str, project: str, cycle: int
+) -> dict:
+    """Delete one sleep cycle, permanently (R66).
+
+    Mirrors delete_checkpoint (T150): the point is freeing disk,
+    so there is no trash here — the caller confirms first (the
+    window asks, showing the size, defaulting to No). Removes
+    the whole cycle folder AND the manifest entry, so the
+    orphan-heal cannot resurrect it; a cycle with a report but
+    no manifest entry (unhealed) deletes the same way. The
+    slept-row hashes stay: deleting the adapter does not
+    un-sleep the rows, so they must not sleep again. Refuses
+    while a job holds the home's lock — a merge may be reading
+    the cycle's adapter. Returns the cycle and the bytes freed.
+    Raises StellaError when the cycle does not exist.
+    """
+    store.get_profile(profile)
+    store.get_project(profile, project)
+    if job_lock_held(store.home):
+        raise StellaError(
+            f"cannot delete sleep cycle {cycle} while a job is "
+            "running. Wait for it to finish, then try again"
+        )
+    sdir = sleep_dir(store, profile, project)
+    cdir = sdir / f"cycle-{cycle}"
+    manifest = load_sleep_manifest(store, profile, project)
+    known = any(
+        c.get("cycle") == cycle
+        for c in manifest["cycles"]
+        if isinstance(c, dict)
+    )
+    if not cdir.is_dir() and not known:
+        raise StellaError(
+            f"no sleep cycle {cycle} for project {project!r}"
+        )
+    freed = _dir_size_bytes(cdir) if cdir.is_dir() else 0
+    if cdir.is_dir():
+        shutil.rmtree(cdir)
+    if known:
+        manifest["cycles"] = [
+            c
+            for c in manifest["cycles"]
+            if not (isinstance(c, dict) and c.get("cycle") == cycle)
+        ]
+        save_sleep_manifest(store, profile, project, manifest)
+    return {"cycle": int(cycle), "freed_bytes": freed}
+
+
+def prune_sleep_cycles(
+    store: Store, profile: str, project: str, keep: int = 3
+) -> dict:
+    """Delete all but the newest N sleep cycles (R66).
+
+    Permanent, like delete_sleep_cycle — the caller confirms
+    first, showing the size before and after. Returns the kept
+    and deleted cycle numbers, the total size before and after,
+    and the bytes freed. `keep` must be at least 1: pruning to
+    zero would destroy every sleep adapter.
+    """
+    if keep < 1:
+        raise StellaError(
+            "pruning must keep at least 1 sleep cycle (the newest "
+            "one holds the latest adapter)"
+        )
+    store.get_profile(profile)
+    store.get_project(profile, project)
+    if job_lock_held(store.home):
+        raise StellaError(
+            "cannot prune sleep cycles while a job is running. "
+            "Wait for it to finish, then try again"
+        )
+    cycles = list_sleep_cycles(store, profile, project)
+    total_before = sum(c.get("size_bytes") or 0 for c in cycles)
+    kept = cycles[-keep:] if cycles else []
+    doomed = cycles[:-keep] if len(cycles) > keep else []
+    freed = 0
+    deleted_numbers: list[int] = []
+    for c in doomed:
+        freed += c.get("size_bytes") or 0
+        delete_sleep_cycle(store, profile, project, c["cycle"])
+        deleted_numbers.append(c["cycle"])
+    total_after = total_before - freed
+    return {
+        "kept": [c["cycle"] for c in kept],
+        "deleted": deleted_numbers,
+        "freed_bytes": freed,
+        "total_before": total_before,
+        "total_after": total_after,
+    }
 
 
 def list_sleep_adapters(store: Store, profile: str, project: str) -> list[int]:
@@ -909,14 +1017,19 @@ def sleep_status(store: Store, profile: str, project: str) -> dict:
         except StellaError:
             total = None
             unslept = None
+    # R66: per-cycle sizes (live from disk, via list_sleep_cycles)
+    # plus the total, so the CLI and the window can show what
+    # sleep costs.
+    cycles = list_sleep_cycles(store, profile, project)
     return {
         "profile": profile,
         "project": project,
-        "cycles": manifest["cycles"],
+        "cycles": cycles,
         "unhealed_cycles": manifest.get("unhealed_cycles", []),
         "slept_rows": len(slept),
         "dreamed_rows": len(manifest["dreamed_hashes"]),
         "old_val_rows": len(manifest["old_val_rows"]),
         "total_rows": total,
         "unslept_rows": unslept,
+        "total_size_bytes": sum(c.get("size_bytes") or 0 for c in cycles),
     }

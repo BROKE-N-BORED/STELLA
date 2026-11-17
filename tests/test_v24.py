@@ -29,12 +29,23 @@ def run_cli(home, *args):
 def window(qapp, seeded, settings):
     """The main window on the seeded store (one profile, one
     project) — the same fixture test_gui.py uses, defined here so
-    this file stands alone."""
+    this file stands alone. R71: the window gets the seeded store
+    and the temp settings — a bare MainWindow() opened the REAL
+    ~/.stella store and real settings, and closeEvent wrote back
+    into them. R74: teardown waits for any running job before
+    closing, so a worker cannot leak into the next test."""
     from stella.gui import MainWindow
 
-    win = MainWindow()
+    win = MainWindow(store=seeded, settings=settings)
     win.show()
+    qapp.processEvents()
+    if win._model_list_worker is not None:
+        win._model_list_worker.wait(5000)
+        qapp.processEvents()
     yield win
+    from tests.test_gui import _wait_for_all_workers
+
+    _wait_for_all_workers(win, qapp)
     win.close()
 
 
@@ -57,3 +68,16 @@ def test_distill_timeout_option_listed(home):
     res = run_cli(home, "distill", "--help")
     assert res.returncode == 0
     assert "--timeout" in res.stdout
+
+
+def test_window_fixture_uses_the_seeded_store(window, seeded, settings):
+    """R71: the fixture window runs on the seeded temp store and
+    the temp settings — never the real ~/.stella store or the
+    real QSettings. A bare MainWindow() failed this: its store
+    home was ~/.stella."""
+    from pathlib import Path
+
+    assert window.store.home == seeded.home
+    assert str(window.store.home) != str(Path.home() / ".stella")
+    assert window.settings.fileName() == settings.fileName()
+    assert ".config" not in window.settings.fileName()

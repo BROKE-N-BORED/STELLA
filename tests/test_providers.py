@@ -517,7 +517,11 @@ def test_cli_chat_missing_key_exits_1(store, monkeypatch, capsys):
         ["chat", "--provider", "groq", "--model", "openai/gpt-oss-120b"]
     )
     assert code == 1
-    assert "No Groq key saved yet" in capsys.readouterr().out
+    # R54: a pre-flight failure is an error, so it goes to stderr —
+    # stdout stays empty for the (never started) chat.
+    captured = capsys.readouterr()
+    assert "No Groq key saved yet" in captured.err
+    assert captured.out == ""
 
 
 def test_cli_chat_unknown_provider_is_rejected(store, monkeypatch):

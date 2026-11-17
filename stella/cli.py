@@ -51,6 +51,13 @@
                                           change a project
     stella show-project <profile> <name>  show a project's record and
                                           its checkpoints
+    stella clone-profile <name> <new-name> [--with-projects]
+                                          copy a profile under a new
+                                          name (with its projects too,
+                                          when asked)
+    stella clone-project <profile> <name> <new-name>
+                                          copy a project under a new
+                                          name
     stella train <profile> <project>      LoRA-tune a project (Item 3)
     stella export-gguf <profile> <project> <dir>
                                           merge + convert + quantize to GGUF
@@ -61,12 +68,23 @@
                                           rows from the local Ollama model
     stella sleep-status <profile> <project>
                                           per-cycle sleep stats
+    stella sleep-delete <profile> <project> <cycle>
+                                          delete one sleep cycle for good
+    stella sleep-prune <profile> <project> [--keep N]
+                                          delete all but the newest N
+                                          sleep cycles
     stella chat [--provider groq|gemini|custom|ollama] [--model <name>]
                                           talk to Stella: the chat sets
                                           up and runs training for you
                                           (/quit to exit). Cloud
                                           providers need a key saved in
                                           Settings under AI providers.
+    stella save-key <provider>            save a cloud provider key
+                                          (groq, gemini, or custom),
+                                          typed without showing it
+    stella list-keys                      which providers have a key
+                                          saved (never the keys)
+    stella remove-key <provider>          forget a saved provider key
     stella requant <tag>                  re-quantize an installed Ollama
                                           model to a smaller quant (default
                                           Q4_K_M) and register it as a new
@@ -88,8 +106,10 @@
 Reads STELLA_HOME for the home dir (default ~/.stella).
 
 Global flags (T172), available on every command: --json prints a
-structured result for scripting (on the list, show, probe,
-sleep-status, and verify commands), --quiet silences the per-step
+structured result for scripting (every command except the
+long-running ones — train, sleep, distill, export-gguf, requant,
+pull-weights, and chat — which print progress as they run and
+refuse the flag instead, R52), --quiet silences the per-step
 progress lines on a long run, --verbose prints the full traceback
 behind the clean error line.
 """
@@ -125,6 +145,48 @@ def _print_json(obj) -> None:
     """One JSON document on stdout (T172): indented, so a human
     reading it can follow it too."""
     print(json.dumps(obj, indent=2, default=str))
+
+
+# R52: the commands that print a structured result with --json.
+# Every other command REFUSES --json (see _refuse_json, called
+# from main()): the gate is closed by default, so a future command
+# cannot silently ignore the flag the way 24 of them used to.
+# train is the one split case, handled in main(): --dry-run prints
+# its estimate as JSON, a real run refuses (it prints progress
+# lines as it goes).
+JSON_COMMANDS = frozenset({
+    "profiles", "projects", "show-profile", "show-project",
+    "verify", "probe", "sleep-status",
+    "pc-info", "doctor", "bridge",
+    "export", "export-profile", "export-recipe", "export-adapter",
+    "import", "import-adapter",
+    "create-profile", "create-project",
+    "rename-profile", "delete-profile", "update-profile",
+    "rename-project", "delete-project", "update-project",
+    "clone-profile", "clone-project",
+    "save-key", "list-keys", "remove-key",
+})
+
+
+def _refuse_json(command: str) -> int:
+    """--json on a command that cannot print it (R52): a plain
+    refusal on stderr, exit 1 — never plain text with exit 0."""
+    if command == "train":
+        print(
+            "stella: --json is not available for train: it prints "
+            "progress lines as it runs, so there is no single result "
+            "to print as JSON. For a machine-readable estimate, use: "
+            "stella train <profile> <project> --dry-run --json",
+            file=sys.stderr,
+        )
+        return 1
+    print(
+        f"stella: --json is not available for {command}: it prints "
+        "progress lines as it runs, so there is no single result to "
+        "print as JSON. Run it without --json.",
+        file=sys.stderr,
+    )
+    return 1
 
 
 def _normalized_note(typed: str, stored: str) -> str:
@@ -181,8 +243,13 @@ def cmd_profiles(args) -> int:
             continue
         # Defensive read (T5): one nameless manifest degrades to a
         # warning line instead of killing the whole list.
+        # R56: the warning fires only when the row REALLY is
+        # "(unnamed profile)" — a profile with a display name but
+        # no name shows its display name, and warning that it is
+        # "shown as (unnamed profile)" described a screen the user
+        # was not looking at.
         name = p.get("name") or p.get("display_name") or "(unnamed profile)"
-        if not p.get("name"):
+        if not p.get("name") and not p.get("display_name"):
             print(
                 "warning: a profile has no name, shown as "
                 "(unnamed profile).",
@@ -249,6 +316,11 @@ def cmd_projects(args) -> int:
 def cmd_pc_info(args) -> int:
     store = _store()
     measurement, settings = auto_settings(store.home)
+    if _as_json(args):
+        # R52: the structured form — the measurement and the
+        # settings it picked, as one JSON document.
+        _print_json({"measurement": measurement, "settings": settings})
+        return 0
     print(format_report(measurement, settings))
     return 0
 
@@ -260,16 +332,53 @@ def cmd_doctor(args) -> int:
     checks = doctor_mod.run_checks(
         doctor_mod.find_install_dir(), Path.home(), fix=not args.check
     )
+    broken = any(c.status == doctor_mod.BROKEN for c in checks)
+    if _as_json(args):
+        # R52: the structured form — every check as an object, plus
+        # the overall verdict. The exit code still carries it, as
+        # in the human form below.
+        _print_json({
+            "checks": [
+                {
+                    "name": c.name,
+                    "status": c.status,
+                    "detail": c.detail,
+                }
+                for c in checks
+            ],
+            "ok": not broken,
+        })
+        return 1 if broken else 0
     print(doctor_mod.format_report(checks))
-    return 1 if any(c.status == doctor_mod.BROKEN for c in checks) else 0
+    return 1 if broken else 0
 
 
 def cmd_export(args) -> int:
     store = _store()
+    # R53: the project must exist before the size line prints —
+    # the estimator sums files that exist (none for a missing
+    # project, so 0), and the old order printed the nonsense
+    # "Package size: about 0 bytes." before the real error.
+    store.get_project(args.profile, args.project)
     # T178: the size before (the estimate) and after (the real
     # package). The disk check inside export_project refuses
     # before copying when it will not fit.
     bundle = getattr(args, "bundle_dataset", False)
+    if _as_json(args):
+        # R52: the structured form — one JSON document, no size
+        # lines before or after it.
+        out = export_mod.export_project(
+            store, args.profile, args.project, args.dir,
+            bundle_dataset=bundle,
+            force=getattr(args, "force", False),
+            as_zip=getattr(args, "zip", False),
+        )
+        _print_json({
+            "kind": "project",
+            "exported": str(out),
+            "size_bytes": export_mod.package_size(out),
+        })
+        return 0
     estimate = export_mod.estimate_export_size(
         store, args.profile, args.project, bundle_dataset=bundle,
     )
@@ -290,9 +399,26 @@ def cmd_export(args) -> int:
 def cmd_export_profile(args) -> int:
     """Export a profile on its own (T86)."""
     store = _store()
+    # R53: the profile must exist before the size line prints —
+    # see cmd_export.
+    store.get_profile(args.profile)
     # T178: the size before (the estimate) and after (the real
     # package), as in cmd_export.
     include = getattr(args, "with_projects", False)
+    if _as_json(args):
+        # R52: the structured form — one JSON document.
+        out = export_mod.export_profile(
+            store, args.profile, args.dir,
+            include_projects=include,
+            force=getattr(args, "force", False),
+            as_zip=getattr(args, "zip", False),
+        )
+        _print_json({
+            "kind": "profile",
+            "exported": str(out),
+            "size_bytes": export_mod.package_size(out),
+        })
+        return 0
     estimate = export_mod.estimate_profile_export_size(
         store, args.profile, include_projects=include,
     )
@@ -315,6 +441,22 @@ def cmd_export_recipe(args) -> int:
     — dataset reference, settings, metamorph mode + notes, and
     project notes. No weights, no checkpoints."""
     store = _store()
+    # R53: the project must exist before the size line prints —
+    # see cmd_export.
+    store.get_project(args.profile, args.project)
+    if _as_json(args):
+        # R52: the structured form — one JSON document.
+        out = export_mod.export_recipe(
+            store, args.profile, args.project, args.dir,
+            force=getattr(args, "force", False),
+            as_zip=getattr(args, "zip", False),
+        )
+        _print_json({
+            "kind": "recipe",
+            "exported": str(out),
+            "size_bytes": export_mod.package_size(out),
+        })
+        return 0
     estimate = export_mod.estimate_recipe_export_size(
         store, args.profile, args.project,
     )
@@ -336,6 +478,22 @@ def cmd_export_adapter(args) -> int:
     weights + a manifest (base, rank, dataset name, training
     summary). No project record, no checkpoints."""
     store = _store()
+    # R53: the project must exist before the size line prints —
+    # see cmd_export.
+    store.get_project(args.profile, args.project)
+    if _as_json(args):
+        # R52: the structured form — one JSON document.
+        out = export_mod.export_adapter(
+            store, args.profile, args.project, args.dir,
+            force=getattr(args, "force", False),
+            as_zip=getattr(args, "zip", False),
+        )
+        _print_json({
+            "kind": "adapter",
+            "exported": str(out),
+            "size_bytes": export_mod.package_size(out),
+        })
+        return 0
     estimate = export_mod.estimate_adapter_export_size(
         store, args.profile, args.project,
     )
@@ -462,7 +620,13 @@ def cmd_import(args) -> int:
     summary = export_mod.preview_export(
         store, args.dir, installed_models=models
     )
-    print(export_mod.format_preview(summary))
+    if _as_json(args) and getattr(args, "preview", False):
+        # R52: the structured form of the preview — the summary
+        # itself, as one JSON document. Nothing is imported.
+        _print_json(summary)
+        return 0
+    if not _as_json(args):
+        print(export_mod.format_preview(summary))
     if getattr(args, "preview", False):
         return 0
     # T117: the collision choice, from the flags. Without one, a
@@ -479,6 +643,13 @@ def cmd_import(args) -> int:
         installed_models=models,
         collision=collision,
     )
+    if _as_json(args):
+        # R52: the structured form — the import result as one JSON
+        # document, with the package kind named.
+        doc = dict(result)
+        doc.setdefault("kind", summary.get("kind"))
+        _print_json(doc)
+        return 0
     if summary.get("kind") == export_mod.PROFILE_PACKAGE_KIND:
         names = result.get("projects", [])
         if names:
@@ -569,7 +740,12 @@ def cmd_import_adapter(args) -> int:
             file=sys.stderr,
         )
         return 1
-    print(export_mod.format_preview(summary))
+    if _as_json(args) and getattr(args, "preview", False):
+        # R52: the structured form of the preview — see cmd_import.
+        _print_json(summary)
+        return 0
+    if not _as_json(args):
+        print(export_mod.format_preview(summary))
     if getattr(args, "preview", False):
         return 0
     into_profile = getattr(args, "into_profile", None)
@@ -580,6 +756,12 @@ def cmd_import_adapter(args) -> int:
         installed_models=models,
         into_profile=into_profile, into_project=into_project,
     )
+    if _as_json(args):
+        # R52: the structured form — see cmd_import.
+        doc = dict(result)
+        doc.setdefault("kind", summary.get("kind"))
+        _print_json(doc)
+        return 0
     if result.get("into_existing"):
         print(
             f"Imported adapter {result['adapter']!r} into project "
@@ -623,6 +805,10 @@ def cmd_create_profile(args) -> int:
         display_name=args.display or "",
         base_ref=args.base or "",
     )
+    if _as_json(args):
+        # R52: the structured form — the created record.
+        _print_json(data)
+        return 0
     print(
         f"Created profile {data['name']!r}"
         f"{_normalized_note(args.name, data['name'])} "
@@ -642,6 +828,10 @@ def cmd_create_profile(args) -> int:
 def cmd_rename_profile(args) -> int:
     store = _store()
     data = store.rename_profile(args.old, args.new)
+    if _as_json(args):
+        # R52: the structured form — the renamed record.
+        _print_json(data)
+        return 0
     print(
         f"Renamed profile {args.old!r} to {data['name']!r}"
         f"{_normalized_note(args.new, data['name'])}"
@@ -653,9 +843,20 @@ def cmd_delete_profile(args) -> int:
     store = _store()
     if getattr(args, "purge", False):
         store.purge_profile(args.name)
+        if _as_json(args):
+            # R52: the structured form — what happened, no prose.
+            _print_json({"name": args.name, "action": "purged"})
+            return 0
         print(f"Deleted profile {args.name!r} forever.")
     else:
         trash = store.delete_profile(args.name)
+        if _as_json(args):
+            _print_json({
+                "name": args.name,
+                "action": "trashed",
+                "trash": str(trash),
+            })
+            return 0
         print(
             f"Moved profile {args.name!r} to the trash ({trash}). "
             "Move it back to undo, or delete it forever from Trash "
@@ -712,6 +913,10 @@ def cmd_update_profile(args) -> int:
         )
         return 0
     data = store.update_profile(args.name, **fields)
+    if _as_json(args):
+        # R52: the structured form — the updated record.
+        _print_json(data)
+        return 0
     print(f"Updated profile {data['name']!r}.")
     return 0
 
@@ -763,6 +968,10 @@ def cmd_show_profile(args) -> int:
 def cmd_rename_project(args) -> int:
     store = _store()
     data = store.rename_project(args.profile, args.old, args.new)
+    if _as_json(args):
+        # R52: the structured form — the renamed record.
+        _print_json(data)
+        return 0
     print(
         f"Renamed project {args.old!r} to {data['name']!r}"
         f"{_normalized_note(args.new, data['name'])}"
@@ -774,12 +983,28 @@ def cmd_delete_project(args) -> int:
     store = _store()
     if getattr(args, "purge", False):
         store.purge_project(args.profile, args.name)
+        if _as_json(args):
+            # R52: the structured form — what happened, no prose.
+            _print_json({
+                "profile": args.profile,
+                "name": args.name,
+                "action": "purged",
+            })
+            return 0
         print(
             f"Deleted project {args.name!r} from profile "
             f"{args.profile!r} forever."
         )
     else:
         trash = store.delete_project(args.profile, args.name)
+        if _as_json(args):
+            _print_json({
+                "profile": args.profile,
+                "name": args.name,
+                "action": "trashed",
+                "trash": str(trash),
+            })
+            return 0
         print(
             f"Moved project {args.name!r} to the trash ({trash}). "
             "Move it back to undo, or delete it forever from Trash "
@@ -880,6 +1105,10 @@ def cmd_update_project(args) -> int:
         )
         return 0
     data = store.update_project(args.profile, args.name, **fields)
+    if _as_json(args):
+        # R52: the structured form — the updated record.
+        _print_json(data)
+        return 0
     print(
         f"Updated project {data['name']!r} in profile {args.profile!r}."
     )
@@ -943,6 +1172,58 @@ def cmd_show_project(args) -> int:
     return 0
 
 
+def cmd_clone_profile(args) -> int:
+    """Copy a profile under a new name (R55): the engine's clone,
+    the same one the Profile window's Clone button runs — same
+    tag, base, role, config, and dependencies, no projects by
+    default (or with them, when --with-projects is passed)."""
+    store = _store()
+    data = store.clone_profile(
+        args.name, args.new_name,
+        copy_projects=getattr(args, "with_projects", False),
+    )
+    if _as_json(args):
+        # R52: the structured form — the cloned record (including
+        # skipped_damaged_projects when a project could not be
+        # copied).
+        _print_json(data)
+        return 0
+    print(
+        f"Cloned profile {args.name!r} as {data['name']!r}"
+        f"{_normalized_note(args.new_name, data['name'])}."
+    )
+    # R40: a clone that skipped damaged projects says so — the
+    # copy is incomplete, and "Cloned" alone would be a lie.
+    skipped = data.get("skipped_damaged_projects") or []
+    if skipped:
+        names = ", ".join(s["name"] for s in skipped)
+        print(
+            f"Warning: {len(skipped)} project(s) could not be copied "
+            f"because their records are damaged ({names}). "
+            "The originals are untouched."
+        )
+    return 0
+
+
+def cmd_clone_project(args) -> int:
+    """Copy a project under a new name (R55): the engine's clone,
+    the same one the Project window's Clone button runs — same
+    dataset, settings, and metamorph mode, zero checkpoints, no
+    adapter, and fresh notes with a "cloned from" line."""
+    store = _store()
+    data = store.clone_project(args.profile, args.name, args.new_name)
+    if _as_json(args):
+        # R52: the structured form — the cloned record.
+        _print_json(data)
+        return 0
+    print(
+        f"Cloned project {args.name!r} as {data['name']!r}"
+        f"{_normalized_note(args.new_name, data['name'])} "
+        f"in profile {args.profile!r}."
+    )
+    return 0
+
+
 def cmd_train(args) -> int:
     import signal
 
@@ -967,7 +1248,10 @@ def cmd_train(args) -> int:
     if health["status"] in ("missing", "invalid"):
         print(f"stella: {health['error']}", file=sys.stderr)
         return 1
-    if health["status"] == "ok":
+    # R52: under --json the dry-run branch below prints one JSON
+    # document, so the dataset lines stay silent here — a prose
+    # line ahead of the document would break a script's parse.
+    if health["status"] == "ok" and not _as_json(args):
         print(
             f"Dataset: {health['count']} examples "
             f"({health['format']} format, about "
@@ -989,6 +1273,12 @@ def cmd_train(args) -> int:
             dataset_path=args.dataset, base_ref=args.base,
             cli=True,
         )
+        if _as_json(args):
+            # R52: the structured form — the estimate itself. A
+            # real run refuses --json (see main()); the dry run is
+            # a report, so it honours it.
+            _print_json(estimate)
+            return 0
         print(format_estimate(estimate))
         return 0
     # Governing-seat warning (T116): a profile bound for a
@@ -1198,9 +1488,26 @@ def cmd_export_gguf(args) -> int:
 
 
 def cmd_probe(args) -> int:
-    from .probe import probe_gate, probe_project
+    # R68: the CLI auto-detects like the GUI (T90) — a governing
+    # profile is gated, every other profile probes
+    # informationally. --informational forces informational on a
+    # governing profile; --gate forces the gate on a
+    # non-governing one. A missing profile is left for
+    # probe_project to report (it raises the same clean error).
+    from .probe import is_governing_profile, probe_gate, probe_project
 
     store = _store()
+    if args.informational:
+        informational = True
+    elif getattr(args, "gate", False):
+        informational = False
+    else:
+        try:
+            informational = not is_governing_profile(
+                store.get_profile(args.profile)
+            )
+        except StellaError:
+            informational = False
 
     def on_event(event: dict):
         # T109: a line when each pass starts, so a probe that loads
@@ -1217,7 +1524,7 @@ def cmd_probe(args) -> int:
 
     result = probe_project(
         store, args.profile, args.project,
-        informational=args.informational,
+        informational=informational,
         on_event=on_event,
     )
     if _as_json(args):
@@ -1227,7 +1534,7 @@ def cmd_probe(args) -> int:
         # and the exit code still carries it, as in the human
         # form below.
         _print_json(result)
-        if args.informational:
+        if informational:
             return 0
         passed, message = probe_gate(result)
         print(message, file=sys.stderr)
@@ -1255,7 +1562,7 @@ def cmd_probe(args) -> int:
     )
     if result.get("probe_set_note"):
         print(f"Note: {result['probe_set_note']}")
-    if args.informational:
+    if informational:
         # T90: informational mode reports the counts and the
         # change, no pass/fail verdict — and exits 0 regardless
         # of what the change was.
@@ -1303,6 +1610,10 @@ def cmd_create_project(args) -> int:
         display_name=args.display or "",
         **kwargs,
     )
+    if _as_json(args):
+        # R52: the structured form — the created record.
+        _print_json(data)
+        return 0
     print(
         f"Created project {data['name']!r}"
         f"{_normalized_note(args.name, data['name'])} "
@@ -1461,8 +1772,14 @@ def cmd_sleep_status(args) -> int:
             print(
                 f"cycle {c['cycle']}: {c['status']}, "
                 f"{c['real_rows']} new rows, {c['dreamed_rows']} dreamed, "
-                f"{c['steps']} steps, old-loss delta {delta_text}"
+                f"{c['steps']} steps, old-loss delta {delta_text}, "
+                f"{_fmt_size(c.get('size_bytes') or 0)}"
             )
+        # R66: what all the cycles cost together.
+        print(
+            f"Sleep cycles use {_fmt_size(status.get('total_size_bytes') or 0)} "
+            f"on disk ({len(cycles)} cycle{'s' if len(cycles) != 1 else ''})."
+        )
     # R8: a cycle whose input file is gone cannot be recovered —
     # say so plainly, with what happens next (its rows sleep again
     # in a later cycle; its adapter stays on disk).
@@ -1484,6 +1801,45 @@ def cmd_sleep_status(args) -> int:
             f"{status['slept_rows']} rows slept on "
             "(no dataset set, so unslept rows are unknown)."
         )
+    return 0
+
+
+def cmd_sleep_delete(args) -> int:
+    """Delete one sleep cycle for good (R66)."""
+    from .sleep import delete_sleep_cycle
+
+    store = _store()
+    result = delete_sleep_cycle(
+        store, args.profile, args.project, args.cycle
+    )
+    print(
+        f"Deleted sleep cycle {result['cycle']}, freed "
+        f"{_fmt_size(result['freed_bytes'])}."
+    )
+    return 0
+
+
+def cmd_sleep_prune(args) -> int:
+    """Delete all but the newest N sleep cycles (R66)."""
+    from .sleep import prune_sleep_cycles
+
+    store = _store()
+    result = prune_sleep_cycles(
+        store, args.profile, args.project, keep=args.keep
+    )
+    if not result["deleted"]:
+        print(
+            f"Nothing to prune: {len(result['kept'])} cycle"
+            f"{'s' if len(result['kept']) != 1 else ''} kept, "
+            f"keeping the newest {args.keep}."
+        )
+        return 0
+    print(
+        f"Pruned {len(result['deleted'])} sleep cycle"
+        f"{'s' if len(result['deleted']) != 1 else ''}, freed "
+        f"{_fmt_size(result['freed_bytes'])}. Sleep cycles now use "
+        f"{_fmt_size(result['total_after'])}."
+    )
     return 0
 
 
@@ -1509,13 +1865,17 @@ def cmd_chat(args) -> int:
             elif PROVIDERS[provider]["models"]:
                 model = PROVIDERS[provider]["models"][0]
         if not model:
+            # R54: the pre-flight failures go to stderr, not
+            # stdout — they are errors, and a script reading
+            # stdout should not have to tell them from output.
             print(
                 "Custom provider needs a model name. Pass --model "
-                "<name>, or set one in Settings under AI providers."
+                "<name>, or set one in Settings under AI providers.",
+                file=sys.stderr,
             )
             return 1
         if not has_key(store.home, provider):
-            print(missing_key_message(provider))
+            print(missing_key_message(provider), file=sys.stderr)
             return 1
     if not model:
         models = list_models()
@@ -1523,7 +1883,8 @@ def cmd_chat(args) -> int:
             print(
                 "Ollama is not answering, so I cannot see which models "
                 "are installed. Start Ollama and try again, or pass "
-                "--model <tag>."
+                "--model <tag>.",
+                file=sys.stderr,
             )
             return 1
         print("Which model should I chat with?")
@@ -1535,7 +1896,7 @@ def cmd_chat(args) -> int:
             print()
             return 0
         if picked not in models:
-            print(f"No model called {picked!r}.")
+            print(f"No model called {picked!r}.", file=sys.stderr)
             return 1
         model = picked
     # R14: the CLI chat used to go silent for the whole run — the
@@ -1624,9 +1985,122 @@ def cmd_requant(args) -> int:
 
 
 def cmd_bridge(args) -> int:
-    from .ollama_bridge import format_bridge_report
+    from .ollama_bridge import (
+        format_bridge_report,
+        modelfile_blob_hint,
+        suggest_hf_repos,
+    )
 
+    if _as_json(args):
+        # R52: the structured form — the candidate repos, as one
+        # JSON document.
+        _print_json({
+            "tag": args.tag,
+            "suggestions": suggest_hf_repos(args.tag),
+            "hint": modelfile_blob_hint(args.tag),
+        })
+        return 0
     print(format_bridge_report(args.tag))
+    return 0
+
+
+def _key_provider(raw: str) -> str:
+    """The keyed provider a key command names (R54): groq, gemini,
+    or custom. Ollama needs no key, and anything else is refused
+    in plain words."""
+    from .providers import KEYED_PROVIDERS
+
+    provider = (raw or "").strip().lower()
+    if provider == "ollama":
+        raise StellaError("Ollama runs on this PC and needs no key.")
+    if provider not in KEYED_PROVIDERS:
+        raise StellaError(
+            f"no keyed provider called {raw!r} "
+            "(groq, gemini, or custom)"
+        )
+    return provider
+
+
+def _read_key_secret(prompt: str) -> str:
+    """Read a key without showing it (R54): getpass on a terminal,
+    one line from stdin when piped (a script feeding a key). The
+    key is never echoed and never printed back."""
+    if sys.stdin.isatty():
+        import getpass
+
+        try:
+            return getpass.getpass(prompt)
+        except (EOFError, KeyboardInterrupt):
+            return ""
+    try:
+        return sys.stdin.readline().strip()
+    except (EOFError, KeyboardInterrupt):
+        return ""
+
+
+def cmd_save_key(args) -> int:
+    """Save a cloud provider key from the CLI (R54): the same
+    0600 providers.json the Settings window writes, so cloud chat
+    works from the terminal too. For custom, --base-url and
+    --model set the address and model name alongside the key."""
+    from .providers import PROVIDERS, save_key
+
+    store = _store()
+    provider = _key_provider(args.provider)
+    display = PROVIDERS[provider]["display"]
+    key = _read_key_secret(f"Paste the {display} key: ")
+    if not key:
+        print("stella: paste a key first.", file=sys.stderr)
+        return 1
+    save_key(
+        store.home, provider, key,
+        base_url=getattr(args, "base_url", "") or "",
+        model=getattr(args, "model", "") or "",
+    )
+    if _as_json(args):
+        # R52: the structured form — the provider and the fact it
+        # saved, never the key itself.
+        _print_json({"provider": provider, "saved": True})
+        return 0
+    print(f"Saved the {display} key.")
+    return 0
+
+
+def cmd_list_keys(args) -> int:
+    """Which providers have a key saved (R54): status words only,
+    never the keys themselves."""
+    from .providers import PROVIDERS, provider_presence
+
+    store = _store()
+    presence = provider_presence(store.home)
+    if _as_json(args):
+        # R52: the structured form — status words per provider.
+        _print_json(presence)
+        return 0
+    for pid, status in presence.items():
+        print(f"{PROVIDERS[pid]['display']}: {status}.")
+    return 0
+
+
+def cmd_remove_key(args) -> int:
+    """Forget a saved provider key (R54). No error when none was
+    saved — it just says so."""
+    from .providers import PROVIDERS, has_key, remove_key
+
+    store = _store()
+    provider = _key_provider(args.provider)
+    had = has_key(store.home, provider)
+    remove_key(store.home, provider)
+    display = PROVIDERS[provider]["display"]
+    if _as_json(args):
+        # R52: the structured form — whether a key was there to
+        # remove.
+        _print_json({"provider": provider, "removed": had})
+        return 0
+    if had:
+        print(f"Removed the {display} key.")
+    else:
+        print(f"No {display} key was saved.")
     return 0
 
 
@@ -1783,8 +2257,9 @@ def _global_flags_parser() -> argparse.ArgumentParser:
     parent = argparse.ArgumentParser(add_help=False)
     parent.add_argument(
         "--json", action="store_true", default=argparse.SUPPRESS,
-        help="print the result as JSON, for scripts (list, show, "
-        "probe, sleep-status, and verify commands).",
+        help="print the result as JSON, for scripts (not on train, "
+        "sleep, distill, export-gguf, requant, pull-weights, or "
+        "chat, which print progress as they run).",
     )
     parent.add_argument(
         "--quiet", action="store_true", default=argparse.SUPPRESS,
@@ -1810,8 +2285,9 @@ def build_parser() -> argparse.ArgumentParser:
     # the False defaults; the subcommands SUPPRESS theirs.
     parser.add_argument(
         "--json", action="store_true", default=False,
-        help="print the result as JSON, for scripts (list, show, "
-        "probe, sleep-status, and verify commands).",
+        help="print the result as JSON, for scripts (not on train, "
+        "sleep, distill, export-gguf, requant, pull-weights, or "
+        "chat, which print progress as they run).",
     )
     parser.add_argument(
         "--quiet", action="store_true", default=False,
@@ -2126,6 +2602,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("name", help="profile name, e.g. lfm3-tool")
     p.set_defaults(func=cmd_show_profile)
 
+    p = _cmd("clone-profile", "copy a profile under a new name",
+             "examples:\n"
+             "  stella clone-profile lfm3-tool lfm3-tool-2\n"
+             "  stella clone-profile lfm3-tool lfm3-tool-2 "
+             "--with-projects")
+    p.add_argument("name", help="profile name, e.g. lfm3-tool")
+    p.add_argument("new_name", metavar="new-name",
+                   help="name for the copy, e.g. lfm3-tool-2")
+    p.add_argument(
+        "--with-projects", action="store_true",
+        help="copy the profile's projects too (each copy starts "
+        "with no checkpoints and fresh notes). Without it, the "
+        "copy has no projects.",
+    )
+    p.set_defaults(func=cmd_clone_profile)
+
     p = _cmd("rename-project", "rename a project",
              "examples:\n"
              "  stella rename-project lfm3-tool tool-calls tool-calls-2")
@@ -2170,6 +2662,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("profile", help="profile name, e.g. lfm3-tool")
     p.add_argument("name", help="project name, e.g. tool-calls")
     p.set_defaults(func=cmd_show_project)
+
+    p = _cmd("clone-project", "copy a project under a new name",
+             "examples:\n"
+             "  stella clone-project lfm3-tool tool-calls "
+             "tool-calls-2")
+    p.add_argument("profile", help="profile name, e.g. lfm3-tool")
+    p.add_argument("name", help="project name, e.g. tool-calls")
+    p.add_argument("new_name", metavar="new-name",
+                   help="name for the copy, e.g. tool-calls-2")
+    p.set_defaults(func=cmd_clone_project)
 
     p = _cmd(
         "train", "LoRA-tune a project on CPU",
@@ -2241,8 +2743,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--informational", action="store_true",
         help="informational mode: report the before/after counts "
         "and the change with no pass/fail verdict, and exit 0 "
-        "regardless. Without it the probe is a gate: a failed "
-        "gate exits 3.",
+        "regardless. Without it the probe is a gate for a "
+        "governing-seat profile (a failed gate exits 3) and "
+        "informational for every other profile, the same as the "
+        "window.",
+    )
+    p.add_argument(
+        "--gate", action="store_true",
+        help="force the gate on a profile that is not bound for a "
+        "governing seat: a failed gate exits 3. Without it, a "
+        "non-governing profile probes informationally.",
     )
     p.set_defaults(func=cmd_probe)
 
@@ -2277,6 +2787,25 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("project", help="project name, e.g. tool-calls")
     p.set_defaults(func=cmd_sleep_status)
 
+    p = _cmd("sleep-delete", "delete one sleep cycle for good",
+             "examples:\n  stella sleep-delete lfm3-tool tool-calls 1")
+    p.add_argument("profile", help="profile name, e.g. lfm3-tool")
+    p.add_argument("project", help="project name, e.g. tool-calls")
+    p.add_argument("cycle", type=int, help="cycle number, e.g. 1")
+    p.set_defaults(func=cmd_sleep_delete)
+
+    p = _cmd("sleep-prune", "delete all but the newest sleep cycles",
+             "examples:\n  stella sleep-prune lfm3-tool tool-calls\n"
+             "  stella sleep-prune lfm3-tool tool-calls --keep 2")
+    p.add_argument("profile", help="profile name, e.g. lfm3-tool")
+    p.add_argument("project", help="project name, e.g. tool-calls")
+    p.add_argument(
+        "--keep", type=int, default=3,
+        help="how many of the newest cycles to keep (default 3); "
+        "the rest are deleted for good",
+    )
+    p.set_defaults(func=cmd_sleep_prune)
+
     p = _cmd(
         "chat",
         "talk to Stella: the chat sets up and runs training "
@@ -2295,6 +2824,47 @@ def build_parser() -> argparse.ArgumentParser:
                    "(ollama), or a cloud provider with your key "
                    "(groq, gemini, custom)")
     p.set_defaults(func=cmd_chat)
+
+    p = _cmd(
+        "save-key",
+        "save a cloud provider key, typed without showing it",
+        "examples:\n"
+        "  stella save-key groq\n"
+        "  stella save-key custom --base-url https://example.com/v1 "
+        "--model my-model",
+    )
+    p.add_argument(
+        "provider",
+        help="provider to save a key for: groq, gemini, or custom",
+    )
+    p.add_argument(
+        "--base-url", default="",
+        help="for custom: the provider's address "
+        "(e.g. https://example.com/v1)",
+    )
+    p.add_argument(
+        "--model", default="",
+        help="for custom: the model name to chat with",
+    )
+    p.set_defaults(func=cmd_save_key)
+
+    p = _cmd(
+        "list-keys",
+        "which providers have a key saved (never the keys)",
+        "examples:\n  stella list-keys",
+    )
+    p.set_defaults(func=cmd_list_keys)
+
+    p = _cmd(
+        "remove-key",
+        "forget a saved provider key",
+        "examples:\n  stella remove-key groq",
+    )
+    p.add_argument(
+        "provider",
+        help="provider to forget the key for: groq, gemini, or custom",
+    )
+    p.set_defaults(func=cmd_remove_key)
 
     p = _cmd(
         "requant",
@@ -2443,6 +3013,18 @@ def main(argv: list[str] | None = None) -> int:
         # error — a first-time user gets the manual, not an error.
         parser.print_help()
         return 0
+    # R52: --json is honoured or refused, never silently ignored.
+    # The gate is closed by default: a command prints JSON only
+    # when it is in JSON_COMMANDS (or is a train dry run, whose
+    # estimate is a report). Anything else is refused here, before
+    # it can print a line of plain text with exit 0.
+    if _as_json(args):
+        command = getattr(args, "command", "")
+        dry_run = (
+            command == "train" and bool(getattr(args, "dry_run", False))
+        )
+        if command not in JSON_COMMANDS and not dry_run:
+            return _refuse_json(command)
     try:
         return args.func(args)
     except StellaError as exc:

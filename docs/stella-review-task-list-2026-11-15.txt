@@ -1,8 +1,7 @@
 STELLA - task list from the full review, 2026-11-15
 
-129 tasks: 46 done, 77 to do, 6 gated. 0 urgent. 23 important, 52 correctness and polish, 54 nice to have.
+129 tasks: 71 done, 53 to do, 5 gated. 0 urgent. 23 important, 52 correctness and polish, 54 nice to have.
 The 5 marked (needs your PC) can only be done on your machine.
-The 1 marked (needs your call) is a design choice for you.
 Full detail for every task - evidence, what to fix, what done looks like -
 is in stella-review-task-list-2026-11-15.md in this same folder.
 
@@ -62,30 +61,30 @@ R48. Tool JSON in a json fence, or unclosed, is shown as raw text and never runs
 R49. The template walk is prompt-only: the agent never tracks which step it is on [DONE]
 R50. Every model call re-fetches the Ollama model list, up to 12 tag fetches per loop [DONE]
 R51. The curated model lists have no freshness mechanism: they rotted silently [DONE]
-R52. --json is silently ignored on about 25 commands
-R53. Export commands print "Package size: about 0 bytes." before failing on a missing profile
-R54. Chat's pre-flight failures print to stdout, and there is no CLI way to save a provider key
-R55. There is no CLI for cloning a profile or a project, though the engine and GUI both have it
-R56. The nameless-profile warning says the row shows "(unnamed profile)" when it shows the display name
-R57. The installer's Qt-failure advice never names the package to install
-R58. The doctor repairs launch files for a folder whose venv is broken
-R59. Uninstall removes the launcher and symlink without checking they point at this install
-R60. With no network, the base install waits minutes in silence
-R61. The training install's 3 GB preflight understates the real ~4 GB+ peak
-R62. The training download has no resume
-R63. There is no click-only uninstall
-R64. The probe judge still misjudges 9 of 11 new edge cases
-R65. The probe gate is relative-only and trusts the caller's delta
-R66. Sleep cycles pile up with no delete, prune, or size anywhere
-R67. The governing-seat warning only fires for marked profiles, not role-only ones
-R68. The CLI gates everyone by default while the GUI auto-selects: the two disagree
-R69. README refresh: stale prompt count, missing flags, and the LFM3 probe called "informational"
-R70. How to Use refresh: wrong governing seats, stale prompt count, missing topics, and more
-R71. The v0.24 test fixture opens the real ~/.stella store and real settings
-R72. The HEAD and ranged-GET download helpers are never really executed
-R73. 12 of 30 plain-words error-map entries are untested
-R74. Test fixture teardown does not wait for jobs, so a worker can leak into the next test
-R75. Resume is enabled with nothing to resume, and never offered after a pause or crash
+R52. --json is silently ignored on about 25 commands [DONE]
+R53. Export commands print "Package size: about 0 bytes." before failing on a missing profile [DONE]
+R54. Chat's pre-flight failures print to stdout, and there is no CLI way to save a provider key [DONE]
+R55. There is no CLI for cloning a profile or a project, though the engine and GUI both have it [DONE]
+R56. The nameless-profile warning says the row shows "(unnamed profile)" when it shows the display name [DONE]
+R57. The installer's Qt-failure advice never names the package to install [DONE]
+R58. The doctor repairs launch files for a folder whose venv is broken [DONE]
+R59. Uninstall removes the launcher and symlink without checking they point at this install [DONE]
+R60. With no network, the base install waits minutes in silence [DONE]
+R61. The training install's 3 GB preflight understates the real ~4 GB+ peak [DONE]
+R62. The training download has no resume [DONE]
+R63. There is no click-only uninstall [DONE]
+R64. The probe judge still misjudges 9 of 11 new edge cases [DONE]
+R65. The probe gate is relative-only and trusts the caller's delta [DONE]
+R66. Sleep cycles pile up with no delete, prune, or size anywhere [DONE]
+R67. The governing-seat warning only fires for marked profiles, not role-only ones [DONE]
+R68. The CLI gates everyone by default while the GUI auto-selects: the two disagree [DONE]
+R69. README refresh: stale prompt count, missing flags, and the LFM3 probe called "informational" [DONE]
+R70. How to Use refresh: wrong governing seats, stale prompt count, missing topics, and more [DONE]
+R71. The v0.24 test fixture opens the real ~/.stella store and real settings [DONE]
+R72. The HEAD and ranged-GET download helpers are never really executed [DONE]
+R73. 12 of 30 plain-words error-map entries are untested [DONE]
+R74. Test fixture teardown does not wait for jobs, so a worker can leak into the next test [DONE]
+R75. Resume is enabled with nothing to resume, and never offered after a pause or crash [DONE]
 
 P3 - NICE TO HAVE
 
@@ -105,7 +104,7 @@ R88. settings_source is silently lost on a round-trip (auto becomes manual)
 R89. The LFM3 template still carries a dead settings["notes"] key
 R90. CLI --purge has no prompt
 R91. The trash shows no size and has no auto-purge age
-R92. How to Use opens on an empty pane, not Getting started (needs your call)
+R92. How to Use opens on an empty pane, not Getting started [DONE]
 R93. A picked job cannot be un-picked; Go stays armed
 R94. No Quit in the File menu, no Ctrl+Q
 R95. The finish moment lasts 250 ms: too brief to read

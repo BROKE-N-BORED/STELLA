@@ -62,6 +62,71 @@ from stella.tool_errors import translate_tool_error
             "file the tool needed is missing",
             "llama.cpp install",
         ),
+        # R73: the 12 entries the audit found untested — each raw
+        # string matches only its own entry (first-match-wins:
+        # "invalid quantization" also matches the earlier
+        # "invalid quant" entry, with the same message — the
+        # behaviour is pinned either way).
+        (
+            "error: requantize is disabled for this file",
+            "already quantized",
+            "too old",
+        ),
+        (
+            "llama_quantize: requantizing is disabled",
+            "already quantized",
+            "too old",
+        ),
+        (
+            "llama_quantize: invalid quant Q9_ZZ",
+            "not one the quantizer knows",
+            "Q4_K_M",
+        ),
+        (
+            "llama_quantize: invalid quantization type",
+            "not one the quantizer knows",
+            "Q4_K_M",
+        ),
+        (
+            "convert: invalid gguf, cannot read header",
+            "could not be read",
+            "broken download",
+        ),
+        (
+            "bad magic in file header",
+            "could not be read",
+            "broken download",
+        ),
+        (
+            "write failed: ENOSPC",
+            "disk ran out of space",
+            "Free some disk space",
+        ),
+        (
+            "open failed: Operation not permitted",
+            "could not write",
+            "permissions",
+        ),
+        (
+            "could not connect to Ollama",
+            "Ollama is not answering",
+            "Start Ollama",
+        ),
+        (
+            "failed to connect to localhost:11434",
+            "Ollama is not answering",
+            "Start Ollama",
+        ),
+        (
+            "connection reset by peer",
+            "Ollama is not answering",
+            "Start Ollama",
+        ),
+        (
+            "fork failed: Cannot allocate memory",
+            "ran out of memory",
+            "Close other programs",
+        ),
     ],
 )
 def test_each_mapped_error_translates(raw, plain, action):

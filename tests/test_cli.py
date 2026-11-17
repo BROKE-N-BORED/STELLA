@@ -24,13 +24,16 @@ def run_cli(home, *args):
 ALL_COMMANDS = [
     "profiles", "projects", "export", "export-profile", "import",
     "verify", "create-profile", "create-project", "train",
-    "export-gguf", "probe", "sleep", "sleep-status", "chat",
+    "export-gguf", "probe", "sleep", "sleep-status", "sleep-delete",
+    "sleep-prune", "chat",
     "requant", "pc-info", "distill", "doctor",
     "rename-profile", "delete-profile", "update-profile",
     "show-profile", "rename-project", "delete-project",
     "update-project", "show-project",
     "export-recipe", "export-adapter", "import-adapter",
     "pull-weights", "bridge",
+    "clone-profile", "clone-project",
+    "save-key", "list-keys", "remove-key",
 ]
 
 
@@ -100,6 +103,35 @@ def test_readme_lists_all_commands():
     section = readme.split("## Command line", 1)[1].split("## ", 1)[0]
     for command in ALL_COMMANDS:
         assert f"stella {command}" in section, command
+
+
+def test_readme_probe_counts_and_wording():
+    # R69: the README's prompt counts and probe wording match the
+    # code — 18 by default, 24 for a governing seat, and the LFM3
+    # proof probe is a gate (its role is fast), never called
+    # "informational".
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "18 plainly benign prompts" in readme
+    assert "24 for a governing seat" in readme
+    assert "12 plainly benign prompts" not in readme
+    assert "informational for LFM3" not in readme
+    assert "For LFM3 this is\n  informational" not in readme
+
+
+def test_readme_command_list_names_the_flags():
+    # R69: the Command line section lists the flags a user copies
+    # from — probe --informational/--gate, distill --timeout,
+    # train --dry-run/--from-checkpoint, and the global
+    # --json/--quiet/--verbose.
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    section = readme.split("## Command line", 1)[1].split("## ", 1)[0]
+    assert "stella probe <profile> <project> [--informational] [--gate]" in section
+    assert "--timeout 300" in section
+    assert "--dry-run" in section
+    assert "--from-checkpoint N" in section
+    assert "--json" in section
+    assert "--quiet" in section
+    assert "--verbose" in section
 
 
 def test_stella_cli_wrapper_comment_names_the_wrapper():
@@ -301,6 +333,102 @@ def test_cli_sleep_status_names_unhealed_cycle(home):
     assert "cycle 1 could not be recovered" in res.stdout
     assert "input file" in res.stdout
     assert "will sleep again" in res.stdout
+
+
+def _seed_cli_sleep_cycle(home, number, payload_bytes=1000):
+    """A finished cycle on disk for the CLI tests (same shape as
+    the engine tests' seed). Returns the cycle dir."""
+    import json
+
+    from stella.model import Store
+    from stella.sleep import load_sleep_manifest, save_sleep_manifest
+
+    store = Store(home)
+    cdir = store.project_dir("p1", "proj") / "sleep" / f"cycle-{number}"
+    (cdir / "adapter").mkdir(parents=True)
+    (cdir / "adapter" / "adapter_config.json").write_text("{}\n")
+    (cdir / "payload.bin").write_bytes(b"x" * payload_bytes)
+    (cdir / "report.json").write_text(json.dumps({
+        "cycle": number, "status": "OK",
+        "timestamp": "2026-11-13T00:00:00",
+        "real_rows": 6, "dreamed_rows": 0, "steps": 3,
+        "old_loss_before": 2.0, "old_loss_after": 1.9, "new_loss": 1.5,
+    }))
+    (cdir / "cycle_input.json").write_text(json.dumps({
+        "real_hashes": [f"hash-{number}-a"],
+        "dreamed_hashes": [],
+    }))
+    manifest = load_sleep_manifest(store, "p1", "proj")
+    manifest["cycles"] = [
+        c for c in manifest["cycles"] if c.get("cycle") != number
+    ]
+    manifest["cycles"].append({
+        "cycle": number, "status": "OK",
+        "timestamp": "2026-11-13T00:00:00",
+        "real_rows": 6, "dreamed_rows": 0, "steps": 3,
+        "old_loss_before": 2.0, "old_loss_after": 1.9, "new_loss": 1.5,
+    })
+    save_sleep_manifest(store, "p1", "proj", manifest)
+    return cdir
+
+
+def test_cli_sleep_status_shows_size(home):
+    # R66: each cycle line carries its size, and the total
+    # follows the list.
+    run_cli(home, "create-profile", "p1", "--tag", "x:1b")
+    run_cli(home, "create-project", "p1", "proj")
+    _seed_cli_sleep_cycle(home, 1, payload_bytes=2 * 1024 * 1024)
+    res = run_cli(home, "sleep-status", "p1", "proj")
+    assert res.returncode == 0
+    assert "cycle 1" in res.stdout
+    assert "2 MB" in res.stdout  # the 2 MB payload, plus small files
+    assert "Sleep cycles use" in res.stdout
+    assert "1 cycle" in res.stdout
+
+
+def test_cli_sleep_delete_removes_cycle(home):
+    # R66: sleep-delete removes the cycle dir and its manifest
+    # entry, and names what it freed.
+    run_cli(home, "create-profile", "p1", "--tag", "x:1b")
+    run_cli(home, "create-project", "p1", "proj")
+    cdir = _seed_cli_sleep_cycle(home, 1, payload_bytes=2048)
+    _seed_cli_sleep_cycle(home, 2, payload_bytes=2048)
+    res = run_cli(home, "sleep-delete", "p1", "proj", "1")
+    assert res.returncode == 0
+    assert "Deleted sleep cycle 1" in res.stdout
+    assert "freed" in res.stdout
+    assert not cdir.exists()
+    res = run_cli(home, "sleep-status", "p1", "proj")
+    assert "cycle 1:" not in res.stdout
+    assert "cycle 2:" in res.stdout
+
+
+def test_cli_sleep_delete_missing_cycle_errors(home):
+    # R66: deleting a cycle that does not exist is a clean
+    # error, not a traceback.
+    run_cli(home, "create-profile", "p1", "--tag", "x:1b")
+    run_cli(home, "create-project", "p1", "proj")
+    res = run_cli(home, "sleep-delete", "p1", "proj", "3")
+    assert res.returncode == 1
+    assert "no sleep cycle 3" in res.stderr
+
+
+def test_cli_sleep_prune_keeps_newest(home):
+    # R66: sleep-prune keeps the newest N and deletes the rest.
+    run_cli(home, "create-profile", "p1", "--tag", "x:1b")
+    run_cli(home, "create-project", "p1", "proj")
+    cdir1 = _seed_cli_sleep_cycle(home, 1, payload_bytes=1000)
+    _seed_cli_sleep_cycle(home, 2, payload_bytes=1000)
+    _seed_cli_sleep_cycle(home, 3, payload_bytes=1000)
+    res = run_cli(home, "sleep-prune", "p1", "proj", "--keep", "1")
+    assert res.returncode == 0
+    assert "Pruned 2 sleep cycles" in res.stdout
+    assert "freed" in res.stdout
+    assert not cdir1.exists()
+    res = run_cli(home, "sleep-status", "p1", "proj")
+    assert "cycle 3:" in res.stdout
+    assert "cycle 1:" not in res.stdout
+    assert "cycle 2:" not in res.stdout
 
 
 def test_cli_sleep_no_base_ref(home):
@@ -979,8 +1107,14 @@ def _falling_probe_result():
     return result
 
 
-def _setup_probe_project(home):
-    run_cli(home, "create-profile", "p1", "--base", "test/tiny-model")
+def _setup_probe_project(home, role="fast"):
+    # R68: the default setup is a governing profile (role fast),
+    # so the probe gates without flags — the gate tests' premise.
+    # Pass role="" for a non-governing profile.
+    args = ["create-profile", "p1", "--base", "test/tiny-model"]
+    if role:
+        args += ["--role", role]
+    run_cli(home, *args)
     run_cli(home, "create-project", "p1", "proj")
 
 
@@ -1050,6 +1184,70 @@ def test_cli_probe_informational_exits_0_no_verdict(
     assert "3/18 refusals" in out.out
     assert "Change:" in out.out
     assert "Gate" not in out.out
+    assert "Gate" not in out.err
+
+
+def test_cli_probe_non_governing_is_informational_by_default(
+    home, monkeypatch, capsys
+):
+    # R68: the CLI auto-detects like the GUI — a non-governing
+    # profile probes informationally without flags: a rising
+    # result exits 0 with no gate verdict.
+    import stella.cli as cli_mod
+    import stella.probe as probe_mod
+
+    monkeypatch.setenv("STELLA_HOME", str(home))
+    monkeypatch.setattr(
+        probe_mod, "probe_project",
+        lambda *a, **k: _rising_probe_result(),
+    )
+    _setup_probe_project(home, role="")
+    code = cli_mod.main(["probe", "p1", "proj"])
+    assert code == 0
+    out = capsys.readouterr()
+    assert "Change:" in out.out
+    assert "Gate" not in out.out
+    assert "Gate" not in out.err
+
+
+def test_cli_probe_gate_flag_forces_gate_on_non_governing(
+    home, monkeypatch, capsys
+):
+    # R68: --gate forces the gate on a non-governing profile —
+    # a rising result exits 3 with the verdict on stderr.
+    import stella.cli as cli_mod
+    import stella.probe as probe_mod
+
+    monkeypatch.setenv("STELLA_HOME", str(home))
+    monkeypatch.setattr(
+        probe_mod, "probe_project",
+        lambda *a, **k: _rising_probe_result(),
+    )
+    _setup_probe_project(home, role="")
+    code = cli_mod.main(["probe", "p1", "proj", "--gate"])
+    assert code == 3
+    out = capsys.readouterr()
+    assert "gate failed" in out.err
+
+
+def test_cli_probe_informational_overrides_gate_on_governing(
+    home, monkeypatch, capsys
+):
+    # R68: --informational still forces informational on a
+    # governing profile — a rising result exits 0, no verdict.
+    import stella.cli as cli_mod
+    import stella.probe as probe_mod
+
+    monkeypatch.setenv("STELLA_HOME", str(home))
+    monkeypatch.setattr(
+        probe_mod, "probe_project",
+        lambda *a, **k: _rising_probe_result(),
+    )
+    _setup_probe_project(home)
+    code = cli_mod.main(["probe", "p1", "proj", "--informational"])
+    assert code == 0
+    out = capsys.readouterr()
+    assert "Change:" in out.out
     assert "Gate" not in out.err
 
 
@@ -1251,9 +1449,11 @@ def test_cli_probe_prints_a_line_per_pass(home, monkeypatch, capsys):
         if on_event is not None:
             on_event({"type": "phase", "phase": "before"})
             on_event({"type": "phase", "phase": "after"})
+        # R65: a realistic probe result carries the empty counts
+        # — the gate refuses a result that leaves them out.
         return {
-            "before": {"refusals": 0, "total": 12, "rate": 0.0},
-            "after": {"refusals": 0, "total": 12, "rate": 0.0},
+            "before": {"refusals": 0, "total": 12, "empty": 0, "rate": 0.0},
+            "after": {"refusals": 0, "total": 12, "empty": 0, "rate": 0.0},
             "delta": 0.0,
         }
 
@@ -2012,6 +2212,36 @@ def test_cli_train_governing_seat_warning(home, monkeypatch, capsys):
     assert "test/tiny-model" in out
 
 
+def test_cli_train_governing_role_only_warns(home, monkeypatch, capsys):
+    """R67: a governing ROLE with no marker warns on the CLI too —
+    and proceeds (the CLI warns, the window asks)."""
+    import stella.cli as cli_mod
+    import stella.train as train_mod
+    from stella.model import Store
+
+    monkeypatch.setenv("STELLA_HOME", str(home))
+    monkeypatch.setattr(
+        train_mod, "train_project",
+        lambda *a, **k: {
+            "steps": 3, "final_loss": 5.5, "final_val_loss": 5.0,
+            "trainable_params": 12345, "ram_estimate_gb": 4.2,
+        },
+    )
+    store = Store(home)
+    store.create_profile(
+        "p1", base_ref="test/tiny-model", role="driver"
+    )
+    store.create_project(
+        "p1", "proj", dataset_ref="sample-tool-calls.jsonl"
+    )
+    code = cli_mod.main(["train", "p1", "proj"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "Warning: " in out
+    assert "driver" in out
+    assert "test/tiny-model" in out
+
+
 def test_cli_train_governing_seat_abliterated_no_warning(
     home, monkeypatch, capsys
 ):
@@ -2275,3 +2505,574 @@ def test_cli_show_project_warns_on_stored_full(home):
     assert res.returncode == 0
     assert "method: full" in res.stdout
     assert "always trains with LoRA" in res.stdout
+
+
+# -- v0.27.0: R52 — --json honoured or refused, never ignored ------
+
+
+# The commands that refuse --json (R52): long-running commands that
+# print progress lines as they go, so there is no single result to
+# print as JSON. train is refused except --dry-run (see below).
+JSON_REFUSING_COMMANDS = (
+    "train", "sleep", "export-gguf", "requant", "pull-weights",
+    "distill", "chat",
+)
+
+
+def _json_sweep_args(command, tmp_path):
+    """Plausible arguments for one command in the --json sweep.
+    The seeded home has profile p1 with project proj."""
+    dest = str(tmp_path / "exports")
+    return {
+        "profiles": [],
+        "projects": ["p1"],
+        "export": ["p1", "proj", dest],
+        "export-profile": ["p1", dest],
+        "export-recipe": ["p1", "proj", dest],
+        "export-adapter": ["p1", "proj", dest],
+        "import": [dest],
+        "import-adapter": [dest],
+        "pull-weights": ["org/name"],
+        "verify": [dest],
+        "create-profile": ["sweep-new", "--tag", "x:1b"],
+        "create-project": ["p1", "sweep-proj"],
+        "train": ["p1", "proj", "--dry-run"],
+        "export-gguf": ["p1", "proj", dest],
+        "sleep": ["p1", "proj"],
+        "sleep-status": ["p1", "proj"],
+        "sleep-delete": ["p1", "proj", "1"],
+        "sleep-prune": ["p1", "proj"],
+        "chat": ["--model", "x:1b"],
+        "requant": ["x:1b"],
+        "bridge": ["lfm3:1.7b"],
+        "pc-info": [],
+        "distill": [
+            "p1", "proj", "--teacher", "x:1b",
+            "--prompts", str(tmp_path / "prompts.txt"),
+        ],
+        "doctor": ["--check"],
+        "rename-profile": ["p1", "p1-renamed"],
+        "delete-profile": ["p1"],
+        "update-profile": ["p1", "--role", "fast"],
+        "show-profile": ["p1"],
+        "rename-project": ["p1", "proj", "proj-2"],
+        "delete-project": ["p1", "proj"],
+        "update-project": ["p1", "proj", "--rank", "4"],
+        "show-project": ["p1", "proj"],
+        "clone-profile": ["p1", "p1-clone"],
+        "clone-project": ["p1", "proj", "proj-clone"],
+        "list-keys": [],
+        "remove-key": ["groq"],
+    }[command]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [c for c in ALL_COMMANDS if c not in ("probe", "save-key")],
+)
+def test_json_sweep_no_command_silently_returns_text(
+    home, tmp_path, command
+):
+    """R52: every command with --json either prints one JSON
+    document on stdout, prints nothing on stdout (an error went
+    to stderr, or the flag was refused), or fails — never plain
+    text with a success code. probe is excluded here because a
+    real probe loads models; its --json form is pinned
+    in-process by test_json_probe_parses in test_v22.py.
+    save-key is excluded because it reads a key from stdin; its
+    --json form is pinned by test_cli_key_round_trip."""
+    _seed_cli_home(home)
+    (tmp_path / "exports").mkdir()
+    args = _json_sweep_args(command, tmp_path)
+    res = run_cli(home, command, *args, "--json")
+    if res.stdout.strip():
+        # Non-empty stdout must parse as one JSON document.
+        json.loads(res.stdout)
+    if command in JSON_REFUSING_COMMANDS and command != "train":
+        assert res.returncode == 1
+        assert "--json is not available" in res.stderr
+        assert res.stdout == ""
+
+
+@pytest.mark.parametrize("command", JSON_REFUSING_COMMANDS)
+def test_json_refusal_names_the_command(home, tmp_path, command):
+    """R52: each long-running command refuses --json in plain
+    words on stderr, exit 1, empty stdout — never plain text
+    with exit 0."""
+    _seed_cli_home(home)
+    args = _json_sweep_args(command, tmp_path)
+    if command == "train":
+        # A real run refuses; --dry-run is the honouring path.
+        args = ["p1", "proj"]
+    res = run_cli(home, command, *args, "--json")
+    assert res.returncode == 1
+    assert res.stdout == ""
+    assert f"--json is not available for {command}" in res.stderr
+    assert "Run it without --json" in res.stderr or command == "train"
+
+
+def test_json_train_dry_run_points_at_the_estimate(home):
+    """R52: the train refusal names the working alternative — a
+    dry run prints its estimate as JSON."""
+    _seed_cli_home(home)
+    res = run_cli(home, "train", "p1", "proj", "--json")
+    assert res.returncode == 1
+    assert "--dry-run --json" in res.stderr
+
+
+def test_json_pc_info_bridge_doctor_parse(home, tmp_path):
+    """R52: the pure reports honour --json — pc-info, bridge,
+    and doctor print one JSON document each."""
+    res = run_cli(home, "pc-info", "--json")
+    assert res.returncode == 0, res.stderr
+    data = json.loads(res.stdout)
+    assert "measurement" in data
+    assert "settings" in data
+    assert data["measurement"]["cpu_count"] >= 1
+    assert data["settings"]["rank"] in (4, 8)
+
+    res = run_cli(home, "bridge", "lfm3:1.7b", "--json")
+    assert res.returncode == 0, res.stderr
+    data = json.loads(res.stdout)
+    assert data["tag"] == "lfm3:1.7b"
+    assert isinstance(data["suggestions"], list)
+
+    res = run_cli(home, "doctor", "--check", "--json")
+    data = json.loads(res.stdout)
+    assert isinstance(data["checks"], list)
+    assert isinstance(data["ok"], bool)
+    # The exit code carries the verdict, as in the human form.
+    assert res.returncode == (0 if data["ok"] else 1)
+    assert {c["name"] for c in data["checks"]} >= {
+        "venv", "pyside6", "launcher", "symlink", "icon",
+    }
+
+
+def test_json_export_and_import_parse(home, tmp_path):
+    """R52: the export commands and import honour --json — one
+    document each, no size lines around them."""
+    _seed_cli_home(home)
+    dest = tmp_path / "exports"
+    dest.mkdir()
+    res = run_cli(home, "export", "p1", "proj", str(dest), "--json")
+    assert res.returncode == 0, res.stderr
+    data = json.loads(res.stdout)
+    assert data["kind"] == "project"
+    assert data["size_bytes"] > 0
+    assert "Package size" not in res.stdout
+    pkg = Path(data["exported"])
+    assert pkg.is_dir()
+
+    res = run_cli(
+        home, "export-profile", "p1", str(dest), "--json",
+    )
+    assert res.returncode == 0, res.stderr
+    assert json.loads(res.stdout)["kind"] == "profile"
+
+    res = run_cli(
+        home, "export-recipe", "p1", "proj", str(dest), "--json",
+    )
+    assert res.returncode == 0, res.stderr
+    assert json.loads(res.stdout)["kind"] == "recipe"
+
+    res = run_cli(home, "verify", str(pkg), "--json")
+    assert res.returncode == 0, res.stderr
+    assert json.loads(res.stdout)["ok"] is True
+
+    # Import it back as a copy: the result is one JSON document.
+    res = run_cli(home, "import", str(pkg), "--as-copy", "--json")
+    assert res.returncode == 0, res.stderr
+    data = json.loads(res.stdout)
+    assert data["project"] == "proj-copy"
+    assert data["kind"] == "stella-export"
+
+    res = run_cli(home, "import", str(pkg), "--preview", "--json")
+    assert res.returncode == 0, res.stderr
+    data = json.loads(res.stdout)
+    assert data["kind"] == "stella-export"
+
+
+def test_json_create_rename_update_delete_parse(home):
+    """R52: the record commands honour --json — create, rename,
+    update, and delete print the record (or the action)."""
+    res = run_cli(
+        home, "create-profile", "p1", "--tag", "x:1b", "--json",
+    )
+    assert res.returncode == 0, res.stderr
+    assert json.loads(res.stdout)["name"] == "p1"
+
+    res = run_cli(home, "create-project", "p1", "proj", "--json")
+    assert res.returncode == 0, res.stderr
+    assert json.loads(res.stdout)["name"] == "proj"
+
+    res = run_cli(
+        home, "update-profile", "p1", "--role", "fast", "--json",
+    )
+    assert res.returncode == 0, res.stderr
+    assert json.loads(res.stdout)["role"] == "fast"
+
+    res = run_cli(
+        home, "update-project", "p1", "proj", "--rank", "4", "--json",
+    )
+    assert res.returncode == 0, res.stderr
+    assert json.loads(res.stdout)["settings"]["rank"] == 4
+
+    res = run_cli(home, "rename-project", "p1", "proj", "proj-2", "--json")
+    assert res.returncode == 0, res.stderr
+    assert json.loads(res.stdout)["name"] == "proj-2"
+
+    res = run_cli(home, "delete-project", "p1", "proj-2", "--json")
+    assert res.returncode == 0, res.stderr
+    data = json.loads(res.stdout)
+    assert data["action"] == "trashed"
+    assert data["trash"]
+
+    res = run_cli(home, "rename-profile", "p1", "p1b", "--json")
+    assert res.returncode == 0, res.stderr
+    assert json.loads(res.stdout)["name"] == "p1b"
+
+    res = run_cli(home, "delete-profile", "p1b", "--purge", "--json")
+    assert res.returncode == 0, res.stderr
+    assert json.loads(res.stdout)["action"] == "purged"
+
+
+def test_json_train_dry_run_parses(home, tmp_path):
+    """R52: train --dry-run --json prints the estimate as one
+    JSON document — no dataset line ahead of it. The local model
+    dir + sample dataset mirror the T85 dry-run test, so no
+    network is needed for the estimate."""
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text(json.dumps({
+        "hidden_size": 2048, "num_hidden_layers": 24,
+        "intermediate_size": 8192, "torch_dtype": "bfloat16",
+    }))
+    (model_dir / "model.safetensors.index.json").write_text(json.dumps({
+        "metadata": {"total_size": 3_460_000_000},
+    }))
+    run_cli(home, "create-profile", "p1", "--base", str(model_dir))
+    run_cli(
+        home, "create-project", "p1", "proj",
+        "--dataset", "sample-tool-calls.jsonl",
+    )
+    res = run_cli(home, "train", "p1", "proj", "--dry-run", "--json")
+    assert res.returncode == 0, res.stderr
+    data = json.loads(res.stdout)
+    assert "fits" in data
+    assert "Dataset:" not in res.stdout
+
+
+# -- v0.27.0: R53 — no "0 bytes" line before a failed export ------
+
+
+@pytest.mark.parametrize(
+    "command, args",
+    [
+        ("export", ["nope", "proj", "out"]),
+        ("export", ["p1", "nope", "out"]),
+        ("export-profile", ["nope", "out"]),
+        ("export-recipe", ["nope", "proj", "out"]),
+        ("export-recipe", ["p1", "nope", "out"]),
+        ("export-adapter", ["nope", "proj", "out"]),
+        ("export-adapter", ["p1", "nope", "out"]),
+    ],
+)
+def test_failed_export_prints_no_size_line(home, tmp_path, command, args):
+    """R53: a failed export prints only the error — no
+    "Package size: about 0 bytes." line ahead of it."""
+    _seed_cli_home(home)
+    out = tmp_path / "out"
+    args = [str(out) if a == "out" else a for a in args]
+    res = run_cli(home, command, *args)
+    assert res.returncode == 1
+    assert "Package size" not in res.stdout
+    assert res.stdout == ""
+    assert "stella:" in res.stderr
+
+
+def test_successful_export_still_prints_sizes(home, tmp_path):
+    """R53, the other side: a successful export still prints the
+    before/after size lines (T178)."""
+    _seed_cli_home(home)
+    dest = tmp_path / "exports"
+    dest.mkdir()
+    res = run_cli(home, "export", "p1", "proj", str(dest))
+    assert res.returncode == 0, res.stderr
+    assert res.stdout.count("Package size") == 2
+    assert "about 0 bytes" not in res.stdout
+
+
+# -- v0.27.0: R54 — chat errors on stderr, CLI keys ---------------
+
+
+def test_cli_chat_preflight_failures_go_to_stderr(
+    home, monkeypatch, capsys
+):
+    """R54: all four chat pre-flight failures print to stderr
+    with empty stdout — never to stdout."""
+    import stella.cli as cli_mod
+    import stella.ollama as ollama_mod
+
+    monkeypatch.setenv("STELLA_HOME", str(home))
+    # 1. Custom with no model and no saved config.
+    assert cli_mod.main(["chat", "--provider", "custom"]) == 1
+    err = capsys.readouterr()
+    assert err.out == ""
+    assert "Custom provider needs a model name" in err.err
+    # 2. Groq with no key saved.
+    assert cli_mod.main(["chat", "--provider", "groq"]) == 1
+    err = capsys.readouterr()
+    assert err.out == ""
+    assert "No Groq key saved yet" in err.err
+    assert "stella save-key groq" in err.err
+    # 3. Ollama not answering (no models, no --model).
+    monkeypatch.setattr(ollama_mod, "list_models", lambda: [])
+    assert cli_mod.main(["chat"]) == 1
+    err = capsys.readouterr()
+    assert err.out == ""
+    assert "Ollama is not answering" in err.err
+    # 4. A typed model name that is not installed.
+    import builtins
+
+    monkeypatch.setattr(ollama_mod, "list_models", lambda: ["a:1b"])
+    monkeypatch.setattr(
+        builtins, "input", lambda _prompt="": "no-such-model"
+    )
+    assert cli_mod.main(["chat"]) == 1
+    err = capsys.readouterr()
+    assert "No model called 'no-such-model'" in err.err
+    # The model list itself still prints on stdout — it is the
+    # question, not an error.
+    assert "a:1b" in err.out
+
+
+def _run_cli_input(home, text, *args):
+    """run_cli with text on stdin (for save-key)."""
+    env = dict(os.environ)
+    env["STELLA_HOME"] = str(home)
+    return subprocess.run(
+        [sys.executable, "-m", "stella.cli", *args],
+        cwd=ROOT, env=env, capture_output=True, text=True,
+        input=text, timeout=60,
+    )
+
+
+def test_cli_key_round_trip(home):
+    """R54: a provider key can be saved, listed, and removed from
+    the CLI — the same 0600 providers.json the Settings window
+    writes, and the key itself never appears in any output."""
+    import stat
+
+    key = "gsk_test_key_for_the_cli_round_trip_0123456789"
+    res = _run_cli_input(home, key + "\n", "save-key", "groq")
+    assert res.returncode == 0, res.stderr
+    assert "Saved the Groq key." in res.stdout
+    assert key not in res.stdout
+    assert key not in res.stderr
+    path = Path(home) / "providers.json"
+    assert path.is_file()
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert json.loads(path.read_text())["groq"]["api_key"] == key
+
+    res = run_cli(home, "list-keys")
+    assert res.returncode == 0
+    assert "Groq: key saved." in res.stdout
+    assert "Gemini: no key." in res.stdout
+    assert key not in res.stdout
+
+    res = run_cli(home, "list-keys", "--json")
+    assert res.returncode == 0
+    data = json.loads(res.stdout)
+    assert data["groq"] == "key saved"
+    assert data["gemini"] == "no key"
+    assert key not in res.stdout
+
+    # R52: save-key honours --json too — one document, and the
+    # key itself is never in it.
+    res = _run_cli_input(
+        home, "gsk_second_key_0123456789\n", "save-key", "gemini",
+        "--json",
+    )
+    assert res.returncode == 0, res.stderr
+    data = json.loads(res.stdout)
+    assert data == {"provider": "gemini", "saved": True}
+    assert "gsk_second_key" not in res.stdout
+    run_cli(home, "remove-key", "gemini")
+
+    res = run_cli(home, "remove-key", "groq")
+    assert res.returncode == 0
+    assert "Removed the Groq key." in res.stdout
+    res = run_cli(home, "list-keys")
+    assert "Groq: no key." in res.stdout
+    res = run_cli(home, "remove-key", "groq")
+    assert res.returncode == 0
+    assert "No Groq key was saved." in res.stdout
+
+
+def test_cli_save_key_custom_with_base_url_and_model(home):
+    """R54: save-key custom stores the base URL and model name
+    alongside the key."""
+    res = _run_cli_input(
+        home, "custom-key-123\n", "save-key", "custom",
+        "--base-url", "https://example.com/v1",
+        "--model", "my-model",
+    )
+    assert res.returncode == 0, res.stderr
+    assert "Saved the Custom key." in res.stdout
+    data = json.loads((Path(home) / "providers.json").read_text())
+    assert data["custom"]["api_key"] == "custom-key-123"
+    assert data["custom"]["base_url"] == "https://example.com/v1"
+    assert data["custom"]["model"] == "my-model"
+
+
+def test_cli_save_key_refusals(home):
+    """R54: save-key refuses Ollama (no key needed), an unknown
+    provider, and an empty key — each in plain words."""
+    res = _run_cli_input(home, "x\n", "save-key", "ollama")
+    assert res.returncode == 1
+    assert "needs no key" in res.stderr
+    res = _run_cli_input(home, "x\n", "save-key", "nope")
+    assert res.returncode == 1
+    assert "no keyed provider called 'nope'" in res.stderr
+    res = _run_cli_input(home, "\n", "save-key", "groq")
+    assert res.returncode == 1
+    assert "paste a key first" in res.stderr
+    assert not (Path(home) / "providers.json").exists()
+
+
+def test_cli_saved_key_unblocks_cloud_chat(home, monkeypatch, capsys):
+    """R54: with a key saved from the CLI, cloud chat gets past
+    its pre-flight — the terminal path to cloud chat works."""
+    import builtins
+
+    import stella.chat_agent as chat_agent_mod
+    import stella.cli as cli_mod
+    from stella.providers import save_key
+
+    monkeypatch.setenv("STELLA_HOME", str(home))
+    save_key(home, "groq", "gsk_test_key_0123456789")
+
+    class FakeAgent:
+        def __init__(self, store, model, **kwargs):
+            pass
+
+        def reply(self, text):
+            return "hi"
+
+    monkeypatch.setattr(chat_agent_mod, "ChatAgent", FakeAgent)
+    answers = iter(["/quit"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(answers))
+    assert cli_mod.main(["chat", "--provider", "groq"]) == 0
+    out = capsys.readouterr().out
+    assert "No Groq key saved yet" not in out
+    assert "Hi. Tell me what you want to train" in out
+
+
+# -- v0.27.0: R55 — CLI clone commands ------------------------------
+
+
+def test_cli_clone_profile_and_project(home):
+    """R55: clone-profile and clone-project work from the CLI,
+    with the same normalisation echo the create commands use."""
+    from stella.model import Store
+
+    _seed_cli_home(home)
+    res = run_cli(home, "clone-profile", "p1", "P1-Clone")
+    assert res.returncode == 0, res.stderr
+    assert "Cloned profile 'p1' as 'p1-clone'" in res.stdout
+    assert "(from 'P1-Clone')" in res.stdout
+    store = Store(home)
+    assert store.get_profile("p1-clone")["role"] == "fast"
+    assert store.list_projects("p1-clone") == []
+
+    res = run_cli(
+        home, "clone-profile", "p1", "p1-with-projects",
+        "--with-projects",
+    )
+    assert res.returncode == 0, res.stderr
+    assert [p["name"] for p in store.list_projects("p1-with-projects")] == [
+        "proj"
+    ]
+
+    res = run_cli(home, "clone-project", "p1", "proj", "Proj-2")
+    assert res.returncode == 0, res.stderr
+    assert "Cloned project 'proj' as 'proj-2'" in res.stdout
+    assert "(from 'Proj-2')" in res.stdout
+    assert store.get_project("p1", "proj-2")["dataset_ref"] == (
+        "sample-tool-calls.jsonl"
+    )
+
+
+def test_cli_clone_json_and_errors(home):
+    """R55: the clones honour --json, and a missing source or a
+    name clash is refused with one clean line."""
+    _seed_cli_home(home)
+    res = run_cli(
+        home, "clone-profile", "p1", "p1-clone", "--json",
+    )
+    assert res.returncode == 0, res.stderr
+    assert json.loads(res.stdout)["name"] == "p1-clone"
+
+    res = run_cli(home, "clone-project", "p1", "proj", "proj-2", "--json")
+    assert res.returncode == 0, res.stderr
+    assert json.loads(res.stdout)["name"] == "proj-2"
+
+    res = run_cli(home, "clone-profile", "nope", "x")
+    assert res.returncode == 1
+    assert "stella:" in res.stderr
+    res = run_cli(home, "clone-project", "p1", "nope", "x")
+    assert res.returncode == 1
+    assert "stella:" in res.stderr
+    res = run_cli(home, "clone-profile", "p1", "p1-clone")
+    assert res.returncode == 1
+    assert "already exists" in res.stderr
+    res = run_cli(home, "clone-project", "p1", "proj", "proj-2")
+    assert res.returncode == 1
+    assert "already exists" in res.stderr
+
+
+def test_cli_clone_profile_names_skipped_projects(home):
+    """R55/R40: cloning with --with-projects names a damaged
+    project it could not copy instead of silently dropping it."""
+    from stella.model import Store
+
+    _seed_cli_home(home)
+    store = Store(home)
+    store.create_project("p1", "broken")
+    manifest = (
+        store.project_dir("p1", "broken") / "project.json"
+    )
+    manifest.write_text("{not json", encoding="utf-8")
+    res = run_cli(
+        home, "clone-profile", "p1", "p1-clone", "--with-projects",
+    )
+    assert res.returncode == 0, res.stderr
+    assert "Cloned profile 'p1' as 'p1-clone'" in res.stdout
+    assert "could not be copied" in res.stdout
+    assert "broken" in res.stdout
+    assert [p["name"] for p in store.list_projects("p1-clone")] == [
+        "proj"
+    ]
+
+
+# -- v0.27.0: R56 — the nameless-profile warning tells the truth ---
+
+
+def test_cli_profiles_display_name_needs_no_warning(home):
+    """R56: a profile with a display name but no name shows its
+    display name and gets no warning — the old warning claimed
+    it was "shown as (unnamed profile)" when it was not."""
+    run_cli(home, "create-profile", "good", "--tag", "x:1b")
+    pdir = Path(home) / "profiles" / "nameless"
+    (pdir / "projects").mkdir(parents=True)
+    (pdir / "profile.json").write_text(
+        json.dumps({
+            "kind": "profile", "role": "quiet",
+            "display_name": "No Name",
+        })
+    )
+    res = run_cli(home, "profiles")
+    assert res.returncode == 0
+    assert "No Name" in res.stdout
+    assert "(unnamed profile)" not in res.stdout
+    assert "no name" not in res.stderr

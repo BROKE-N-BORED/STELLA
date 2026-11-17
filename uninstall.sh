@@ -54,9 +54,47 @@ fi
 
 echo "Removing Stella ..."
 
-rm -f "$HOME/.local/share/applications/stella.desktop"
-rm -f "$HOME/Desktop/Stella.desktop"
-rm -f "$HOME/.local/bin/stella"
+# R59: only remove launch artifacts that point at THIS install.
+# After an upgrade, the launcher, desktop icon, and command point
+# at the NEW folder — an old folder's uninstall must leave them
+# alone. A launcher belongs to this install when its Exec line
+# names this folder's run.sh ("$DIR/run.sh" as a fixed string, so
+# a neighbouring folder like "$DIR-2" never matches); the command
+# belongs to it when the symlink resolves to this folder's
+# stella-cli. Anything else is left alone, with a line saying so.
+# The third argument overrides the marker (the desktop training
+# icon names install_training_launcher.py, not run.sh).
+remove_launcher_if_ours() { # $1 = file, $2 = plain name, $3 = marker (default $DIR/run.sh)
+  local file="$1" name="$2" marker="${3:-$DIR/run.sh}" other=""
+  [ -e "$file" ] || return 0
+  if grep -Fq "$marker" "$file" 2>/dev/null; then
+    rm -f "$file"
+  elif [ "$marker" = "$DIR/run.sh" ]; then
+    other="$(grep '^Exec=' "$file" 2>/dev/null | head -n 1 | sed 's/^Exec="//; s|/run.sh".*$||; s|/run.sh$||')"
+    if [ -n "$other" ]; then
+      echo "The $name points at another install ($other), so it was left alone."
+    else
+      echo "The $name does not point at this install, so it was left alone."
+    fi
+  else
+    echo "The $name does not point at this install, so it was left alone."
+  fi
+}
+remove_launcher_if_ours "$HOME/.local/share/applications/stella.desktop" "menu launcher"
+remove_launcher_if_ours "$HOME/Desktop/Stella.desktop" "desktop icon"
+# The desktop training icon (v0.27.0 form names this install's
+# launcher by absolute path, so ownership is checkable; the
+# v0.25.0 %k form names no install and is left alone — litter
+# beats breaking another install's icon).
+remove_launcher_if_ours "$HOME/Desktop/Install Stella Training.desktop" "desktop training icon" "$DIR/install_training_launcher.py"
+if [ -e "$HOME/.local/bin/stella" ] || [ -L "$HOME/.local/bin/stella" ]; then
+  link_target="$(readlink -f "$HOME/.local/bin/stella" 2>/dev/null || true)"
+  if [ "$link_target" = "$DIR/stella-cli" ]; then
+    rm -f "$HOME/.local/bin/stella"
+  else
+    echo "The stella command points at another install (${link_target:-unknown}), so it was left alone."
+  fi
+fi
 
 # Menu icons (hicolor theme, T138). The shared remover also refreshes
 # the icon cache when the tool is available.

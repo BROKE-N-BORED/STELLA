@@ -91,6 +91,33 @@ if [ ! -x "$DIR/.venv/bin/python" ]; then
   rm -f "$VENV_ERR"
 fi
 
+# Connectivity pre-check (R60): with no network, pip would retry
+# ten times in silence for minutes before the failure line. One
+# short request against the package index fails in seconds
+# instead, with a plain message. An HTTP answer of any kind means
+# the network is up — only a connection failure refuses.
+# STELLA_INSTALL_SKIP_NET_CHECK=1 skips the check (tests use it);
+# STELLA_INSTALL_NET_CHECK_URL points it elsewhere (tests use a
+# dead local address).
+if [ -z "${STELLA_INSTALL_SKIP_NET_CHECK:-}" ]; then
+  NET_CHECK_URL="${STELLA_INSTALL_NET_CHECK_URL:-https://pypi.org/simple/}"
+  echo "Checking the network connection ..."
+  if ! "$DIR/.venv/bin/python" -c "
+import sys, urllib.request, urllib.error
+try:
+    req = urllib.request.Request(sys.argv[1], method='HEAD')
+    urllib.request.urlopen(req, timeout=10)
+except urllib.error.HTTPError:
+    pass
+except Exception:
+    sys.exit(1)
+" "$NET_CHECK_URL" 2>/dev/null; then
+    echo "ERROR: no network connection. Stella downloads PySide6" >&2
+    echo "from the internet, so connect and run bash install.sh again." >&2
+    exit 1
+  fi
+fi
+
 # pip, wrapped (T132): a failure ends with a Stella line naming the
 # step and the retry, not raw pip output as the last word. Long
 # timeout + retries (T67): the default 15s read timeout fails the
@@ -98,6 +125,9 @@ fi
 # in requirements-base.txt (T130).
 pip_install() { # $1 = step label; rest = pip arguments
   local label="$1"; shift
+  # R60: say what is being waited on before the download starts,
+  # so a slow connection never looks like a stuck install.
+  echo "$label ... this can take a few minutes on a slow connection."
   if ! "$DIR/.venv/bin/python" -m pip install --quiet --timeout 120 --retries 10 "$@"; then
     echo "ERROR: $label failed. Check your connection and disk space," >&2
     echo "then run bash install.sh again." >&2
@@ -116,7 +146,16 @@ if ! QT_QPA_PLATFORM=offscreen "$DIR/.venv/bin/python" -c "from PySide6.QtWidget
   echo "ERROR: PySide6 is installed but cannot start a window." >&2
   echo "The real error was:" >&2
   tail -n 20 "$QT_ERR" >&2
-  echo "If it names a missing library, install it and run bash install.sh again." >&2
+  # R57: the doctor knows which package provides a missing
+  # library — ask it, so the advice names the package instead of
+  # leaving the user to guess. When the error names no known
+  # library, the generic line stands.
+  if QT_ADVICE="$("$DIR/.venv/bin/python" -m stella.doctor explain "$QT_ERR" 2>/dev/null)"; then
+    echo "$QT_ADVICE" >&2
+    echo "Then run bash install.sh again." >&2
+  else
+    echo "If it names a missing library, install it and run bash install.sh again." >&2
+  fi
   rm -f "$QT_ERR"
   exit 1
 fi
@@ -180,10 +219,30 @@ fi
 # Training installer icon on the desktop too (R13): the training
 # install is click-only — double-click the icon, no terminal.
 # Same trust treatment as the Stella icon above.
+# The tree copy's Exec resolves the launcher next to the .desktop
+# file (%k) — on the Desktop that folder is ~/Desktop, where the
+# launcher is not, so the v0.25.0 Desktop copy failed on
+# double-click (python3 could not open the file). The Desktop copy
+# therefore names this install's launcher by absolute path; the
+# tree copy keeps the portable %k form. The icon is claimed only
+# when the copy landed AND the Exec line was rewritten.
 TRAIN_DESKTOP_OK=0
 if [ -d "$HOME/Desktop" ] && [ -f "$DIR/Install Training Stella.desktop" ]; then
   if cp "$DIR/Install Training Stella.desktop" "$HOME/Desktop/Install Stella Training.desktop" 2>/dev/null; then
-    TRAIN_DESKTOP_OK=1
+    if "$DIR/.venv/bin/python" - "$HOME/Desktop/Install Stella Training.desktop" "$DIR/install_training_launcher.py" <<'PYEOF' 2>/dev/null; then
+import sys
+desktop_file, launcher = sys.argv[1], sys.argv[2]
+lines = open(desktop_file).read().splitlines()
+lines = [
+    'Exec=python3 "%s"' % launcher if line.startswith("Exec=") else line
+    for line in lines
+]
+open(desktop_file, "w").write("\n".join(lines) + "\n")
+PYEOF
+      TRAIN_DESKTOP_OK=1
+    else
+      echo "WARNING: could not point the desktop training icon at this install." >&2
+    fi
     chmod +x "$HOME/Desktop/Install Stella Training.desktop" 2>/dev/null || true
     if command -v gio >/dev/null 2>&1; then
       gio set "$HOME/Desktop/Install Stella Training.desktop" metadata::trusted true 2>/dev/null || true

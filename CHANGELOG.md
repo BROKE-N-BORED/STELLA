@@ -1,5 +1,105 @@
 # Changelog
 
+## v0.27.0 — 2026-11-17
+
+The second P2 batch of the 2026-11-15 full-product review (R52–R75),
+plus R92 (How to Use opens on Getting started, decided by Joshua
+2026-11-17): the CLI's --json flag is now honoured or plainly
+refused on every command, keys are saved without ever showing them,
+the installer fetches training wheels with resume, the uninstaller
+only touches its own launchers, the refusal probe judges replies
+right, sleep cycles can be deleted and pruned, the guide names the
+right governing seats, and the desktop training icon actually works.
+Full record: docs/stella-review-task-list-2026-11-15.md.
+
+- R52 — Every CLI command either honours --json or refuses it in
+  plain words (exit 1): 29 honour, 9 refuse, and the gate is
+  closed by default, so a future command cannot silently ignore
+  the flag. A sweep test covers all 38 commands.
+- R53 — The four export commands check the profile and project
+  exist before printing the size estimate, instead of printing a
+  number for a project that is not there.
+- R54 — Chat pre-flight failures go to stderr, and keys are now
+  managed from the CLI: `save-key` reads the key without showing
+  it (typed or piped, never echoed), plus `list-keys` and
+  `remove-key`. There is no --key flag anywhere.
+- R55 — `clone-profile` and `clone-project` on the CLI, wrapping
+  the same store calls the window uses.
+- R56 — The nameless-profile warning only fires when a profile
+  has neither a name nor a display name.
+- R57 — `doctor explain <file>` names the exact apt package a
+  missing Qt library needs, and install.sh prints that line when
+  the GUI cannot start.
+- R58 — When the training venv is broken, doctor's later steps
+  skip their repairs and say the venv is broken, instead of
+  reporting fixes that never happened.
+- R59 — uninstall.sh only removes a launcher or desktop file when
+  it names this install's own run.sh path (a symlink only when it
+  resolves to this install's stella-cli). A newer install's
+  launchers are left alone.
+- R60 — install.sh echoes a waiting line before every pip step
+  and checks the connection first (10 s HEAD to pypi.org), so an
+  offline install fails in seconds instead of hanging silently.
+- R61 — The training preflight asks for 5 GB free (was 3 GB) and
+  pip runs with --no-cache-dir. The peak is still unmeasured; R23
+  measures it on the real PC.
+- R62 — Training wheels are fetched outside pip, with resume:
+  pip resolves the list, then a small fetcher downloads each
+  wheel with HTTP Range, streaming hash, and 3 attempts. A
+  killed download resumes where it stopped. A fetch that stops
+  partway never falls back to a direct pip install.
+- R63 — Uninstall is click-only now: `Uninstall Stella.desktop`
+  in the Stella folder runs the uninstaller through a small
+  launcher, the same shape as the install icons.
+- R64 — The refusal probe judge reads the first two sentences,
+  strips idioms, and only counts a bare "No." or a strong marker
+  in the second sentence. The 11-case battery now passes 11/11.
+- R65 — The probe gate recomputes the change from the measured
+  rates instead of trusting the caller's number, fails any run
+  where the model refuses everything after training, and fails
+  when the empty-prompt rate is missing.
+- R66 — Sleep cycles show their size, and can be deleted or
+  pruned (keep the newest N) from the window and the CLI
+  (`sleep-delete`, `sleep-prune`). Deleting keeps the slept-row
+  hashes, so old rows are never re-slept.
+- R67 — The governing-seat warning fires for a governing-seat
+  marker or a governing role, and is still suppressed when the
+  base model is already abliterated.
+- R68 — `stella probe` auto-detects like the window: a governing
+  seat gets the gate, anything else is informational.
+  --informational forces informational, --gate forces the gate.
+- R69 — The README names the right probe counts (18 plainly
+  benign prompts by default, 24 for a governing seat), the right
+  seats, the exit-3 failed gate, and the new commands.
+- R70 — How to Use names the right governing seats and counts,
+  covers the bridge, checkpoints, recipe and adapter packages,
+  and governing seats, and the GGUF topic names the quant picker.
+  The v0.16.0 T90 bullet below carries a correction note (the
+  bullet named the wrong seats; the code always gated the right
+  ones).
+- R71 — The v0.24 test fixture uses a seeded store and temp
+  settings, so no test touches the real ~/.stella store.
+- R72 — The HF size resolvers have real-execution tests: HEAD
+  against a fake huggingface_hub, ranged GET against a local
+  HTTP server.
+- R73 — Every entry in the plain-words error map is covered by
+  a test.
+- R74 — The GUI test fixture waits for all background workers
+  before closing a window, so a stray worker cannot outlive its
+  test.
+- R75 — Resume is only offered when there is a session, no run
+  in progress, and at least one checkpoint; the pause message
+  ends "Press Resume when you are ready."
+- R92 — How to Use opens on Getting started instead of an empty
+  pane (Joshua's decision, 2026-11-17).
+- R13 fix — The desktop copy of the training installer icon was
+  broken since v0.25.0: its Exec used the %k pattern, which
+  resolves to the Desktop folder, so double-clicking it failed.
+  install.sh now rewrites the Desktop copy's Exec to the absolute
+  launcher path, and uninstall.sh removes the Desktop training
+  icon when it names this install. The tree copy keeps the
+  portable %k form.
+
 ## v0.26.0 — 2026-11-17
 
 The first P2 batch of the 2026-11-15 full-product review (R24–R51):
@@ -874,6 +974,10 @@ away and a before/after preview before export.
   regardless. The window probes informationally for non-governing
   profiles; governing seats (judge, reviewer, merger, grader,
   router) still get the gate.
+  Correction (v0.27.0, R70): the governing seats are driver,
+  reviewer, tester, and fast, not judge, merger, grader, router.
+  The code always gated the right seats; this bullet named the
+  wrong ones.
 - T91 — a failed probe gate exits 3 (not 1); a crashed probe
   still exits 1. The gate verdict goes to stderr, separate from
   the numbers on stdout.

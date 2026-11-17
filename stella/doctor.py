@@ -104,6 +104,25 @@ def _missing_library(output: str) -> tuple[str, str] | None:
     return None
 
 
+def explain_missing_library(output: str) -> str | None:
+    """The plain-words fix for a failure that names a missing
+    system library (R57): which library is missing and the exact
+    apt command that installs it. None when the failure names no
+    library this map knows — no diagnosis is invented then.
+    Shared by the PySide6 check below and by install.sh (through
+    `python -m stella.doctor explain <file>`), so the installer
+    and the doctor can never disagree about the package."""
+    found = _missing_library(output)
+    if found is None:
+        return None
+    library, package = found
+    name = library.split(".so")[0]
+    return (
+        f"The system library {name} is missing from this PC. "
+        f"Install it with: sudo apt install {package}"
+    )
+
+
 def _check_pyside6(venv_python: Path) -> Check:
     """The same throwaway-QApplication check install.sh runs (T135):
     import-only would pass where creating a window fails."""
@@ -132,19 +151,17 @@ def _check_pyside6(venv_python: Path) -> Check:
     # command that fixes it on this PC instead.
     found = _missing_library(output)
     if found is not None:
-        library, package = found
+        library, _package = found
         # The line naming the library is the cause worth showing:
         # the last line is often just "Aborted".
         for line in lines:
             if library in line:
                 cause = line.strip()
                 break
-        name = library.split(".so")[0]
+        advice = explain_missing_library(output)
         return Check("pyside6", BROKEN,
                      f"PySide6 cannot start a window ({cause}). "
-                     f"The system library {name} is missing from "
-                     "this PC. Install it with: "
-                     f"sudo apt install {package}")
+                     f"{advice}")
     return Check("pyside6", BROKEN,
                  f"PySide6 cannot start a window ({cause}); "
                  "run bash install.sh again")
@@ -218,7 +235,10 @@ def _fix_launcher(tree: Path, home: Path) -> Check:
 
 def run_checks(tree: Path, home: Path, fix: bool = True) -> list[Check]:
     """Check the install at `tree` for user `home`. With fix=True,
-    stale launchers, symlinks, and icons are repaired in place."""
+    stale launchers, symlinks, and icons are repaired in place —
+    unless the venv is broken (R58): a fresh launcher for an app
+    that cannot start repairs nothing, so the launch artifacts
+    are left alone and the venv is named as the blocking cause."""
     tree = Path(tree)
     home = Path(home)
     checks: list[Check] = []
@@ -247,6 +267,18 @@ def run_checks(tree: Path, home: Path, fix: bool = True) -> list[Check]:
     launcher_current, launcher_stale = _launcher_is_current(tree, home)
     if launcher_current:
         checks.append(Check("launcher", OK, str(launcher)))
+    elif not venv_ok:
+        # R58: the venv is broken, so the launcher is NOT repaired
+        # — a fresh launcher for an app that cannot start is a
+        # repair that repairs nothing. The venv is named as the
+        # blocking cause instead, in both modes: --check used to
+        # say "run stella doctor", but the doctor cannot fix this
+        # without a venv either.
+        checks.append(Check(
+            "launcher", BROKEN,
+            "not repaired: the Python environment is broken, so "
+            "the launcher was left alone. Run bash install.sh "
+            "first."))
     elif not launcher.is_file():
         if fix:
             checks.append(_fix_launcher(tree, home))
@@ -270,6 +302,14 @@ def run_checks(tree: Path, home: Path, fix: bool = True) -> list[Check]:
     link_ok = link.is_symlink() and link.resolve() == target.resolve()
     if link_ok:
         checks.append(Check("symlink", OK, f"{link} -> {target}"))
+    elif not venv_ok:
+        # R58: not repaired while the venv is broken — see the
+        # launcher step above.
+        checks.append(Check(
+            "symlink", BROKEN,
+            "not repaired: the Python environment is broken, so "
+            "the stella command was left alone. Run bash "
+            "install.sh first."))
     elif fix:
         try:
             if link.is_symlink() or link.exists():
@@ -290,6 +330,13 @@ def run_checks(tree: Path, home: Path, fix: bool = True) -> list[Check]:
     # 5. icon
     if install_mod.hicolor_icons_present(home):
         checks.append(Check("icon", OK, "hicolor theme (survives a move)"))
+    elif not venv_ok:
+        # R58: not installed while the venv is broken — see the
+        # launcher step above.
+        checks.append(Check(
+            "icon", BROKEN,
+            "not installed: the Python environment is broken. "
+            "Run bash install.sh first."))
     elif (tree / "assets" / "stella-48.png").is_file() and fix:
         if install_mod.install_hicolor_icons(tree, home):
             checks.append(Check("icon", FIXED,
@@ -355,6 +402,28 @@ def format_report(checks: list[Check]) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
+    if args and args[0] == "explain":
+        # R57: `python -m stella.doctor explain <file>` — read a
+        # captured failure (install.sh's Qt check output) and print
+        # the plain-words fix when it names a missing library.
+        # Exit 0 when a package was named, 1 when the failure names
+        # no library this map knows (or the file cannot be read):
+        # the caller keeps its generic advice then.
+        if len(args) != 2:
+            print(
+                "usage: python -m stella.doctor explain <file>",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            output = Path(args[1]).read_text(errors="replace")
+        except OSError:
+            return 1
+        advice = explain_missing_library(output)
+        if advice is None:
+            return 1
+        print(advice)
+        return 0
     fix = "--check" not in args
     checks = run_checks(find_install_dir(), Path.home(), fix=fix)
     print(format_report(checks))

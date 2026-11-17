@@ -30,7 +30,7 @@ from pathlib import Path
 
 from .autoconfig import compute_settings, measure_pc
 
-STELLA_VERSION = "0.26.0"
+STELLA_VERSION = "0.27.0"
 
 # Slug: lowercase letters, digits, dash, underscore. Must start alnum.
 # No dots, no slashes — a slug can never climb out of its directory.
@@ -92,16 +92,28 @@ def looks_abliterated(profile: dict) -> bool:
 
 
 def governing_seat_warning(profile: dict) -> str | None:
-    """The pre-train warning for a governing-seat profile (T116),
-    or None when no warning is due. Fires only when a governing
-    seat is MARKED on the profile (the governing_seat field) and
-    the base is not abliterated — a governing ROLE alone does not
-    warn here (the probe gates governing roles at probe time, T90;
-    the marker is the explicit binding). The text names the seat
-    and the base."""
-    seat = str((profile or {}).get("governing_seat") or "").strip().lower()
+    """The pre-train warning for a governing-seat profile (T116,
+    widened by R67), or None when no warning is due. Fires when
+    the profile is bound for a governing seat — by the MARKER
+    (the governing_seat field) or by a governing ROLE (driver,
+    reviewer, tester, fast) — and the base is not abliterated.
+    A role-only profile used to train for hours unwarned (the
+    probe gates governing roles, but only after the run); the
+    warning belongs before the run, the same as for a marked
+    profile. The text names the seat and the base."""
+    profile = profile or {}
+    seat = str(profile.get("governing_seat") or "").strip().lower()
     if seat not in GOVERNING_SEATS:
-        return None
+        # No marker: a governing role binds the same way (the
+        # same substring match the probe gate uses, so the
+        # warning and the gate agree on what is governing).
+        role = str(profile.get("role") or "").strip().lower()
+        seat = next(
+            (name for name in GOVERNING_SEATS if name in role),
+            "",
+        )
+        if not seat:
+            return None
     if looks_abliterated(profile):
         return None
     base = (

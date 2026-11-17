@@ -21,8 +21,11 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
+
+import pytest
 
 from stella.model import STELLA_VERSION
 
@@ -128,6 +131,10 @@ def run_script(
     # The preflight threshold would fail on the 512 MB /tmp tmpfs;
     # the preflight test overrides this itself.
     env.setdefault("STELLA_INSTALL_MIN_FREE_KB", "1024")
+    # R60: no real network in the suite — the connectivity
+    # pre-check is skipped except in its own test, which points
+    # it at a dead local address.
+    env.setdefault("STELLA_INSTALL_SKIP_NET_CHECK", "1")
     if env_extra:
         env.update(env_extra)
     return subprocess.run(
@@ -547,7 +554,8 @@ def test_disk_preflight_refuses(tmp_path):
 
 def test_pyside6_check_names_missing_lib(tmp_path):
     """T135: when the throwaway QApplication cannot start, the
-    install fails with the real error named."""
+    install fails with the real error named. R57: the advice
+    names the apt package to install, the way the doctor does."""
     tree = copy_tree(tmp_path)
     home = make_home(tmp_path)
     make_wrapper_venv(tree, qt_probe="fail")
@@ -556,6 +564,7 @@ def test_pyside6_check_names_missing_lib(tmp_path):
     out = res.stdout + res.stderr
     assert "cannot start a window" in out
     assert "libEGL.so.1" in out
+    assert "sudo apt install libegl1" in out
     assert not (home / ".local" / "share" / "applications"
                 / "stella.desktop").exists()
 
@@ -603,6 +612,9 @@ def test_install_stella_desktop_runs_installer(tmp_path):
     env = dict(os.environ)
     env["HOME"] = str(home)
     env["STELLA_INSTALL_MIN_FREE_KB"] = "1024"
+    # No real network in the suite (R60): the connectivity check is
+    # covered by its own test, so skip it here like run_script does.
+    env["STELLA_INSTALL_SKIP_NET_CHECK"] = "1"
     res = subprocess.run(
         argv, cwd=tmp_path, env=env, capture_output=True, text=True,
         input="\n", timeout=300, check=False,
@@ -673,6 +685,37 @@ def test_install_places_training_icon_on_desktop(tmp_path):
     assert icon.is_file()
     assert os.access(icon, os.X_OK)
     assert "Training installs from the desktop too" in res.stdout
+
+
+def test_desktop_training_icon_runs_from_the_desktop(tmp_path):
+    """v0.27.0 (R13 fix): the Desktop copy of the training icon
+    names this install's launcher by absolute path — the tree
+    copy's %k form resolves to ~/Desktop, where the launcher is
+    not, so the v0.25.0 Desktop copy failed on double-click with
+    \"can't open file\". Run the Desktop copy the way the desktop
+    environment would, from another working directory, with %k
+    expanded to the Desktop copy."""
+    tree = copy_tree(tmp_path)
+    home = make_home(tmp_path, desktop=True)
+    stubs = make_train_stubs(tmp_path)
+    installed(tree, home, stub_dir=stubs)
+    icon = home / "Desktop" / "Install Stella Training.desktop"
+    assert icon.is_file()
+    exec_line = parse_desktop(icon).get("Desktop Entry", "Exec")
+    assert "%k" not in exec_line
+    assert str(tree / "install_training_launcher.py") in exec_line
+    assert '\\"' not in exec_line  # no nested escaped quotes
+    argv = [str(icon) if a == "%k" else a for a in shlex.split(exec_line)]
+    env = dict(os.environ)
+    env["HOME"] = str(home)
+    env["STELLA_INSTALL_MIN_FREE_KB"] = "1024"
+    res = subprocess.run(
+        argv, cwd=tmp_path, env=env, capture_output=True, text=True,
+        input="\n", timeout=300, check=False,
+    )
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "Training packages are already installed." in res.stdout
+    assert "Training install finished." in res.stdout
 
 
 # ---------------------------------------------------------------- training
@@ -748,6 +791,7 @@ def test_uninstall_removes_artifacts_keeps_data(tmp_path):
     assert not (home / ".local" / "share" / "applications"
                 / "stella.desktop").exists()
     assert not (home / "Desktop" / "Stella.desktop").exists()
+    assert not (home / "Desktop" / "Install Stella Training.desktop").exists()
     assert not (home / ".local" / "bin" / "stella").exists()
     assert not (tree / ".venv").exists()
     assert not (tree / ".stella-install-receipt").exists()
@@ -821,10 +865,12 @@ def test_doctor_repairs_after_move(tmp_path):
 
 
 def test_doctor_fix_writes_no_receipt_without_an_install(tmp_path):
-    """T66/T139: a repair on a folder that was never installed fixes
-    the launch artifacts but writes NO receipt — there is no complete
-    install to record, and a receipt claiming one would lie about a
-    broken install."""
+    """T66/T139: a repair on a folder that was never installed
+    writes NO receipt — there is no complete install to record,
+    and a receipt claiming one would lie about a broken install.
+    R58: with no venv the doctor no longer repairs the launch
+    artifacts either — it names the broken venv instead, so no
+    launcher is written at all."""
     tree = copy_tree(tmp_path)
     home = make_home(tmp_path)
     env = dict(os.environ)
@@ -834,8 +880,10 @@ def test_doctor_fix_writes_no_receipt_without_an_install(tmp_path):
         capture_output=True, text=True, timeout=300, check=False,
     )
     assert res.returncode == 1  # venv still missing: honest failure
-    assert (home / ".local" / "share" / "applications"
-            / "stella.desktop").is_file()  # a fix did happen
+    assert "Python environment" in res.stdout
+    assert not (home / ".local" / "share" / "applications"
+                / "stella.desktop").exists()
+    assert not (home / ".local" / "bin" / "stella").exists()
     assert not (tree / ".stella-install-receipt").exists()
 
 
@@ -890,3 +938,437 @@ def test_run_tests_sh_refuses_bare_checkout(tmp_path):
     assert "bash install.sh first" in out
     assert "externally-managed" not in out
     assert "Installing pytest" not in out
+
+
+# ---------------------------------------------------------------- v0.27.0
+
+
+def test_uninstall_leaves_a_newer_install_alone(tmp_path):
+    """R59: after an upgrade (install B re-points the launcher,
+    desktop icon, and command), running the OLD folder's
+    uninstall leaves the NEW install's artifacts alone — and
+    still removes the old folder's own venv and receipt."""
+    tree_a = copy_tree(tmp_path, "stella-a")
+    tree_b = copy_tree(tmp_path, "stella-b")
+    home = make_home(tmp_path, desktop=True)
+    installed(tree_a, home)
+    installed(tree_b, home)
+    launcher = home / ".local" / "share" / "applications" / "stella.desktop"
+    desktop = home / "Desktop" / "Stella.desktop"
+    link = home / ".local" / "bin" / "stella"
+    training = home / "Desktop" / "Install Stella Training.desktop"
+    assert str(tree_b / "run.sh") in launcher.read_text()
+    assert str(tree_b / "run.sh") in desktop.read_text()
+    assert link.resolve() == (tree_b / "stella-cli").resolve()
+    assert str(tree_b / "install_training_launcher.py") in training.read_text()
+
+    res = run_script(tree_a, home, "uninstall.sh", "--yes")
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "left alone" in res.stdout
+    # The newer install's artifacts survive, still pointing at B.
+    assert str(tree_b / "run.sh") in launcher.read_text()
+    assert str(tree_b / "run.sh") in desktop.read_text()
+    assert link.resolve() == (tree_b / "stella-cli").resolve()
+    assert str(tree_b / "install_training_launcher.py") in training.read_text()
+    # The old folder's own install is gone.
+    assert not (tree_a / ".venv").exists()
+    assert not (tree_a / ".stella-install-receipt").exists()
+    # ... while the new folder's install is untouched.
+    assert (tree_b / ".venv").exists()
+    assert (tree_b / ".stella-install-receipt").exists()
+
+
+def test_uninstall_removes_its_own_neighbour_folder_launchers(tmp_path):
+    """R59: the ownership check is "points at this folder's
+    run.sh", not a prefix match — a launcher pointing at a
+    neighbouring folder (stella-2, which contains "stella" as a
+    substring) is NOT this install's to remove."""
+    tree = copy_tree(tmp_path, "stella")
+    home = make_home(tmp_path)
+    installed(tree, home)
+    neighbour = tmp_path / "stella-2"
+    launcher = home / ".local" / "share" / "applications" / "stella.desktop"
+    text = launcher.read_text().replace(
+        str(tree / "run.sh"), str(neighbour / "run.sh")
+    )
+    launcher.write_text(text)
+    res = run_script(tree, home, "uninstall.sh", "--yes")
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert launcher.is_file()
+    assert "left alone" in res.stdout
+
+
+def test_install_says_what_it_is_waiting_for(tmp_path):
+    """R60: a base install says what is being downloaded before
+    each pip step, so a slow connection never looks stuck."""
+    tree = copy_tree(tmp_path)
+    home = make_home(tmp_path)
+    res = installed(tree, home)
+    assert "PySide6 download" in res.stdout
+    assert "this can take a few minutes on a slow connection" in res.stdout
+
+
+def test_install_fails_fast_with_no_network(tmp_path):
+    """R60: with no network, the base install fails in seconds
+    with a plain message — it does not sit in pip's retry loop
+    for minutes in silence. The check is pointed at a dead
+    local address, so no real network is involved."""
+    tree = copy_tree(tmp_path)
+    home = make_home(tmp_path)
+    make_wrapper_venv(tree)
+    start = time.monotonic()
+    res = run_script(
+        tree, home, "install.sh",
+        env_extra={
+            "STELLA_INSTALL_SKIP_NET_CHECK": "",
+            "STELLA_INSTALL_NET_CHECK_URL": "http://127.0.0.1:1/",
+        },
+    )
+    elapsed = time.monotonic() - start
+    assert res.returncode == 1
+    assert elapsed < 30, f"took {elapsed:.1f}s"
+    out = res.stdout + res.stderr
+    assert "Checking the network connection" in out
+    assert "no network connection" in out
+    assert "PySide6 download" not in out  # pip never started
+
+
+def test_training_preflight_default_is_5_gb(tmp_path):
+    """R61: the training preflight defaults to 5 GB — the
+    conservative number until R23 measures the real peak — and
+    the refusal names it."""
+    text = (ROOT / "install-training.sh").read_text()
+    assert 'STELLA_INSTALL_MIN_FREE_KB:-5242880' in text
+    assert "--no-cache-dir" in text
+    # Behavioural: with the threshold at its default (an empty
+    # override means "use the default") and a disk reporting
+    # 1 GB free, the install refuses and names 5 GB. The disk
+    # size comes from a fake df on PATH — the suite's TMPDIR is
+    # the workspace, which has far more than 5 GB free.
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    fake_df = bindir / "df"
+    fake_df.write_text("#!/bin/sh\necho Avail\necho 1000000\n")
+    fake_df.chmod(0o755)
+    tree = copy_tree(tmp_path)
+    home = make_home(tmp_path)
+    make_wrapper_venv(tree)
+    res = run_script(
+        tree, home, "install-training.sh",
+        env_extra={
+            "STELLA_INSTALL_MIN_FREE_KB": "",
+            "PATH": str(bindir) + os.pathsep + os.environ["PATH"],
+        },
+    )
+    assert res.returncode == 1
+    assert "not enough free disk space" in res.stderr
+    assert "5 GB" in res.stderr
+
+
+# -- R62: the training download resumes, through the real script --
+
+
+def _make_report_writing_venv(tree, report_json):
+    """A fake .venv/bin/python whose pip writes a --dry-run
+    --report (the given JSON) instead of resolving, and no-ops
+    every other pip call. Everything else runs the real test
+    python."""
+    bindir = tree / ".venv" / "bin"
+    bindir.mkdir(parents=True, exist_ok=True)
+    wrapper = bindir / "python"
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        "# Fake venv python for the R62 resume test: pip --dry-run\n"
+        "# writes the canned report; other pip calls are no-ops.\n"
+        'if [ "$1" = "-m" ] && [ "$2" = "pip" ]; then\n'
+        "  prev=\"\"\n"
+        "  report=\"\"\n"
+        '  for arg in "$@"; do\n'
+        '    if [ "$prev" = "--report" ]; then report="$arg"; fi\n'
+        '    prev="$arg"\n'
+        "  done\n"
+        '  if [ -n "$report" ]; then\n'
+        "    cat > \"$report\" <<'R62_REPORT_EOF'\n"
+        + report_json
+        + "\nR62_REPORT_EOF\n"
+        "  fi\n"
+        "  exit 0\n"
+        "fi\n"
+        f'exec "{REAL_PYTHON}" "$@"\n'
+    )
+    wrapper.chmod(0o755)
+
+
+class _ResumeWheelServer:
+    """A tiny Range-supporting wheel server for the R62
+    installer test: two fake wheels, a kill mode that cuts
+    every download short, and a request log."""
+
+    def __init__(self):
+        import hashlib
+        from http.server import (
+            BaseHTTPRequestHandler,
+            ThreadingHTTPServer,
+        )
+
+        self.files = {
+            "torch-2.15.0-cp312-cp312-manylinux.whl": b"T" * 4096,
+            "peft-0.21.2-py3-none-any.whl": b"P" * 2048,
+        }
+        self.hashes = {
+            name: hashlib.sha256(data).hexdigest()
+            for name, data in self.files.items()
+        }
+        self.log = []
+        self.mode = "normal"
+        self.kill_after = 512
+        state = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                name = self.path.lstrip("/")
+                data = state.files.get(name)
+                if data is None:
+                    self.send_response(404)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                range_header = self.headers.get("Range")
+                start = 0
+                status = 200
+                if range_header:
+                    try:
+                        start = int(
+                            range_header.split("=", 1)[1].split("-", 1)[0]
+                        )
+                    except ValueError:
+                        start = 0
+                    if start >= len(data):
+                        self.send_response(416)
+                        self.send_header(
+                            "Content-Range", f"bytes */{len(data)}"
+                        )
+                        self.send_header("Content-Length", "0")
+                        self.end_headers()
+                        state.log.append(
+                            (self.path, range_header, 0, 416)
+                        )
+                        return
+                    status = 206
+                body = data[start:]
+                cut = (
+                    state.mode == "kill"
+                    and len(body) > state.kill_after
+                )
+                self.send_response(status)
+                if status == 206:
+                    self.send_header(
+                        "Content-Range",
+                        f"bytes {start}-{len(data) - 1}/{len(data)}",
+                    )
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                if cut:
+                    self.wfile.write(body[: state.kill_after])
+                    self.wfile.flush()
+                    state.log.append(
+                        (self.path, range_header, state.kill_after,
+                         status)
+                    )
+                    self.close_connection = True
+                    return
+                self.wfile.write(body)
+                self.wfile.flush()
+                state.log.append(
+                    (self.path, range_header, len(body), status)
+                )
+
+        self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._httpd.daemon_threads = True
+        self._thread = threading.Thread(
+            target=self._httpd.serve_forever, daemon=True
+        )
+
+    @property
+    def port(self):
+        return self._httpd.server_address[1]
+
+    def url(self, name):
+        return f"http://127.0.0.1:{self.port}/{name}"
+
+    def report_json(self):
+        import json as json_mod
+
+        return json_mod.dumps({
+            "version": "1",
+            "install": [
+                {
+                    "download_info": {
+                        "url": self.url(name),
+                        "archive_info": {
+                            "hashes": {"sha256": self.hashes[name]}
+                        },
+                    },
+                }
+                for name in self.files
+            ],
+        })
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._httpd.shutdown()
+        self._httpd.server_close()
+        return False
+
+
+def test_training_download_resumes_through_the_real_script(tmp_path):
+    """R62: install-training.sh, run against a local wheel
+    server, fails partway with a resume message when the
+    download is cut — and the next run picks up where it
+    stopped (a Range request for the remainder), finishing the
+    download. The runs end at the import check (no real torch
+    in the test env), which proves the download itself got
+    past the failure."""
+    tree = copy_tree(tmp_path)
+    home = make_home(tmp_path)
+    wheels = tmp_path / "wheels"
+    env = {"STELLA_WHEEL_DIR": str(wheels)}
+    with _ResumeWheelServer() as server:
+        _make_report_writing_venv(tree, server.report_json())
+        server.mode = "kill"
+        res = run_script(
+            tree, home, "install-training.sh", env_extra=env,
+        )
+        assert res.returncode == 1
+        out = res.stdout + res.stderr
+        assert "stopped partway" in out
+        assert "pick up where it stopped" in out
+        part = (
+            wheels / "torch-2.15.0-cp312-cp312-manylinux.whl.part"
+        )
+        assert part.is_file()
+        partial_size = part.stat().st_size
+        assert 0 < partial_size < 4096
+
+        server.mode = "normal"
+        server.log.clear()
+        res = run_script(
+            tree, home, "install-training.sh", env_extra=env,
+        )
+        # Past the download: the failure now is the import check
+        # (no real torch), not the download.
+        assert res.returncode == 1
+        assert "cannot be imported" in res.stdout + res.stderr
+        assert (
+            wheels / "torch-2.15.0-cp312-cp312-manylinux.whl"
+        ).read_bytes() == b"T" * 4096
+        assert (
+            wheels / "peft-0.21.2-py3-none-any.whl"
+        ).read_bytes() == b"P" * 2048
+        ranges = [entry[1] for entry in server.log if entry[1]]
+        assert ranges, "the second run made no Range request"
+        resumed_at = int(
+            ranges[0].split("=", 1)[1].split("-", 1)[0]
+        )
+        assert resumed_at == partial_size
+
+
+def test_training_install_falls_back_when_no_report(tmp_path):
+    """R62: when pip cannot list the wheels first (the resolve
+    step fails), the training install falls back to the direct
+    download instead of dying — the install is never worse
+    than before."""
+    tree = copy_tree(tmp_path)
+    home = make_home(tmp_path)
+    # pip fails everywhere: resolve fails, direct download fails.
+    make_wrapper_venv(tree, pip_mode="fail")
+    res = run_script(tree, home, "install-training.sh")
+    assert res.returncode == 1
+    out = res.stdout + res.stderr
+    assert "could not be listed first" in out
+    assert "training packages download failed" in out
+    assert "run bash install-training.sh again" in out
+
+
+# -- R63: click-only uninstall --------------------------------------
+
+
+def test_uninstall_desktop_file_is_executable_in_tree():
+    """R63: the double-click uninstaller must be executable or
+    Nemo will not offer to launch it."""
+    path = ROOT / "Uninstall Stella.desktop"
+    assert path.is_file()
+    assert os.access(path, os.X_OK)
+
+
+def test_uninstall_desktop_file_validates():
+    """R63: desktop-file-validate is clean, when the tool is
+    available in the sandbox."""
+    validator = shutil.which("desktop-file-validate")
+    if validator is None:
+        pytest.skip("desktop-file-validate not installed")
+    res = subprocess.run(
+        [validator, str(ROOT / "Uninstall Stella.desktop")],
+        capture_output=True, text=True,
+    )
+    assert res.returncode == 0, res.stdout + res.stderr
+
+
+def test_uninstall_desktop_runs_uninstaller(tmp_path):
+    """R63: the double-click uninstaller resolves its own folder
+    (via %k, not the working directory) and runs uninstall.sh
+    with bash. Its Exec line carries no nested escaped quotes
+    (GLib rejects those) and it asks for a terminal so the data
+    question can be answered. The data is kept: the prompt's
+    default answer is No."""
+    tree = copy_tree(tmp_path)
+    home = make_home(tmp_path, desktop=True)
+    installed(tree, home)
+    data = home / ".stella" / "profiles"
+    data.mkdir(parents=True)
+    (data / "keep.json").write_text("{}\n")
+    desktop = tree / "Uninstall Stella.desktop"
+    entry = parse_desktop(desktop)
+    assert entry.get("Desktop Entry", "Name") == "Uninstall Stella"
+    assert entry.get("Desktop Entry", "Terminal") == "true"
+    assert entry.get("Desktop Entry", "Type") == "Application"
+    exec_line = entry.get("Desktop Entry", "Exec")
+    assert "uninstall_launcher.py" in exec_line
+    assert "%k" in exec_line
+    assert '\\"' not in exec_line  # no nested escaped quotes
+    # The launcher it runs is the file that runs uninstall.sh.
+    launcher_src = (tree / "uninstall_launcher.py").read_text()
+    assert '"uninstall.sh"' in launcher_src
+    assert '"bash"' in launcher_src
+    # Run the Exec line the way the desktop environment would,
+    # from a different working directory, with %k expanded to
+    # the file. One newline answers the data question with the
+    # default (No, keep the data); the launcher's wait for Enter
+    # then sees EOF and does not hang.
+    argv = [str(desktop) if a == "%k" else a for a in shlex.split(exec_line)]
+    env = dict(os.environ)
+    env["HOME"] = str(home)
+    env["STELLA_INSTALL_MIN_FREE_KB"] = "1024"
+    res = subprocess.run(
+        argv, cwd=tmp_path, env=env, capture_output=True, text=True,
+        input="\n", timeout=300, check=False,
+    )
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "Uninstall finished." in res.stdout
+    assert "Your data is still in" in res.stdout
+    assert (data / "keep.json").is_file()
+    assert not (home / ".local" / "share" / "applications"
+                / "stella.desktop").exists()
+    assert not (home / "Desktop" / "Stella.desktop").exists()
+    assert not (home / "Desktop" / "Install Stella Training.desktop").exists()
+    assert not (home / ".local" / "bin" / "stella").exists()
+    assert not (tree / ".venv").exists()
+    assert not (tree / ".stella-install-receipt").exists()

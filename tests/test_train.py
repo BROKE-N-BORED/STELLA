@@ -1612,6 +1612,144 @@ def test_fetch_hf_file_size_both_fail_is_none(monkeypatch):
     )
 
 
+# -- R72: the real HEAD and ranged-GET helpers -----------------------
+
+
+def _range_server(mode):
+    """A local HTTP server answering one-byte ranged GETs the way
+    a file store does. `mode` picks the reply: "range" (206 with
+    Content-Range), "no-range" (200 with Content-Length only),
+    "garbage" (206 with a Content-Range the regex cannot parse),
+    "error" (404). Returns (server, url)."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    total = 2_000_000_000
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if mode == "range":
+                self.send_response(206)
+                self.send_header(
+                    "Content-Range", f"bytes 0-0/{total}"
+                )
+                self.send_header("Content-Length", "1")
+                self.end_headers()
+                self.wfile.write(b"x")
+            elif mode == "no-range":
+                self.send_response(200)
+                self.send_header("Content-Length", str(total))
+                self.end_headers()
+                self.wfile.write(b"x")
+            elif mode == "garbage":
+                self.send_response(206)
+                self.send_header("Content-Range", "bytes 0-0/unknown")
+                self.send_header("Content-Length", "1")
+                self.end_headers()
+                self.wfile.write(b"x")
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, f"http://127.0.0.1:{server.server_address[1]}/file.bin"
+
+
+def test_hf_file_size_via_range_parses_content_range():
+    # R72: the real ranged GET runs against a local server — the
+    # total comes from the Content-Range header, and a huge size
+    # parses exactly.
+    import stella.train as train_mod
+
+    server, url = _range_server("range")
+    try:
+        assert train_mod._hf_file_size_via_range(url) == 2_000_000_000
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_hf_file_size_via_range_falls_back_to_content_length():
+    # R72: a server with no range support answers 200 with a
+    # Content-Length — the 200-fallback branch trusts it.
+    import stella.train as train_mod
+
+    server, url = _range_server("no-range")
+    try:
+        assert train_mod._hf_file_size_via_range(url) == 2_000_000_000
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_hf_file_size_via_range_garbage_is_none():
+    # R72: a Content-Range the regex cannot parse, on a 206
+    # reply, is None — the length fallback only trusts a 200.
+    import stella.train as train_mod
+
+    server, url = _range_server("garbage")
+    try:
+        assert train_mod._hf_file_size_via_range(url) is None
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_hf_file_size_via_range_error_is_none():
+    # R72: a failing server is None, never an exception.
+    import stella.train as train_mod
+
+    server, url = _range_server("error")
+    try:
+        assert train_mod._hf_file_size_via_range(url) is None
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_hf_file_size_via_head_reads_metadata(monkeypatch):
+    # R72: the real HEAD leaf runs with a fake huggingface_hub
+    # module (so the test needs no hub install): the size comes
+    # from get_hf_file_metadata, a refused HEAD is None, and a
+    # metadata answer without a usable size is None.
+    import sys
+    import types
+
+    import stella.train as train_mod
+
+    class _Meta:
+        def __init__(self, size):
+            self.size = size
+
+    calls = {}
+
+    def fake_metadata(url):
+        calls["url"] = url
+        if calls.get("mode") == "raise":
+            raise ConnectionError("HEAD refused")
+        return _Meta(calls.get("size", 2_000_000_000))
+
+    fake_hub = types.ModuleType("huggingface_hub")
+    fake_hub.get_hf_file_metadata = fake_metadata
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hub)
+    assert (
+        train_mod._hf_file_size_via_head("http://x/file.bin")
+        == 2_000_000_000
+    )
+    assert calls["url"] == "http://x/file.bin"
+    calls["mode"] = "raise"
+    assert train_mod._hf_file_size_via_head("http://x/file.bin") is None
+    del calls["mode"]
+    calls["size"] = None
+    assert train_mod._hf_file_size_via_head("http://x/file.bin") is None
+    calls["size"] = 0
+    assert train_mod._hf_file_size_via_head("http://x/file.bin") is None
+
+
 # -- T33: every split keeps at least one validation row --------------
 
 

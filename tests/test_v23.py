@@ -197,13 +197,13 @@ def test_howto_search_narrows_topics(window, qapp):
     qapp.processEvents()
     assert _visible_rows(howto) == _expected_matches("refusal")
     assert "The refusal probe" in _visible_rows(howto)
-    assert len(_visible_rows(howto)) < 13
+    assert len(_visible_rows(howto)) < 17
     howto.close()
 
 
 def test_howto_search_is_case_insensitive_and_clearable(window, qapp):
     """T193: the search ignores case, and clearing it shows all
-    thirteen topics again."""
+    seventeen topics again (R70: four topics added)."""
     howto = window.open_howto_window()
     qapp.processEvents()
     howto.search_box.setText("SLEEP")
@@ -211,22 +211,21 @@ def test_howto_search_is_case_insensitive_and_clearable(window, qapp):
     assert _visible_rows(howto) == _expected_matches("sleep")
     howto.search_box.clear()
     qapp.processEvents()
-    assert len(_visible_rows(howto)) == 13
+    assert len(_visible_rows(howto)) == 17
     howto.close()
 
 
 def test_howto_search_selects_nothing(window, qapp):
-    """T193: filtering never picks a topic — nothing is selected
-    by default, before or after a search."""
+    """T193 + R92: filtering never picks a topic. The guide opens
+    on Getting started (R92), and typing in the search box leaves
+    that selection alone — it narrows the list, nothing more."""
     howto = window.open_howto_window()
     qapp.processEvents()
-    assert howto.topic_list.currentRow() == -1
+    assert howto.topic_list.currentItem().text() == "Getting started"
     howto.search_box.setText("sleep")
     qapp.processEvents()
-    assert howto.topic_list.currentRow() == -1
-    assert howto.content.toPlainText() == (
-        "Pick a topic on the left to read how it works."
-    )
+    assert howto.topic_list.currentItem().text() == "Getting started"
+    assert "fine-tunes small AI models" in howto.content.toPlainText()
     howto.close()
 
 

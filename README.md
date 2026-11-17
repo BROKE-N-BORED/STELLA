@@ -289,7 +289,8 @@ repairs it the same way.
 
 ## Remove Stella
 
-From a terminal inside the Stella folder:
+Double-click `Uninstall Stella` in the Stella folder, or from a
+terminal inside the folder:
 
 `bash uninstall.sh`
 
@@ -396,11 +397,14 @@ slow on a Ryzen 3 — hours for a real run — and that is expected.
   Ollama Modelfile with the exact `ollama create` command. llama.cpp
   is a separate one-time install (the export names the steps if it
   is missing).
-- **Refusal probe**: a built-in set of 12 plainly benign prompts
-  (coding help, shell commands, plain questions) run before and
-  after tuning, reporting the refusal-rate change. For LFM3 this is
-  informational; for a governing-seat tune it is a gate — if tuning
-  re-taught refusals, the gate fails the tune.
+- **Refusal probe**: a built-in set of 18 plainly benign prompts
+  by default, 24 for a governing seat (coding help, shell
+  commands, plain questions) run before and after tuning,
+  reporting the refusal-rate change. For a governing-seat tune
+  (driver, reviewer, tester, fast) it is a gate: if tuning
+  re-taught refusals, the gate fails the tune (a failed gate
+  exits 3 on the command line); for every other profile it is
+  informational only.
 
 ## Sleep (v0.3)
 
@@ -434,9 +438,13 @@ already knew.
   evaluates old-then-new sequentially; it never loads two models
   at once (two LFM3 loads would be ~7 GB on an 8 GB machine).
 - **Status** — `stella sleep-status <profile> <project>` lists
-  every cycle (rows, dreamed rows, old-loss delta, OK/DEGRADED)
-  and how many dataset rows are still awake. The window's Sleep
-  panel shows the same list; click a cycle to read its report.
+  every cycle (rows, dreamed rows, old-loss delta, OK/DEGRADED,
+  size on disk) and how many dataset rows are still awake. The
+  window's Sleep panel shows the same list; click a cycle to
+  read its report. Old cycles are cleared with `stella
+  sleep-delete` (one cycle) or `stella sleep-prune` (all but
+  the newest N), or the Delete cycle and Prune buttons in the
+  Sleep panel.
 - **Export** — sleep cycles travel with the export (manifest +
   every cycle's adapter, rows, and replay report) and import
   restores them whole.
@@ -483,7 +491,8 @@ proof is LFM3 1.7B on your machine, in this order:
    (or Start training in the Train panel). Watch the loss fall in
    the log. Pause and resume any time.
 6. `bash stella-cli probe lfm3-tool tool-calls`
-   (refusal rate before vs after — informational for LFM3).
+   (refusal rate before vs after: a gate for this profile,
+   since its role is fast; a failed gate exits 3).
 7. Install llama.cpp once if it is not there (the export names the
    steps), then:
    `bash stella-cli export-gguf lfm3-tool tool-calls ~/Desktop`
@@ -544,6 +553,8 @@ After install, `stella` works in a terminal:
 
 `stella show-profile <name>`
 
+`stella clone-profile <name> <new-name> [--with-projects]`
+
 `stella rename-project <profile> <old> <new>`
 
 `stella delete-project <profile> <name> [--purge]`
@@ -552,17 +563,29 @@ After install, `stella` works in a terminal:
 
 `stella show-project <profile> <name>`
 
-`stella train <profile> <project> [--steps N] [--resume] [--force] [--dataset FILE] [--base REF] [--target-modules q_proj,k_proj]`
+`stella clone-project <profile> <name> <new-name>`
+
+`stella train <profile> <project> [--steps N] [--resume] [--force] [--dry-run] [--from-checkpoint N] [--dataset FILE] [--base REF] [--target-modules q_proj,k_proj]`
 
 `stella export-gguf <profile> <project> <dir> [--quant Q4_K_M] [--from-checkpoint N] [--force] [--create]`
 
-`stella probe <profile> <project>`
+`stella probe <profile> <project> [--informational] [--gate]`
 
 `stella sleep <profile> <project> [--dream] [--dream-model TAG] [--rows FILE] [--threshold 0.10]`
 
 `stella sleep-status <profile> <project>`
 
+`stella sleep-delete <profile> <project> <cycle>`
+
+`stella sleep-prune <profile> <project> [--keep N]`
+
 `stella chat [--provider ollama|groq|gemini|custom] [--model <name>]`
+
+`stella save-key <provider> [--base-url <url>] [--model <name>]`
+
+`stella list-keys`
+
+`stella remove-key <provider>`
 
 `stella requant <tag> [--quant Q4_K_M] [--as <tag>]`
 
@@ -570,9 +593,15 @@ After install, `stella` works in a terminal:
 
 `stella pc-info`
 
-`stella distill <profile> <project> --teacher <tag> --prompts <file>`
+`stella distill <profile> <project> --teacher <tag> --prompts <file> [--timeout 300]`
 
 `stella doctor [--check]`
+
+Global flags, available on every command: `--json` prints a
+structured result for scripts (on the list, show, probe,
+sleep-status, and verify commands), `--quiet` silences the
+per-step progress lines on a long run, `--verbose` prints the
+full traceback behind the clean error line.
 
 Every command's `--help` shows a worked example, e.g.
 `stella create-profile --help`.

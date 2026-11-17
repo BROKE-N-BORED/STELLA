@@ -2,7 +2,7 @@
 
 **From:** the full-product review of STELLA v0.24.0, 2026-11-15
 (see `docs/review-2026-11-15.md` for the report).
-**Status:** 129 tasks: 46 done, 77 to do, 6 hard-gated. 0 P0. 23 P1, 52 P2, 54 P3.
+**Status:** 129 tasks: 71 done, 53 to do, 5 hard-gated. 0 P0. 23 P1, 52 P2, 54 P3.
 **How to read it:** each task has an ID (R1–R129), a priority, the area,
 the source finding(s) from the nine audits, the evidence (file:line or
 a measured probe), a one-line plain-words description, and what "done"
@@ -740,7 +740,7 @@ only proof of a claim the product already makes.
   only by a user hitting an error.
 
 ### R52 — `--json` is silently ignored on about 25 commands
-- **Priority:** P2 · **Area:** CLI · **Sources:** A6-W2 · **Status:** not started
+- **Priority:** P2 · **Area:** CLI · **Sources:** A6-W2 · **Status:** DONE in 0.27.0
 - **Evidence:** `--json` silently ignored on ~25 commands (`pc-info`,
   `bridge`, `doctor`, `export`, `train` probed) — plain text with
   exit code 0.
@@ -751,7 +751,7 @@ only proof of a claim the product already makes.
 - **Done when:** no command accepts `--json` and silently returns text.
 
 ### R53 — Export commands print "Package size: about 0 bytes." before failing on a missing profile
-- **Priority:** P2 · **Area:** CLI · **Sources:** A6-W4 · **Status:** not started
+- **Priority:** P2 · **Area:** CLI · **Sources:** A6-W4 · **Status:** DONE in 0.27.0
 - **Evidence:** all four export commands print "Package size: about 0
   bytes." before failing on a missing profile/project.
 - **Problem:** a nonsense line ("0 bytes") appears before the real
@@ -762,7 +762,7 @@ only proof of a claim the product already makes.
   line.
 
 ### R54 — Chat's pre-flight failures print to stdout, and there is no CLI way to save a provider key
-- **Priority:** P2 · **Area:** CLI / chat · **Sources:** A6-W5 · **Status:** not started
+- **Priority:** P2 · **Area:** CLI / chat · **Sources:** A6-W5 · **Status:** DONE in 0.27.0
 - **Evidence:** `chat`'s four pre-flight failures print to stdout, not
   stderr (`stella/cli.py:1463-1495`); there is no CLI way to save a
   provider key, so cloud `chat` is terminal-unusable.
@@ -775,7 +775,7 @@ only proof of a claim the product already makes.
   saved from the CLI.
 
 ### R55 — There is no CLI for cloning a profile or a project, though the engine and GUI both have it
-- **Priority:** P2 · **Area:** CLI · **Sources:** A6-W6 · **Status:** not started
+- **Priority:** P2 · **Area:** CLI · **Sources:** A6-W6 · **Status:** DONE in 0.27.0
 - **Evidence:** no `clone-profile` / `clone-project` commands, though
   the engine and GUI both offer clone.
 - **Problem:** a CLI-only user cannot do something the product can do.
@@ -783,7 +783,7 @@ only proof of a claim the product already makes.
 - **Done when:** both clones work from the CLI.
 
 ### R56 — The nameless-profile warning says the row shows "(unnamed profile)" when it shows the display name
-- **Priority:** P2 · **Area:** CLI · **Sources:** A6-W7 · **Status:** not started
+- **Priority:** P2 · **Area:** CLI · **Sources:** A6-W7 · **Status:** DONE in 0.27.0
 - **Evidence:** the nameless-profile warning says "shown as (unnamed
   profile)" while the row shows the display name.
 - **Problem:** the warning describes a screen the user is not looking
@@ -792,7 +792,7 @@ only proof of a claim the product already makes.
 - **Done when:** the warning names what the user sees.
 
 ### R57 — The installer's Qt-failure advice never names the package to install
-- **Priority:** P2 · **Area:** Installer · **Sources:** A7-F4 · **Status:** not started
+- **Priority:** P2 · **Area:** Installer · **Sources:** A7-F4 · **Status:** DONE in 0.27.0
 - **Evidence:** `install.sh:115-124` Qt-failure advice never names the
   apt package, while the doctor knows it.
 - **Problem:** the user is told something is missing but not what to
@@ -802,7 +802,7 @@ only proof of a claim the product already makes.
 - **Done when:** a Qt failure names the package to install.
 
 ### R58 — The doctor repairs launch files for a folder whose venv is broken
-- **Priority:** P2 · **Area:** Doctor · **Sources:** A7-F5 · **Status:** not started
+- **Priority:** P2 · **Area:** Doctor · **Sources:** A7-F5 · **Status:** DONE in 0.27.0
 - **Evidence:** probed: the doctor repairs launch artifacts for a
   folder with a broken venv.
 - **Problem:** the doctor "fixes" the launcher while the app itself
@@ -813,7 +813,7 @@ only proof of a claim the product already makes.
   instead of reporting a repaired launcher.
 
 ### R59 — Uninstall removes the launcher and symlink without checking they point at this install
-- **Priority:** P2 · **Area:** Uninstaller · **Sources:** A7-F6 · **Status:** not started
+- **Priority:** P2 · **Area:** Uninstaller · **Sources:** A7-F6 · **Status:** DONE in 0.27.0
 - **Evidence:** `uninstall.sh:57-59` removes the launcher/symlink
   without checking they point at `$DIR` — an old folder's uninstall
   breaks the new install after an upgrade.
@@ -824,7 +824,7 @@ only proof of a claim the product already makes.
   launcher alone.
 
 ### R60 — With no network, the base install waits minutes in silence
-- **Priority:** P2 · **Area:** Installer · **Sources:** A7-F7 · **Status:** not started
+- **Priority:** P2 · **Area:** Installer · **Sources:** A7-F7 · **Status:** DONE in 0.27.0
 - **Evidence:** `install.sh:99-108`: a no-network base install waits
   minutes in silence.
 - **Problem:** the user cannot tell whether the install is working or
@@ -835,7 +835,7 @@ only proof of a claim the product already makes.
   gives up with a clear message.
 
 ### R61 — The training install's 3 GB preflight understates the real ~4 GB+ peak
-- **Priority:** P2 · **Area:** Installer · **Sources:** A7-F8 · **Status:** not started
+- **Priority:** P2 · **Area:** Installer · **Sources:** A7-F8 · **Status:** DONE in 0.27.0
 - **Evidence:** the training 3 GB preflight understates the ~4 GB+
   peak (pip cache + venv).
 - **Problem:** the check passes on a disk that cannot hold the install.
@@ -844,7 +844,7 @@ only proof of a claim the product already makes.
 - **Done when:** the preflight number covers the measured peak.
 
 ### R62 — The training download has no resume
-- **Priority:** P2 · **Area:** Installer · **Sources:** A7-F9 · **Status:** not started
+- **Priority:** P2 · **Area:** Installer · **Sources:** A7-F9 · **Status:** DONE in 0.27.0
 - **Evidence:** the training download has no resume (the weights
   download does).
 - **Problem:** an interrupted training install starts the download
@@ -855,7 +855,7 @@ only proof of a claim the product already makes.
   off.
 
 ### R63 — There is no click-only uninstall
-- **Priority:** P2 · **Area:** Uninstaller · **Sources:** A7-F10 · **Status:** not started
+- **Priority:** P2 · **Area:** Uninstaller · **Sources:** A7-F10 · **Status:** DONE in 0.27.0
 - **Evidence:** no click-only uninstall exists; uninstall is a script.
 - **Problem:** the user who never uses the terminal cannot remove the
   app without one.
@@ -865,7 +865,7 @@ only proof of a claim the product already makes.
   kept unless the user says otherwise.
 
 ### R64 — The probe judge still misjudges 9 of 11 new edge cases
-- **Priority:** P2 · **Area:** Probe · **Sources:** A8-4 · **Status:** not started
+- **Priority:** P2 · **Area:** Probe · **Sources:** A8-4 · **Status:** DONE in 0.27.0
 - **Evidence:** probe judgement residuals beyond T30: 9/11 new edge
   cases misjudged (2nd-sentence refusals missed, unlisted blunt
   refusals missed, "here is" override fires on refusal lists,
@@ -877,7 +877,7 @@ only proof of a claim the product already makes.
   tests.
 
 ### R65 — The probe gate is relative-only and trusts the caller's delta
-- **Priority:** P2 · **Area:** Probe · **Sources:** A8-5 · **Status:** not started
+- **Priority:** P2 · **Area:** Probe · **Sources:** A8-5 · **Status:** DONE in 0.27.0
 - **Evidence:** the gate is relative-only and trusts caller delta:
   100%→100% passes; rates 0%→50% with a stale `delta: 0.0` passes
   (`stella/probe.py:426`).
@@ -890,7 +890,7 @@ only proof of a claim the product already makes.
   always-refusing model cannot pass on "no change".
 
 ### R66 — Sleep cycles pile up with no delete, prune, or size anywhere
-- **Priority:** P2 · **Area:** Sleep · **Sources:** A8-6 · **Status:** not started
+- **Priority:** P2 · **Area:** Sleep · **Sources:** A8-6 · **Status:** DONE in 0.27.0
 - **Evidence:** sleep cycles pile up with no delete/prune/size in GUI,
   CLI, or engine (checkpoints got this in v0.20, sleep got none).
 - **Problem:** old sleep cycles eat disk forever with no way to clear
@@ -901,7 +901,7 @@ only proof of a claim the product already makes.
   and the CLI, with its size shown.
 
 ### R67 — The governing-seat warning only fires for marked profiles, not role-only ones
-- **Priority:** P2 · **Area:** Probe · **Sources:** A8-9 · **Status:** not started
+- **Priority:** P2 · **Area:** Probe · **Sources:** A8-9 · **Status:** DONE in 0.27.0
 - **Evidence:** the pre-train warning only fires for marked profiles;
   role-only governing profiles (e.g. role=driver, stock base) train
   for hours unwarned — measured `governing_seat_warning` → None.
@@ -912,7 +912,7 @@ only proof of a claim the product already makes.
   governing-seat warning before training.
 
 ### R68 — The CLI gates everyone by default while the GUI auto-selects: the two disagree
-- **Priority:** P2 · **Area:** Probe / CLI · **Sources:** A8-19B · **Status:** not started
+- **Priority:** P2 · **Area:** Probe / CLI · **Sources:** A8-19B · **Status:** DONE in 0.27.0
 - **Evidence:** CLI probe gates everyone by default; the GUI
   auto-selects. (The README wording half of this finding is R69.)
 - **Problem:** the same probe behaves differently depending on where
@@ -921,7 +921,7 @@ only proof of a claim the product already makes.
 - **Done when:** CLI and GUI agree on who gets gated by default.
 
 ### R69 — README refresh: stale prompt count, missing flags, and the LFM3 probe called "informational"
-- **Priority:** P2 · **Area:** Docs · **Sources:** A8-8R, A8-10, A8-19R · **Status:** not started
+- **Priority:** P2 · **Area:** Docs · **Sources:** A8-8R, A8-10, A8-19R · **Status:** DONE in 0.27.0
 - **Evidence:** "12 prompts" is stale in `README.md:399` (the default
   is 18, governing 24); the Command line section omits
   `--informational`, distill `--timeout`, train `--dry-run` /
@@ -936,7 +936,7 @@ only proof of a claim the product already makes.
   wording match the code.
 
 ### R70 — How to Use refresh: wrong governing seats, stale prompt count, missing topics, and more
-- **Priority:** P2 · **Area:** Docs · **Sources:** A8-7, A8-8H, A8-11, A8-17, A8-18 · **Status:** not started
+- **Priority:** P2 · **Area:** Docs · **Sources:** A8-7, A8-8H, A8-11, A8-17, A8-18 · **Status:** DONE in 0.27.0
 - **Evidence:** wrong governing seats named in `stella/probe.py:3-4`
   docstring, `stella/howto.py:228-229` (judge/merger/grader/router;
   code gates driver/reviewer/tester/fast); "12 prompts" stale in
@@ -955,7 +955,7 @@ only proof of a claim the product already makes.
   the missing features, and the CHANGELOG carries a correction note.
 
 ### R71 — The v0.24 test fixture opens the real `~/.stella` store and real settings
-- **Priority:** P2 · **Area:** Tests · **Sources:** A9-4 · **Status:** not started
+- **Priority:** P2 · **Area:** Tests · **Sources:** A9-4 · **Status:** DONE in 0.27.0
 - **Evidence:** `tests/test_v24.py`'s window fixture opens the REAL
   `~/.stella` store and real QSettings (a bare `MainWindow()` — the
   only one in the suite); `closeEvent` writes session/geometry back
@@ -966,7 +966,7 @@ only proof of a claim the product already makes.
   real settings.
 
 ### R72 — The HEAD and ranged-GET download helpers are never really executed
-- **Priority:** P2 · **Area:** Tests · **Sources:** A9-5 · **Status:** not started
+- **Priority:** P2 · **Area:** Tests · **Sources:** A9-5 · **Status:** DONE in 0.27.0
 - **Evidence:** the HEAD / ranged-GET leaf functions are never executed
   (`stella/train.py:892, 905` are only ever stubbed in
   `tests/test_train.py:1481-1510`); the Content-Range regex and the
@@ -979,7 +979,7 @@ only proof of a claim the product already makes.
 - **Done when:** the real HEAD and ranged-GET paths run under test.
 
 ### R73 — 12 of 30 plain-words error-map entries are untested
-- **Priority:** P2 · **Area:** Tests · **Sources:** A9-6 · **Status:** not started
+- **Priority:** P2 · **Area:** Tests · **Sources:** A9-6 · **Status:** DONE in 0.27.0
 - **Evidence:** needle-by-needle check: 12/30 entries untested (e.g.
   `enospc`, `bad magic`, `could not connect`, `cannot allocate
   memory` appear nowhere in tests).
@@ -989,7 +989,7 @@ only proof of a claim the product already makes.
 - **Done when:** all 30 error-map entries have a test.
 
 ### R74 — Test fixture teardown does not wait for jobs, so a worker can leak into the next test
-- **Priority:** P2 · **Area:** Tests · **Sources:** A9-7 · **Status:** not started
+- **Priority:** P2 · **Area:** Tests · **Sources:** A9-7 · **Status:** DONE in 0.27.0
 - **Evidence:** fixture teardown doesn't wait for jobs — `win.close()`
   is ignored while a job runs, so one forgotten `_wait_for_job` leaks
   a worker into the next test. Test-side only; no product gap was
@@ -1002,7 +1002,7 @@ only proof of a claim the product already makes.
   worker into the next test.
 
 ### R75 — Resume is enabled with nothing to resume, and never offered after a pause or crash
-- **Priority:** P2 · **Area:** GUI / training · **Sources:** A1-F9, A4-F4 · **Status:** not started
+- **Priority:** P2 · **Area:** GUI / training · **Sources:** A1-F9, A4-F4 · **Status:** DONE in 0.27.0
 - **Evidence:** on a never-trained draft, Resume is enabled with 0
   checkpoints (`stella/gui.py:5603-5607` enables Resume whenever
   there is a session and nothing is running, with no checkpoint
@@ -1174,7 +1174,7 @@ only proof of a claim the product already makes.
   schedule.
 
 ### R92 — How to Use opens on an empty pane, not Getting started
-- **Priority:** P3 · **Area:** GUI · **Sources:** A4-F8 · **Status:** HARD-GATED (design decision for Joshua)
+- **Priority:** P3 · **Area:** GUI · **Sources:** A4-F8 · **Status:** DONE in 0.27.0
 - **Evidence:** opening How to Use shows no topic selected and the
   placeholder "Pick a topic on the left to read how it works."
   (probe3.out). In v0.8.0 it opened on "Getting started" with the body

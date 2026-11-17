@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Uninstall Stella
+Comment=Remove Stella from this PC (your data is kept unless you say otherwise)
+Exec=python3 -c "import os,subprocess,sys; d=os.path.dirname(sys.argv[1]) or os.getcwd(); sys.exit(subprocess.call([sys.executable, os.path.join(d, 'uninstall_launcher.py')]))" %k
+Icon=stella
+Terminal=true
+Categories=Utility;
+StartupNotify=true
+Keywords=uninstall;remove;Stella;

@@ -284,9 +284,12 @@ def provider_presence(home: Path | str | None = None) -> dict:
 def missing_key_message(provider_id: str) -> str:
     """Plain words for a provider whose key is not saved yet."""
     display = PROVIDERS.get(provider_id, {}).get("display", provider_id)
+    # R54: the CLI way is named alongside Settings, so a
+    # terminal user is not sent to a window that is not in front
+    # of them — and a window user still sees Settings first.
     return (
         f"No {display} key saved yet. Add it in Settings, under AI "
-        "providers, then come back here."
+        f"providers, or run: stella save-key {provider_id}."
     )
 
 

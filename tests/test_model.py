@@ -1074,10 +1074,12 @@ def test_looks_abliterated_heuristic():
 
 
 def test_governing_seat_warning():
-    """T116 Done: marking a profile for a governing seat with a
-    stock base produces a warning naming the seat and the base;
-    an abliterated base, an unmarked profile, or a governing
-    role alone does not warn."""
+    """T116 Done, widened by R67: marking a profile for a
+    governing seat with a stock base produces a warning naming
+    the seat and the base — and so does a governing ROLE alone
+    (a role-only profile used to train for hours unwarned). An
+    abliterated base, an unmarked non-governing profile, or a
+    non-governing role does not warn."""
     from stella.model import governing_seat_warning
 
     warning = governing_seat_warning(
@@ -1090,10 +1092,22 @@ def test_governing_seat_warning():
     assert governing_seat_warning(
         {"governing_seat": "driver", "ollama_tag": "x-heretic:2b"}
     ) is None
-    # No marker, no warning — a governing role alone does not
-    # warn here (the probe gates governing roles at probe time).
-    assert governing_seat_warning(
+    # R67: a governing role alone warns too, naming the role's
+    # seat — the warning belongs before the hours-long run, not
+    # after it at probe time.
+    warning = governing_seat_warning(
         {"role": "driver", "base_ref": "LiquidAI/LFM3-1.7B"}
+    )
+    assert warning is not None
+    assert "driver" in warning
+    assert "LiquidAI/LFM3-1.7B" in warning
+    # A governing role on an abliterated base does not warn.
+    assert governing_seat_warning(
+        {"role": "driver", "ollama_tag": "x-heretic:2b"}
+    ) is None
+    # A non-governing role does not warn.
+    assert governing_seat_warning(
+        {"role": "vision", "base_ref": "LiquidAI/LFM3-1.7B"}
     ) is None
     assert governing_seat_warning(
         {"governing_seat": "", "base_ref": "LiquidAI/LFM3-1.7B"}

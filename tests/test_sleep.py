@@ -823,3 +823,158 @@ def test_unhealed_cycle_number_is_not_reused(tmp_path, monkeypatch):
         store.project_dir("tiny", "proof") / "sleep" / "cycle-2"
         / "adapter" / "adapter_config.json"
     ).is_file()
+
+
+# -- R66: sleep-cycle delete / prune / size (no torch) ---------------
+
+
+def _seed_sleep_cycle(store, number, payload_bytes=1000):
+    """A finished cycle on disk: report + input file + adapter +
+    a payload file of known size. The manifest entry comes from
+    the orphan-heal (report + cycle_input present), the way a
+    real finished cycle reads. Returns the cycle dir."""
+    from stella.sleep import save_sleep_manifest
+
+    project_dir = store.project_dir("tiny", "proof")
+    cdir = project_dir / "sleep" / f"cycle-{number}"
+    (cdir / "adapter").mkdir(parents=True)
+    (cdir / "adapter" / "adapter_config.json").write_text("{}\n")
+    (cdir / "payload.bin").write_bytes(b"x" * payload_bytes)
+    (cdir / "report.json").write_text(json.dumps({
+        "cycle": number, "status": "OK",
+        "timestamp": "2026-11-13T00:00:00",
+        "real_rows": 6, "dreamed_rows": 0, "steps": 3,
+        "old_loss_before": 2.0, "old_loss_after": 1.9, "new_loss": 1.5,
+    }))
+    (cdir / "cycle_input.json").write_text(json.dumps({
+        "real_hashes": [f"hash-{number}-a", f"hash-{number}-b"],
+        "dreamed_hashes": [],
+    }))
+    # Record the cycle in the manifest the way a finished cycle
+    # is recorded, so delete/prune have an entry to remove.
+    manifest = load_sleep_manifest(store, "tiny", "proof")
+    manifest["cycles"] = [
+        c for c in manifest["cycles"] if c.get("cycle") != number
+    ]
+    manifest["cycles"].append({
+        "cycle": number, "status": "OK",
+        "timestamp": "2026-11-13T00:00:00",
+        "real_rows": 6, "dreamed_rows": 0, "steps": 3,
+        "old_loss_before": 2.0, "old_loss_after": 1.9, "new_loss": 1.5,
+    })
+    manifest["slept_hashes"] = sorted(
+        set(manifest["slept_hashes"])
+        | {f"hash-{number}-a", f"hash-{number}-b"}
+    )
+    save_sleep_manifest(store, "tiny", "proof", manifest)
+    return cdir
+
+
+def _cycle_bytes(cdir):
+    return sum(
+        f.stat().st_size for f in cdir.rglob("*") if f.is_file()
+    )
+
+
+def test_list_sleep_cycles_carries_size(tmp_path):
+    from stella.sleep import sleep_status
+
+    store = _tiny_project(Store(tmp_path / "home"), tmp_path)
+    cdir = _seed_sleep_cycle(store, 1, payload_bytes=1000)
+    cycles = list_sleep_cycles(store, "tiny", "proof")
+    assert len(cycles) == 1
+    assert cycles[0]["size_bytes"] == _cycle_bytes(cdir)
+    assert cycles[0]["size_bytes"] > 1000  # payload + report + input
+    status = sleep_status(store, "tiny", "proof")
+    assert status["total_size_bytes"] == cycles[0]["size_bytes"]
+
+
+def test_delete_sleep_cycle_removes_dir_and_entry(tmp_path):
+    from stella.sleep import delete_sleep_cycle
+
+    store = _tiny_project(Store(tmp_path / "home"), tmp_path)
+    cdir1 = _seed_sleep_cycle(store, 1, payload_bytes=1000)
+    _seed_sleep_cycle(store, 2, payload_bytes=2000)
+    expected = _cycle_bytes(cdir1)
+    result = delete_sleep_cycle(store, "tiny", "proof", 1)
+    assert result == {"cycle": 1, "freed_bytes": expected}
+    assert not cdir1.exists()
+    remaining = list_sleep_cycles(store, "tiny", "proof")
+    assert [c["cycle"] for c in remaining] == [2]
+    # The rows stay slept: deleting the adapter does not
+    # un-sleep them, so they must not sleep again.
+    manifest = load_sleep_manifest(store, "tiny", "proof")
+    assert "hash-1-a" in manifest["slept_hashes"]
+    assert "hash-2-a" in manifest["slept_hashes"]
+    # And the heal cannot resurrect the deleted cycle: the dir
+    # is gone, so a fresh read still lists only cycle 2.
+    assert [c["cycle"] for c in list_sleep_cycles(store, "tiny", "proof")] == [2]
+
+
+def test_delete_sleep_cycle_missing_raises(tmp_path):
+    import pytest
+
+    from stella.sleep import delete_sleep_cycle
+
+    store = _tiny_project(Store(tmp_path / "home"), tmp_path)
+    with pytest.raises(StellaError, match="no sleep cycle 3"):
+        delete_sleep_cycle(store, "tiny", "proof", 3)
+
+
+def test_delete_sleep_cycle_refuses_while_job_running(tmp_path):
+    import pytest
+
+    from stella.job_lock import job_lock
+    from stella.sleep import delete_sleep_cycle
+
+    store = _tiny_project(Store(tmp_path / "home"), tmp_path)
+    _seed_sleep_cycle(store, 1)
+    with job_lock(store.home, "training tiny/proof"):
+        with pytest.raises(StellaError, match="while a job is running"):
+            delete_sleep_cycle(store, "tiny", "proof", 1)
+    # The cycle is still there after the refusal.
+    assert len(list_sleep_cycles(store, "tiny", "proof")) == 1
+
+
+def test_prune_sleep_cycles_keeps_newest(tmp_path):
+    from stella.sleep import prune_sleep_cycles
+
+    store = _tiny_project(Store(tmp_path / "home"), tmp_path)
+    cdir1 = _seed_sleep_cycle(store, 1, payload_bytes=1000)
+    cdir2 = _seed_sleep_cycle(store, 2, payload_bytes=2000)
+    cdir3 = _seed_sleep_cycle(store, 3, payload_bytes=3000)
+    total = (
+        _cycle_bytes(cdir1) + _cycle_bytes(cdir2) + _cycle_bytes(cdir3)
+    )
+    result = prune_sleep_cycles(store, "tiny", "proof", keep=1)
+    assert result["kept"] == [3]
+    assert result["deleted"] == [1, 2]
+    assert result["total_before"] == total
+    assert result["total_after"] == _cycle_bytes(cdir3)
+    assert result["freed_bytes"] == total - _cycle_bytes(cdir3)
+    assert not cdir1.exists()
+    assert not cdir2.exists()
+    assert cdir3.is_dir()
+    assert [c["cycle"] for c in list_sleep_cycles(store, "tiny", "proof")] == [3]
+
+
+def test_prune_sleep_cycles_keep_zero_refuses(tmp_path):
+    import pytest
+
+    from stella.sleep import prune_sleep_cycles
+
+    store = _tiny_project(Store(tmp_path / "home"), tmp_path)
+    _seed_sleep_cycle(store, 1)
+    with pytest.raises(StellaError, match="at least 1 sleep cycle"):
+        prune_sleep_cycles(store, "tiny", "proof", keep=0)
+
+
+def test_prune_sleep_cycles_nothing_to_prune(tmp_path):
+    from stella.sleep import prune_sleep_cycles
+
+    store = _tiny_project(Store(tmp_path / "home"), tmp_path)
+    _seed_sleep_cycle(store, 1, payload_bytes=1000)
+    result = prune_sleep_cycles(store, "tiny", "proof", keep=3)
+    assert result["deleted"] == []
+    assert result["kept"] == [1]
+    assert result["freed_bytes"] == 0

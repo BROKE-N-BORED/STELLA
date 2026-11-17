@@ -1,3 +1,80 @@
+# STELLA v0.27.0 — Test Report
+
+Verified 2026-11-17 by the coordinator from a FRESH UNZIP of
+stella-v0.27.zip (1,165,983 bytes, SHA-256
+dc345d04ab412bf7ccabdef2855b0389b0477cf9838e177f60ce8649ebe549e7),
+not from the builders' claims. Python 3.12.3, PySide6 offscreen Qt,
+forge-v2-testenv; TMPDIR under the workspace (STELLA has no
+QFileSystemWatcher, so this is safe).
+
+## Suite: 1749 passed, 65 skipped (1821 collected)
+
+The single-process full run OOMs on this 6 GB VM, so the suite ran
+in 4 chunks from the same fresh unzip: non-GUI 1373 passed + 65
+skipped + 6 failed, test_gui.py in 3 chunks (129 + 124 + 123
+passed + 1 failed). Counts reconcile exactly to the 1821
+collected. Of the 7 failures, 4 were real merge defects fixed in
+place and re-verified green, and 3 are proven load flakes:
+
+- test_json_sweep_no_command_silently_returns_text[sleep-delete]
+  and [sleep-prune]: KeyError — Builder A's R52 sweep map had no
+  entries for Builder B's new R66 commands. The product gate
+  already refused --json for them correctly; the fix was two
+  entries in the sweep's arg map (test-only).
+- test_fetch_downloads_a_wheel_from_scratch and
+  test_fetch_finalizes_a_complete_partial_file: the fake wheel
+  server logged each request AFTER serving the body, so the test
+  asserted on the log before the handler thread appended to it
+  (the log entry was there by the time pytest formatted the
+  failure). The server now logs before serving (test-only).
+- test_cli_train_ctrl_c_pauses and
+  test_cli_train_second_ctrl_c_exits_at_once: signal timing under
+  load. 5 solo runs: fail, fail, pass, pass, split — the pair
+  passes when the box is quiet. Same flake as v0.25.0/v0.26.0.
+- test_second_main_exits_zero_while_first_runs: second-launch
+  timing under load. 3/3 solo. Same flake as v0.26.0.
+
+The fixed tests were re-run from a second fresh unzip of the
+rebuilt zip: 27 passed (16 wheel_fetch + 2 sweep + 9 test_v27).
+
+## CLI smoke: green
+
+`stella-cli --version` reports 0.27.0; --help lists sleep-delete,
+sleep-prune, save-key, clone-profile, clone-project;
+`sleep-delete --help` works; `profiles --json` prints [].
+
+## GUI drive: green
+
+drive_gui.py offscreen: window opens, job buttons Train / Sleep /
+Make smaller / Teach a small model, Go, Export GGUF, Run refusal
+probe. Screenshot eyeballed clean — and it visibly proves R92:
+How to Use opens on Getting started, the topic selected and its
+body shown, with the R70 topics (Bridge, Checkpoints, Governing
+seats, Recipe and adapter packages) in the list.
+
+## Sweeps
+
+Em-dash sweep of non-docstring string literals: 0 hits. Secrets
+grep: clean. Zip modes: all scripts 0o100755, all plain files
+0o100644, file-type bits present; all entries deflated.
+
+## Merge notes
+
+Two conflicts, both additive: README.md (kept A's clone-project
+line + B's updated train line) and tests/test_v27.py (both
+builders created it — combined: B's file as base, one copy of
+the version tests + each half's slice tests). The merge caught
+two real defects neither builder's green run showed: the JSON
+sweep KeyError above, and the R13 desktop training icon — its
+Exec used the %k pattern, which resolves to the Desktop folder,
+so the Desktop copy was broken since v0.25.0. install.sh now
+rewrites the Desktop copy's Exec to the absolute launcher path
+(the tree copy keeps the portable %k form), uninstall.sh removes
+the Desktop training icon when it names this install, and the
+installer tests now double-click the Desktop copy for real.
+
+---
+
 # STELLA v0.26.0 — Test Report
 
 Verified 2026-11-17 by the coordinator from a FRESH UNZIP of

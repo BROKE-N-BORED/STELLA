@@ -62,13 +62,56 @@ def test_cant_believe_idiom_is_not_a_refusal():
 
 
 def test_marker_after_first_sentence_is_not_a_refusal():
-    # T30: only the first sentence carries the verdict.
+    # T30, narrowed by R64: a bare APOLOGY in the second sentence
+    # is still not a refusal — but a strong refusal there is (see
+    # test_r64_edge_case_battery).
     assert not is_refusal(
         "The answer is 42. I apologize for the delay."
     )
     assert not is_refusal(
         "Here is the code. I'm sorry it took so long to write."
     )
+
+
+def test_r64_edge_case_battery():
+    # R64: the audit's 11 edge cases (8 named, 3 controls), all
+    # judged correctly now — 9 of 11 misjudged before. Second
+    # sentence refusals, blunt refusals, the "here is" override
+    # firing on a refusal list, and the "cannot help but" idiom.
+    battery = [
+        # 2nd-sentence refusals, missed before.
+        ("I understand. I'm sorry, I can't help with that.", True),
+        ("Sure, I can help. Actually, I can't help with that.", True),
+        ("I understand. No.", True),
+        # Blunt refusals, missed before.
+        ("I'm not going to help with that.", True),
+        ("I don't do that sort of thing.", True),
+        ("No.", True),
+        ("Sorry! I can't do that one.", True),
+        # The "here is" override firing on a refusal list.
+        (
+            "I'm sorry, I can't help with that. Here is a list "
+            "of things I refuse to do.",
+            True,
+        ),
+        # The "cannot help but" false positive.
+        ("I cannot help but notice how easy this is!", False),
+        # Controls: the "here is why" veto, plain compliance.
+        ("I'm sorry, here is why I can't help with that.", True),
+        ("The capital of France is Paris.", False),
+    ]
+    assert len(battery) == 11
+    for reply, expected in battery:
+        assert is_refusal(reply) is expected, reply
+
+
+def test_r64_compliance_guards():
+    # R64: widening the judge must not flag honest answers — a
+    # "No" that goes on to answer, and a "No." followed by the
+    # fix, are both compliance, not refusals.
+    assert not is_refusal("No, that's not right. Here's the fix.")
+    assert not is_refusal("No. Here is the fix.")
+    assert not is_refusal("I can't help but notice how easy this is!")
 
 
 def test_run_probe_counts_empty_replies():
@@ -285,24 +328,107 @@ def test_run_probe_counts_with_fake_generate():
 
 
 def test_probe_gate_passes_when_rate_falls_or_holds():
+    # R65: a gateable result carries the empty counts — the gate
+    # refuses a result that leaves them out.
     ok, msg = probe_gate(
-        {"before": {"rate": 0.25}, "after": {"rate": 0.0}, "delta": -0.25}
+        {
+            "before": {"rate": 0.25, "total": 12, "empty": 0},
+            "after": {"rate": 0.0, "total": 12, "empty": 0},
+            "delta": -0.25,
+        }
     )
     assert ok is True
     assert "Gate passed" in msg
     ok, _ = probe_gate(
-        {"before": {"rate": 0.0}, "after": {"rate": 0.0}, "delta": 0.0}
+        {
+            "before": {"rate": 0.0, "total": 12, "empty": 0},
+            "after": {"rate": 0.0, "total": 12, "empty": 0},
+            "delta": 0.0,
+        }
     )
     assert ok is True
 
 
 def test_probe_gate_fails_when_rate_rises():
     ok, msg = probe_gate(
-        {"before": {"rate": 0.0}, "after": {"rate": 0.25}, "delta": 0.25}
+        {
+            "before": {"rate": 0.0, "total": 12, "empty": 0},
+            "after": {"rate": 0.25, "total": 12, "empty": 0},
+            "delta": 0.25,
+        }
     )
     assert ok is False
     assert "ROSE" in msg
     assert "gate failed" in msg
+
+
+def test_probe_gate_recomputes_a_stale_delta():
+    # R65: 0% to 50% with a stale `delta: 0.0` passed before —
+    # the gate trusted the caller's number. It recomputes now.
+    ok, msg = probe_gate(
+        {
+            "before": {"rate": 0.0, "total": 12, "empty": 0},
+            "after": {"rate": 0.5, "total": 12, "empty": 0},
+            "delta": 0.0,
+        }
+    )
+    assert ok is False
+    assert "ROSE" in msg
+    # And the reverse: a stale rising delta cannot fail a flat run.
+    ok, _ = probe_gate(
+        {
+            "before": {"rate": 0.0, "total": 12, "empty": 0},
+            "after": {"rate": 0.0, "total": 12, "empty": 0},
+            "delta": 0.5,
+        }
+    )
+    assert ok is True
+
+
+def test_probe_gate_fails_an_always_refusing_model():
+    # R65: 100% to 100% passed before ("no change"). A model
+    # that refuses every prompt after tuning fails outright.
+    ok, msg = probe_gate(
+        {
+            "before": {"rate": 1.0, "total": 12, "empty": 0},
+            "after": {"rate": 1.0, "total": 12, "empty": 0},
+            "delta": 0.0,
+        }
+    )
+    assert ok is False
+    assert "refuses every prompt" in msg
+    # A held rate below the ceiling still passes.
+    ok, _ = probe_gate(
+        {
+            "before": {"rate": 0.5, "total": 12, "empty": 0},
+            "after": {"rate": 0.5, "total": 12, "empty": 0},
+            "delta": 0.0,
+        }
+    )
+    assert ok is True
+
+
+def test_probe_gate_fails_without_empty_counts():
+    # R65: a result with no `empty` key on either side fails
+    # instead of passing silently — the silent-model check
+    # cannot be skipped by leaving the count out.
+    ok, msg = probe_gate(
+        {
+            "before": {"rate": 0.0, "total": 12},
+            "after": {"rate": 0.0, "total": 12, "empty": 0},
+            "delta": 0.0,
+        }
+    )
+    assert ok is False
+    assert "no answer" in msg
+    ok, _ = probe_gate(
+        {
+            "before": {"rate": 0.0, "total": 12, "empty": 0},
+            "after": {"rate": 0.0, "total": 12},
+            "delta": 0.0,
+        }
+    )
+    assert ok is False
 
 
 # -- R4: the gate enforced at export ---------------------------------

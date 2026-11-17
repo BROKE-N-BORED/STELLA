@@ -1,6 +1,6 @@
 """STELLA How to Use index: the built-in guide.
 
-Thirteen topics, plain words, no jargon left unexplained. Every claim
+Seventeen topics, plain words, no jargon left unexplained. Every claim
 here is checked against what Stella actually does: things that do
 not work yet say so in plain words. No em-dashes in this text
 (Stella rule U33) and no bare ampersands (U11).
@@ -100,6 +100,28 @@ Bigger models need more memory. This PC has 8 GB. Models around
 not fit, and Stella will refuse rather than freeze your PC.""",
     ),
     (
+        "Bridge",
+        """Bridge finds the Hugging Face home of a model you
+already have in Ollama. Training needs the Hugging Face version
+of a model, and Ollama only knows its own tag (like
+qwen3.5:4b), not where the weights came from. Bridge looks the
+tag up and tells you the Hugging Face name to put in Base ref,
+so the profile you picked from Ollama can be trained.
+
+It runs from the command line: stella bridge followed by the
+tag. The answer is a short report: the Hugging Face repo when
+Bridge is sure, or its best guess with how sure it is, plus
+what to check when it cannot tell. Copy the repo name it gives
+into the profile's Base ref, then Download model pulls the
+weights the usual way.
+
+Honest limits: Bridge matches by name, so it can guess wrong
+for a tag it has never seen, and it cannot help with a model
+that was made by hand in Ollama and never came from Hugging
+Face. When it is unsure, it says so instead of guessing
+quietly.""",
+    ),
+    (
         "Profiles",
         """A profile is one base model with its own home: its weights
 and its projects. The base model itself is never touched.
@@ -112,7 +134,8 @@ Display name. Just a label for the list.
 Role. Only matters if Code Forge uses this profile as a seat
 (driver, reviewer, and so on). Leave blank otherwise.
 Ollama tag. The model as Ollama knows it on this PC. Used for
-dreaming and the refusal probe.
+dreaming: the sleep phase asks that model to write practice
+examples. The refusal probe does not use it.
 Base ref. Where training loads the base model from: a Hugging
 Face name like LiquidAI/LFM3-1.7B. Needed before you train.
 
@@ -166,6 +189,32 @@ untouched. To use the tuned model in Ollama, export it as GGUF
 (see GGUF export to Ollama).""",
     ),
     (
+        "Checkpoints",
+        """A checkpoint is a saved stopping point inside a
+training run: the adapter as it was at one step, plus the
+training state. Training saves one every few steps on its own,
+and Pause saves one before it stops. Resume picks up from the
+last one, so a paused run loses nothing.
+
+The Train panel lists them under Checkpoints, each with its
+step, loss, size, and date, and how much disk they use all
+together. Pick one to see its details. Resume from selected
+restarts training from that checkpoint instead of the latest
+one: useful when the run went wrong after an earlier good
+point.
+
+Delete checkpoint removes the picked one for good, and Prune
+keeps only the newest few (pick how many) and deletes the rest
+for good. Both ask first, showing the size, and the default
+answer is No. Deleting is permanent on purpose: the point is
+freeing disk, and a trash folder would not free any.
+
+Sleep cycles have the same treatment in the Sleep panel: each
+cycle shows its size, and Delete cycle and Prune clear old
+cycles for good. Deleting a sleep cycle never un-sleeps its
+rows: they stay recorded as slept.""",
+    ),
+    (
         "Sleep",
         """Sleep is for teaching a model new things without it
 forgetting the old things.
@@ -209,11 +258,37 @@ warning. A project with no weights must not claim to be
 finished.""",
     ),
     (
+        "Recipe and adapter packages",
+        """A full project package (see Export and import) carries
+everything. Sometimes you want to share just one part. Two
+smaller packages do that, both from the File menu.
+
+A recipe is the settings with no weights: the dataset
+reference, the training settings, and the notes. It is tiny,
+and it is how you share a setup: someone imports the recipe
+and trains it on their own weights. A recipe never carries
+weights by design, so importing one from a finished project
+gives you a draft to train, not a finished model. That is not
+a fault: the weights were never in the package.
+
+An adapter package is the bare trained weights: the adapter
+alone, with no project around it. Import it into a project
+with the same base model, and that project gains the trained
+adapter. Or import it on its own, and Stella builds a new
+project around it. The adapter keeps the base model's name
+with it, so it lands on the right base.
+
+Both kinds also travel as one .stella file, the same as a
+full package, and import reads folders and .stella files
+alike.""",
+    ),
+    (
         "The refusal probe",
         """The refusal probe checks whether tuning taught the model
-to refuse things it used to answer. It runs 12 plainly harmless
-prompts (coding help, plain questions) through the model before
-and after tuning, and counts refusals each time.
+to refuse things it used to answer. It runs 18 plainly harmless
+prompts by default, 24 for a governing seat (coding help, plain
+questions), through the model before and after tuning, and counts
+refusals each time.
 
 Run refusal probe is on the main screen, under the training
 details. It loads the base model,
@@ -226,9 +301,37 @@ answer that happens to contain the word "cannot". Read the counts
 as a signal, not a verdict.
 
 For most projects the probe is information only. For a model
-headed to a governing seat in Code Forge (a judge, a reviewer
-with veto, a merger), a probe that shows refusals going up after
+headed to a governing seat in Code Forge (driver, reviewer,
+tester, fast), a probe that shows refusals going up after
 tuning is a stop sign.""",
+    ),
+    (
+        "Governing seats",
+        """A governing seat is a job in Code Forge where the model
+must not refuse ordinary work: driver, reviewer, tester, and
+fast. A model bound for one of those seats runs on an
+abliterated base (a base with its refusals trained out), and
+Stella guards it twice.
+
+First, before training: a profile bound for a governing seat
+on a stock base warns you, naming the seat and the base. The
+window asks whether to train anyway; the command line warns
+and carries on. Training a governing seat on a stock base
+teaches it to refuse, which is exactly what the seat must not
+do.
+
+Second, after training: the refusal probe becomes a gate
+instead of information (see The refusal probe). And a
+governing-seat tune cannot be exported to GGUF until its probe
+has passed: the export refuses, and says to run the probe
+first.
+
+A profile is bound for a seat in two ways: its Role names a
+governing seat (driver, reviewer, tester, fast), or its
+governing-seat marker names one. The marker lives in the
+profile window, under Role: pick the seat, or leave it blank.
+Either way binds the same: the warning, the gate, and the
+export block all follow.""",
     ),
     (
         "GGUF export to Ollama",
@@ -237,9 +340,12 @@ a GGUF file. Export GGUF is on the main screen, under the training
 details.
 
 It does three steps: it merges the adapter into the base model,
-converts the result to GGUF format, and quantizes it to Q4_K_M
-(4-bit, the size that runs well on this PC). Then it shows you
-the exact ollama create command to run.
+converts the result to GGUF format, and quantizes it to the
+size you picked in the Quant list beside the button (Q4_K_M
+by default: 4-bit, the size that runs well on this PC). Pick
+a bigger quant for a sharper model that uses more disk, or a
+smaller one to save space. Then it shows you the exact ollama
+create command to run.
 
 You need llama.cpp installed for the convert and quantize steps.
 Stella checks for it first and tells you if it is missing. The
@@ -341,7 +447,7 @@ is safe to share.""",
 
 
 def topic_titles() -> list[str]:
-    """The thirteen topic titles, in order."""
+    """The seventeen topic titles, in order."""
     return [title for title, _ in TOPICS]
 
 

@@ -219,8 +219,13 @@ def test_doctor_names_no_dev_machine_paths():
 # Icon=path launcher is no longer reported OK ----------------------
 
 
-def _fake_tree(tmp_path):
-    """A minimal install folder: run.sh + the icon files, no venv."""
+def _fake_tree(tmp_path, venv=True):
+    """A minimal install folder: run.sh + the icon files, plus a
+    working venv by default — a stub python that exits 0, so the
+    PySide6 check passes without a real window. R58: the doctor
+    only repairs launch artifacts when the venv is present, so
+    the repair tests need one; pass venv=False for the
+    broken-venv tests."""
     from stella.install import ICON_SIZES
 
     tree = tmp_path / "tree"
@@ -229,6 +234,12 @@ def _fake_tree(tmp_path):
     (tree / "assets" / "stella.png").write_bytes(b"fake png")
     for size in ICON_SIZES:
         (tree / "assets" / f"stella-{size}.png").write_bytes(b"fake png")
+    if venv:
+        bindir = tree / ".venv" / "bin"
+        bindir.mkdir(parents=True)
+        stub = bindir / "python"
+        stub.write_text("#!/bin/sh\nexit 0\n")
+        stub.chmod(0o755)
     return tree
 
 
@@ -338,3 +349,114 @@ def test_launcher_with_good_icon_is_ok(tmp_path):
     assert _launcher_check(
         run_checks(tree, home, fix=False)
     ).status == BROKEN
+
+
+# -- R57: the installer names the package ---------------------------
+
+
+@pytest.mark.parametrize("stderr, package", MISSING_LIBRARY_CASES)
+def test_explain_missing_library_names_the_package(stderr, package):
+    """R57: explain_missing_library names the same package the
+    PySide6 check names — the installer shares the doctor's map,
+    so the two can never disagree."""
+    from stella.doctor import explain_missing_library
+
+    advice = explain_missing_library(stderr)
+    assert advice is not None
+    assert package in advice
+    assert f"sudo apt install {package}" in advice
+
+
+def test_explain_missing_library_unknown_is_none():
+    """R57: a failure naming no known library gets no invented
+    diagnosis — the installer keeps its generic advice then."""
+    from stella.doctor import explain_missing_library
+
+    assert explain_missing_library("Aborted (core dumped)") is None
+    assert explain_missing_library("") is None
+
+
+def test_doctor_explain_mode(tmp_path, capsys):
+    """R57: `python -m stella.doctor explain <file>` prints the
+    fix for a captured Qt failure (exit 0), and stays silent
+    with exit 1 when the failure names no known library."""
+    from stella.doctor import main
+
+    err_file = tmp_path / "qt.err"
+    err_file.write_text(
+        "libEGL.so.1: cannot open shared object file\n"
+        "Aborted (core dumped)\n"
+    )
+    assert main(["explain", str(err_file)]) == 0
+    out = capsys.readouterr().out
+    assert "sudo apt install libegl1" in out
+    err_file.write_text("Aborted (core dumped)\n")
+    assert main(["explain", str(err_file)]) == 1
+    assert capsys.readouterr().out == ""
+    assert main(["explain", str(tmp_path / "missing.err")]) == 1
+    assert main(["explain"]) == 2
+
+
+# -- R58: a broken venv blocks launch repairs -----------------------
+
+
+def _check_by_name(checks, name):
+    return next(c for c in checks if c.name == name)
+
+
+def test_doctor_with_broken_venv_repairs_nothing(tmp_path):
+    """R58: fix-mode doctor on a folder with no venv writes no
+    launcher, no symlink, and no icons — each step names the
+    broken venv as the blocking cause instead of reporting
+    FIXED, and no receipt is written."""
+    from stella import install as install_mod
+    from stella.doctor import BROKEN, run_checks
+
+    tree = _fake_tree(tmp_path, venv=False)
+    home = tmp_path / "home"
+    home.mkdir()
+    checks = run_checks(tree, home, fix=True)
+    assert _check_by_name(checks, "venv").status == BROKEN
+    assert _check_by_name(checks, "pyside6").status == BROKEN
+    for name in ("launcher", "symlink", "icon"):
+        check = _check_by_name(checks, name)
+        assert check.status == BROKEN, name
+        assert "Python environment" in check.detail, name
+        assert "install.sh" in check.detail, name
+    assert not install_mod.launcher_path(home).exists()
+    assert not install_mod.symlink_path(home).exists()
+    assert not install_mod.hicolor_icons_present(home)
+    assert not (tree / ".stella-install-receipt").exists()
+    assert not any(c.status == "FIXED" for c in checks)
+
+
+def test_doctor_check_mode_with_broken_venv_names_the_venv(tmp_path):
+    """R58: --check on a folder with no venv names the venv too —
+    the old "run stella doctor to re-link it" sent the user in a
+    loop, since the doctor cannot fix this without a venv."""
+    from stella.doctor import BROKEN, run_checks
+
+    tree = _fake_tree(tmp_path, venv=False)
+    home = tmp_path / "home"
+    home.mkdir()
+    checks = run_checks(tree, home, fix=False)
+    check = _check_by_name(checks, "launcher")
+    assert check.status == BROKEN
+    assert "Python environment" in check.detail
+    assert "run stella doctor" not in check.detail
+
+
+def test_doctor_with_venv_still_repairs(tmp_path):
+    """R58, the other side: with a working venv, a stale launcher
+    and a missing symlink are still repaired as before."""
+    from stella import install as install_mod
+    from stella.doctor import FIXED, run_checks
+
+    tree = _fake_tree(tmp_path, venv=True)
+    home = tmp_path / "home"
+    home.mkdir()
+    checks = run_checks(tree, home, fix=True)
+    assert _check_by_name(checks, "launcher").status == FIXED
+    assert _check_by_name(checks, "symlink").status == FIXED
+    assert install_mod.launcher_path(home).is_file()
+    assert install_mod.symlink_path(home).is_symlink()

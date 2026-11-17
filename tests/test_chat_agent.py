@@ -481,9 +481,11 @@ def test_start_training_paused_report(agent, store, seeded, monkeypatch):
 
 def test_run_probe_tool(agent, store, seeded, monkeypatch):
     def fake_probe(store, profile, project):
+        # R65: a realistic probe result carries the empty counts
+        # — the gate refuses a result that leaves them out.
         return {
-            "before": {"total": 12, "refusals": 0, "rate": 0.0},
-            "after": {"total": 12, "refusals": 1, "rate": 0.083},
+            "before": {"total": 12, "refusals": 0, "empty": 0, "rate": 0.0},
+            "after": {"total": 12, "refusals": 1, "empty": 0, "rate": 0.083},
             "delta": 0.083,
         }
 

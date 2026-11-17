@@ -771,7 +771,12 @@ class TrainWorker(QThread):
                 f"it to {event['new_total']} total steps."
             )
         elif kind == "paused":
-            self.log.emit(f"Paused at step {event['step']}.")
+            # R75: the pause names the way back — Resume is the
+            # offer, not just a log line.
+            self.log.emit(
+                f"Paused at step {event['step']}. "
+                "Press Resume when you are ready."
+            )
         elif kind == "done":
             self.log.emit(f"Done. Adapter saved to {event['adapter']}")
 
@@ -3120,18 +3125,19 @@ class SettingsWindow(QDialog):
 
 class HowToUseWindow(QDialog):
     """The built-in guide: topics on the left, plain-words content
-    on the right. Nothing is selected at first: pick a topic."""
+    on the right. Opens on Getting started (R92, Joshua's call
+    2026-11-17: the first thing a lost user sees is the short
+    path, not an empty pane)."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("How to Use Stella")
         self.resize(900, 600)
         layout = QHBoxLayout(self)
-        # T193: a search box over the topics — thirteen topics in
+        # T193: a search box over the topics — seventeen topics in
         # a plain list is a lot to scan. Typing narrows the list
         # by title or body; clearing it shows all of them again.
-        # Nothing is selected by default, and filtering never
-        # picks a topic for the user.
+        # Filtering never picks a topic for the user.
         left = QVBoxLayout()
         self.search_box = QLineEdit()
         self.search_box.setPlaceholderText("Search the guide...")
@@ -3149,6 +3155,9 @@ class HowToUseWindow(QDialog):
         )
         layout.addWidget(self.content, 2)
         _chain_tab_order([self.search_box, self.topic_list, self.content])
+        # R92: open on Getting started — the window's own
+        # show_topic lands the guide there and shows the body.
+        self.show_topic("Getting started")
 
     def _on_search(self, text):
         needle = text.strip().lower()
@@ -5051,6 +5060,42 @@ class MainWindow(QMainWindow):
         self.sleep_cycles.setMaximumHeight(90)
         self.sleep_cycles.itemClicked.connect(self._on_sleep_cycle_clicked)
         sleep_section.content_layout.addWidget(self.sleep_cycles)
+        # Disk usage (R66): what all the sleep cycles cost, the
+        # way the checkpoint list shows its cost.
+        self.sleep_disk_label = QLabel("")
+        self.sleep_disk_label.setWordWrap(True)
+        sleep_section.content_layout.addWidget(self.sleep_disk_label)
+        # Cycle actions (R66): delete the picked cycle, or prune
+        # down to the newest N. Delete and prune are permanent
+        # (the point is freeing disk) and both confirm first,
+        # defaulting to No — the same shape as the checkpoint
+        # actions above.
+        sleep_btns = QHBoxLayout()
+        self.sleep_delete_btn = QPushButton("Delete cycle")
+        self.sleep_delete_btn.setToolTip(
+            "Delete the picked sleep cycle for good. Its adapter "
+            "is gone, but its rows stay slept."
+        )
+        self.sleep_delete_btn.clicked.connect(self._delete_sleep_cycle)
+        sleep_btns.addWidget(self.sleep_delete_btn)
+        sleep_btns.addWidget(QLabel("Keep newest"))
+        self.sleep_keep_spin = QSpinBox()
+        self.sleep_keep_spin.setRange(1, 99)
+        self.sleep_keep_spin.setValue(3)
+        self.sleep_keep_spin.setToolTip(
+            "How many of the newest sleep cycles pruning keeps. "
+            "The rest are deleted for good."
+        )
+        sleep_btns.addWidget(self.sleep_keep_spin)
+        self.sleep_prune_btn = QPushButton("Prune")
+        self.sleep_prune_btn.setToolTip(
+            "Delete old sleep cycles, keeping the newest ones "
+            "you picked. Deleted for good."
+        )
+        self.sleep_prune_btn.clicked.connect(self._prune_sleep_cycles)
+        sleep_btns.addWidget(self.sleep_prune_btn)
+        sleep_btns.addStretch(1)
+        sleep_section.content_layout.addLayout(sleep_btns)
         layout.addWidget(sleep_section)
         self.sleep_section = sleep_section
         layout.addStretch(1)
@@ -5087,6 +5132,8 @@ class MainWindow(QMainWindow):
             self.log_section.header_btn, self.train_log,
             self.sleep_section.header_btn,
             self.sleep_dream_check, self.sleep_cycles,
+            self.sleep_delete_btn, self.sleep_keep_spin,
+            self.sleep_prune_btn,
         ])
 
     # -- helpers ----------------------------------------------------
@@ -5843,8 +5890,26 @@ class MainWindow(QMainWindow):
             self.train_sample_btn,
         ):
             w.setEnabled(has_session)
+        # R75: Resume needs something to resume — a session, no
+        # run in progress, and at least one checkpoint. A fresh
+        # draft greys it out instead of starting a worker the
+        # engine then refuses ("nothing to resume"). The listing
+        # is a readdir plus small JSON reads, and refresh_session
+        # is not a keystroke path, so no cache is kept.
+        has_checkpoints = False
+        if has_session:
+            try:
+                from .train import list_checkpoints
+
+                has_checkpoints = bool(list_checkpoints(
+                    self.store, self._current_profile,
+                    self._current_project,
+                ))
+            except StellaError:
+                has_checkpoints = False
         self.train_resume_btn.setEnabled(
             has_session
+            and has_checkpoints
             and not self._training_running()
             and not self._sleep_running()
         )
@@ -8333,6 +8398,7 @@ class MainWindow(QMainWindow):
                 "Pick a checkpoint to see its details."
             )
             self.checkpoint_disk_label.setText("")
+            self.sleep_disk_label.setText("")
             self.export_estimate_label.setText("")
             # T161: no project, no overrides and no checkpoint
             # picker — both belong to a project.
@@ -8450,23 +8516,36 @@ class MainWindow(QMainWindow):
         self._refresh_export_estimate()
         from .sleep import list_sleep_cycles, load_sleep_manifest
 
-        for c in list_sleep_cycles(
+        cycles = list_sleep_cycles(
             self.store, self._current_profile, self._current_project
-        ):
+        )
+        total_bytes = 0
+        for c in cycles:
             before = c.get("old_loss_before")
             after = c.get("old_loss_after")
             delta = None
             if before is not None and after is not None and before > 0:
                 delta = (after - before) / before
             delta_text = f"{delta:+.1%}" if delta is not None else "n/a"
+            size = c.get("size_bytes") or 0
+            total_bytes += size
             label = (
                 f"cycle {c['cycle']}: {c['status']}, "
                 f"{c['real_rows']} new, {c['dreamed_rows']} dreamed, "
-                f"old-loss {delta_text}"
+                f"old-loss {delta_text}, {_fmt_bytes(size)}"
             )
             item = QListWidgetItem(label)
             item.setData(Qt.UserRole, c["cycle"])
             self.sleep_cycles.addItem(item)
+        # Disk usage (R66): what all the cycles cost.
+        if cycles:
+            self.sleep_disk_label.setText(
+                f"Sleep cycles use {_fmt_bytes(total_bytes)} on disk "
+                f"({len(cycles)} cycle"
+                f"{'s' if len(cycles) != 1 else ''})."
+            )
+        else:
+            self.sleep_disk_label.setText("No sleep cycles yet.")
         # R8: cycles that could not be recovered are listed too,
         # plainly — the rows they slept on are not recorded, so
         # they will sleep again in a later cycle. Clicking one
@@ -8922,11 +9001,11 @@ class MainWindow(QMainWindow):
         is not abliterated warns first, naming the seat and the
         base; anything else starts without a word.
 
-        Modal audit: this question only appears when the profile
-        carries a governing-seat marker AND a stock base — every
-        existing test that reaches start_training uses unmarked
-        profiles, so none of them meets it. The new tests stub
-        the question."""
+        Modal audit: this question appears when the profile is
+        bound for a governing seat — by marker OR by a governing
+        role (R67) — AND a stock base. The seeded test profile is
+        role fast, so tests that start training on it stub the
+        question (Yes to proceed)."""
         try:
             prof = self.store.get_profile(profile)
         except StellaError:
@@ -9232,7 +9311,39 @@ class MainWindow(QMainWindow):
         # The confirmation goes last (T50): refresh_session reports
         # the session in the status bar, and a _say before it would
         # be overwritten before the user ever sees it.
-        self._say(message.splitlines()[0] if message else "Training done.")
+        # R75: a run that ended paused — or failed with checkpoints
+        # saved — is offered its resume in the same line. Resume
+        # is enabled by then (refresh_session ran above, and a
+        # paused run has checkpoints by construction). A run that
+        # finished, or failed with no checkpoint, gets no offer.
+        first_line = message.splitlines()[0] if message else "Training done."
+        offer = ""
+        if finished_key is not None:
+            try:
+                finished_proj = self.store.get_project(*finished_key)
+            except StellaError:
+                finished_proj = None
+            if finished_proj is not None and finished_proj.get("status") in (
+                "paused",
+                "failed",
+            ):
+                try:
+                    from .train import list_checkpoints
+
+                    resumable = bool(list_checkpoints(
+                        self.store, finished_key[0], finished_key[1]
+                    ))
+                except StellaError:
+                    resumable = False
+                if resumable:
+                    if finished_proj.get("status") == "paused":
+                        offer = " Paused. Press Resume to carry on."
+                    else:
+                        offer = (
+                            " Press Resume to carry on from the "
+                            "last checkpoint."
+                        )
+        self._say(first_line + offer)
 
     def _on_job_finished(self, ok: bool, message: str):
         self._job_title = None
@@ -9322,6 +9433,119 @@ class MainWindow(QMainWindow):
         # the session in the status bar, and a _say before it would
         # be overwritten before the user ever sees it.
         self._say(message.splitlines()[0] if message else "Sleep done.")
+
+    def _selected_sleep_cycle(self) -> int | None:
+        """The cycle number picked in the sleep list, or None."""
+        item = self.sleep_cycles.currentItem()
+        if item is None:
+            return None
+        cycle = item.data(Qt.UserRole)
+        return int(cycle) if cycle is not None else None
+
+    def _delete_sleep_cycle(self):
+        """Delete the picked sleep cycle (R66).
+
+        Permanent: the point is freeing disk, and the trash does
+        not free disk. Confirms first with the size shown,
+        defaulting to No (the T24 destructive-paths rule).
+        Modal audit: this confirm opens only from the Delete
+        button. No existing test clicks it; the new tests stub
+        QMessageBox.question.
+        """
+        cycle = self._selected_sleep_cycle()
+        if cycle is None:
+            self._warn("Pick a sleep cycle first.")
+            return
+        from .sleep import delete_sleep_cycle, list_sleep_cycles
+
+        size = 0
+        for c in list_sleep_cycles(
+            self.store, self._current_profile, self._current_project
+        ):
+            if c["cycle"] == cycle:
+                size = c.get("size_bytes") or 0
+                break
+        answer = QMessageBox.question(
+            self,
+            "Delete sleep cycle?",
+            f"Delete sleep cycle {cycle} ({_fmt_bytes(size)})? "
+            "This frees the disk space for good. It cannot be "
+            "undone. Its rows stay slept.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            self._say("Sleep cycle kept.")
+            return
+        try:
+            result = delete_sleep_cycle(
+                self.store, self._current_profile, self._current_project,
+                cycle,
+            )
+        except StellaError as exc:
+            self._warn(str(exc))
+            return
+        self._say(
+            f"Deleted sleep cycle {cycle}, "
+            f"freed {_fmt_bytes(result['freed_bytes'])}."
+        )
+        self.refresh_train_panel()
+
+    def _prune_sleep_cycles(self):
+        """Delete all but the newest N sleep cycles (R66).
+
+        N comes from the spinbox (default 3). The confirm shows
+        the total size before and after plus the space freed,
+        and defaults to No — the deletion is permanent.
+        Modal audit: this confirm opens only from the Prune
+        button. No existing test clicks it; the new tests stub
+        QMessageBox.question.
+        """
+        keep = self.sleep_keep_spin.value()
+        from .sleep import list_sleep_cycles, prune_sleep_cycles
+
+        cycles = list_sleep_cycles(
+            self.store, self._current_profile, self._current_project
+        )
+        if len(cycles) <= keep:
+            self._say(
+                f"Nothing to prune: {len(cycles)} sleep cycle"
+                f"{'s' if len(cycles) != 1 else ''} kept, "
+                f"keeping the newest {keep}."
+            )
+            return
+        doomed = cycles[:-keep]
+        freed = sum(c.get("size_bytes") or 0 for c in doomed)
+        total = sum(c.get("size_bytes") or 0 for c in cycles)
+        answer = QMessageBox.question(
+            self,
+            "Prune sleep cycles?",
+            f"Delete {len(doomed)} older sleep cycle"
+            f"{'s' if len(doomed) != 1 else ''} and keep the newest "
+            f"{keep}? Sleep cycles use {_fmt_bytes(total)} now, "
+            f"{_fmt_bytes(total - freed)} after, freeing "
+            f"{_fmt_bytes(freed)}. This cannot be undone.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            self._say("Sleep cycles kept.")
+            return
+        try:
+            result = prune_sleep_cycles(
+                self.store, self._current_profile, self._current_project,
+                keep=keep,
+            )
+        except StellaError as exc:
+            self._warn(str(exc))
+            return
+        self._say(
+            f"Pruned {len(result['deleted'])} sleep cycle"
+            f"{'s' if len(result['deleted']) != 1 else ''}, "
+            f"freed {_fmt_bytes(result['freed_bytes'])}. "
+            f"Sleep cycles now use {_fmt_bytes(result['total_after'])}."
+        )
+        self.refresh_train_panel()
 
     def _on_sleep_cycle_clicked(self, item):
         cycle = item.data(Qt.UserRole)

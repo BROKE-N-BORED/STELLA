@@ -7,12 +7,16 @@ EXPECTED_TITLES = [
     "Getting started",
     "Chat",
     "Picking a model",
+    "Bridge",
     "Profiles",
     "Projects",
     "Training",
+    "Checkpoints",
     "Sleep",
     "Export and import",
+    "Recipe and adapter packages",
     "The refusal probe",
+    "Governing seats",
     "GGUF export to Ollama",
     "Making a model smaller",
     "Teaching a small model",
@@ -20,9 +24,12 @@ EXPECTED_TITLES = [
 ]
 
 
-def test_thirteen_topics_in_order():
+def test_seventeen_topics_in_order():
+    # R70: four topics added (Bridge, Checkpoints, Recipe and
+    # adapter packages, Governing seats) — the count moves
+    # deliberately, from 13 to 17.
     assert topic_titles() == EXPECTED_TITLES
-    assert len(TOPICS) == 13
+    assert len(TOPICS) == 17
 
 
 def test_every_topic_has_real_content():
@@ -82,6 +89,52 @@ def test_jobs_start_from_the_window_not_the_terminal():
     assert "stella train" not in teach
     assert "press Go" in smaller
     assert "press Go" in teach
+
+
+def test_probe_topic_names_right_seats_and_counts():
+    # R70: the probe topic names the real governing seats
+    # (driver, reviewer, tester, fast — not judge/merger) and
+    # the real prompt counts (18 by default, 24 for a
+    # governing seat — not 12).
+    probe = topic_text("The refusal probe")
+    assert "18 plainly harmless" in probe
+    assert "24 for a governing seat" in probe
+    assert "12 plainly harmless" not in probe
+    assert "driver, reviewer,\ntester, fast" in probe
+    assert "judge" not in probe
+    assert "merger" not in probe
+
+
+def test_profiles_topic_tag_is_dreaming_only():
+    # R70: the Ollama tag is used for dreaming, not for the
+    # refusal probe (probe.py has no ollama_tag reference).
+    profiles = topic_text("Profiles")
+    assert "Used for\ndreaming" in profiles
+    assert "The refusal probe does not use it" in profiles
+
+
+def test_gguf_topic_names_the_quant_picker():
+    # R70: the GGUF topic says the quant is picked, not fixed.
+    gguf = topic_text("GGUF export to Ollama")
+    assert "Quant list" in gguf
+    assert "Q4_K_M\nby default" in gguf
+
+
+def test_new_topics_cover_the_missing_features():
+    # R70: the four added topics say what their feature does.
+    bridge = topic_text("Bridge")
+    assert "Hugging Face" in bridge
+    assert "stella bridge" in bridge
+    checkpoints = topic_text("Checkpoints")
+    assert "Resume from selected" in checkpoints
+    assert "Prune" in checkpoints
+    packages = topic_text("Recipe and adapter packages")
+    assert "no weights" in packages
+    assert "bare trained weights" in packages
+    seats = topic_text("Governing seats")
+    assert "driver, reviewer, tester, and\nfast" in seats
+    assert "governing-seat marker" in seats
+    assert "cannot be exported" in seats
 
 
 def test_profiles_topic_points_download_at_the_main_window():

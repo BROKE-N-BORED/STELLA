@@ -33,6 +33,12 @@ def window(qapp, seeded, settings):
         win._model_list_worker.wait(5000)
         qapp.processEvents()
     yield win
+    # R74: teardown waits for every worker before closing — a bare
+    # win.close() is ignored while a job runs (closeEvent, T36),
+    # so a forgotten _wait_for_job leaked a worker into the next
+    # test. The wait fails loudly when a job is still running
+    # after a bounded wait, so the leak fails in its own test.
+    _wait_for_all_workers(win, qapp)
     win.close()
 
 
@@ -53,6 +59,36 @@ def _wait_for_job(window, qapp, timeout_ms=20000):
     while True:
         worker = window._job_worker
         if worker is None or not worker.isRunning():
+            break
+        QTest.qWait(50)
+        waited += 50
+        assert waited < timeout_ms, "job did not finish in time"
+    qapp.processEvents()
+
+
+def _wait_for_all_workers(window, qapp, timeout_ms=20000):
+    """Wait until every worker the window owns has finished (R74):
+    the job-card worker, the training worker, and the sleep
+    worker. Processes events while waiting, so the finished slots
+    run — a bare worker.wait() without event processing can
+    deadlock on slots that need the GUI thread. A job that never
+    started returns at once. Fails loudly when a job is still
+    running after a bounded wait, so a forgotten wait fails fast
+    in its own test instead of haunting the next one."""
+    from PySide6.QtTest import QTest
+
+    waited = 0
+    while True:
+        running = [
+            worker
+            for worker in (
+                getattr(window, "_job_worker", None),
+                getattr(window, "_train_worker", None),
+                getattr(window, "_sleep_worker", None),
+            )
+            if worker is not None and worker.isRunning()
+        ]
+        if not running:
             break
         QTest.qWait(50)
         waited += 50
@@ -225,7 +261,7 @@ def test_menu_howto_opens_howto_window(window):
     window._menu_action_howto.trigger()
     assert window._howto_window is not None
     assert window._howto_window.isVisible()
-    assert window._howto_window.topic_list.count() == 13
+    assert window._howto_window.topic_list.count() == 17
 
 
 # -- session --------------------------------------------------------
@@ -273,6 +309,77 @@ def test_session_restores_across_restarts(qapp, seeded, settings):
         "tool-calls",
     )
     second.close()
+
+
+def test_resume_disabled_with_no_checkpoints(window, seeded):
+    # R75: on a never-trained draft, Resume is greyed out — there
+    # is nothing to resume, and clicking it used to start a
+    # worker the engine then refused.
+    _select_session(window)
+    assert window.train_resume_btn.isEnabled() is False
+
+
+def test_resume_enabled_with_a_checkpoint(window, seeded):
+    # R75: with a checkpoint on disk, Resume is on.
+    _seed_checkpoint(seeded, 5, loss=1.5, size=1000)
+    _select_session(window)
+    assert window.train_resume_btn.isEnabled() is True
+
+
+def test_pause_offers_resume(window, seeded, qapp):
+    # R75: after a pause, the status bar offers resume — and
+    # Resume is enabled at that moment.
+    _seed_checkpoint(seeded, 5, loss=1.5, size=1000)
+    _select_session(window)
+    seeded.update_project("lfm3-tool", "tool-calls", status="paused")
+    window._running_job_key = ("lfm3-tool", "tool-calls")
+    window._on_train_finished(True, "Trained 5 steps. Final loss 1.5000.")
+    qapp.processEvents()
+    assert "Paused. Press Resume to carry on." in (
+        window.statusBar().currentMessage()
+    )
+    assert window.train_resume_btn.isEnabled() is True
+
+
+def test_pause_log_line_offers_resume(qapp, seeded):
+    # R75: the pause log line names the way back.
+    from stella.gui import TrainWorker
+
+    lines = []
+    worker = TrainWorker(seeded, "lfm3-tool", "tool-calls")
+    worker.log.connect(lines.append)
+    worker._event({"type": "paused", "step": 5})
+    qapp.processEvents()
+    assert lines == ["Paused at step 5. Press Resume when you are ready."]
+
+
+def test_failed_run_with_checkpoints_offers_resume(window, seeded, qapp):
+    # R75: a run that failed with checkpoints saved is offered
+    # its resume too; a failed run with no checkpoint gets no
+    # offer (there is nothing to resume from).
+    _seed_checkpoint(seeded, 5, loss=1.5, size=1000)
+    _select_session(window)
+    seeded.update_project("lfm3-tool", "tool-calls", status="failed")
+    window._running_job_key = ("lfm3-tool", "tool-calls")
+    window._on_train_finished(False, "Training failed: out of memory.")
+    qapp.processEvents()
+    assert "Press Resume to carry on from the last checkpoint." in (
+        window.statusBar().currentMessage()
+    )
+    assert window.train_resume_btn.isEnabled() is True
+
+
+def test_finished_run_gets_no_resume_offer(window, seeded, qapp):
+    # R75: a run that finished cleanly gets no resume offer.
+    _seed_checkpoint(seeded, 5, loss=1.5, size=1000)
+    _select_session(window)
+    seeded.update_project("lfm3-tool", "tool-calls", status="done")
+    window._running_job_key = ("lfm3-tool", "tool-calls")
+    window._on_train_finished(True, "Trained 5 steps. Final loss 1.5000.")
+    qapp.processEvents()
+    assert window.statusBar().currentMessage() == (
+        "Trained 5 steps. Final loss 1.5000."
+    )
 
 
 def test_train_buttons_disabled_without_session(window):
@@ -448,11 +555,13 @@ def test_settings_window_shows_home_and_defaults(window, seeded):
 
 def test_howto_window_lists_topics_and_shows_content(window):
     win = window.open_howto_window()
-    assert win.topic_list.count() == 13
+    assert win.topic_list.count() == 17
     assert win.topic_list.item(0).text() == "Getting started"
     win.topic_list.setCurrentRow(0)
     assert "Stella" in win.content.toPlainText()
-    win.topic_list.setCurrentRow(5)
+    # R70: Training moved to row 6 (Bridge and Checkpoints were
+    # added before it).
+    win.topic_list.setCurrentRow(6)
     assert win.topic_list.currentItem().text() == "Training"
     assert "hours" in win.content.toPlainText()
     win.close()
@@ -844,6 +953,135 @@ def test_sleep_cycle_list_shows_unhealed_cycle(window, seeded):
     assert "could not be recovered" in text
     assert "input file" in text
     assert window.sleep_cycles.item(0).data(Qt.UserRole) == 1
+
+
+def _seed_gui_sleep_cycle(seeded, number, payload_bytes=1000):
+    """A finished cycle on disk for the GUI tests (same shape as
+    the engine tests' seed). Returns the cycle dir."""
+    from stella.sleep import load_sleep_manifest, save_sleep_manifest
+
+    cdir = (
+        seeded.project_dir("lfm3-tool", "tool-calls")
+        / "sleep" / f"cycle-{number}"
+    )
+    (cdir / "adapter").mkdir(parents=True)
+    (cdir / "adapter" / "adapter_config.json").write_text("{}\n")
+    (cdir / "payload.bin").write_bytes(b"x" * payload_bytes)
+    (cdir / "report.json").write_text(json.dumps({
+        "cycle": number, "status": "OK",
+        "timestamp": "2026-11-13T00:00:00",
+        "real_rows": 6, "dreamed_rows": 0, "steps": 3,
+        "old_loss_before": 2.0, "old_loss_after": 1.9, "new_loss": 1.5,
+    }))
+    (cdir / "cycle_input.json").write_text(json.dumps({
+        "real_hashes": [f"hash-{number}-a"],
+        "dreamed_hashes": [],
+    }))
+    manifest = load_sleep_manifest(seeded, "lfm3-tool", "tool-calls")
+    manifest["cycles"] = [
+        c for c in manifest["cycles"] if c.get("cycle") != number
+    ]
+    manifest["cycles"].append({
+        "cycle": number, "status": "OK",
+        "timestamp": "2026-11-13T00:00:00",
+        "real_rows": 6, "dreamed_rows": 0, "steps": 3,
+        "old_loss_before": 2.0, "old_loss_after": 1.9, "new_loss": 1.5,
+    })
+    save_sleep_manifest(seeded, "lfm3-tool", "tool-calls", manifest)
+    return cdir
+
+
+def test_sleep_cycle_list_shows_size(window, seeded):
+    # R66: each cycle line carries its size, and the disk label
+    # totals them.
+    _select_session(window)
+    _seed_gui_sleep_cycle(seeded, 1, payload_bytes=2048)
+    window.refresh_train_panel()
+    assert window.sleep_cycles.count() == 1
+    text = window.sleep_cycles.item(0).text()
+    assert "2 KB" in text  # the 2 KB payload, plus small files
+    assert "Sleep cycles use" in window.sleep_disk_label.text()
+    assert "1 cycle" in window.sleep_disk_label.text()
+
+
+def test_sleep_delete_button_deletes_picked_cycle(
+    window, seeded, monkeypatch, qapp
+):
+    # R66: Delete cycle, Yes at the confirm, removes the cycle
+    # dir and its list row, and says what it freed.
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QMessageBox
+
+    _select_session(window)
+    cdir = _seed_gui_sleep_cycle(seeded, 1, payload_bytes=2048)
+    _seed_gui_sleep_cycle(seeded, 2, payload_bytes=2048)
+    window.refresh_train_panel()
+    assert window.sleep_cycles.count() == 2
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.Yes
+    )
+    window.sleep_cycles.setCurrentRow(0)
+    window.sleep_delete_btn.click()
+    qapp.processEvents()
+    assert not cdir.exists()
+    assert window.sleep_cycles.count() == 1
+    assert window.sleep_cycles.item(0).data(Qt.UserRole) == 2
+    assert "Deleted sleep cycle 1" in window.statusBar().currentMessage()
+    assert "freed" in window.statusBar().currentMessage()
+
+
+def test_sleep_delete_button_no_keeps_cycle(
+    window, seeded, monkeypatch, qapp
+):
+    # R66: No at the confirm keeps the cycle (the default is No).
+    from PySide6.QtWidgets import QMessageBox
+
+    _select_session(window)
+    cdir = _seed_gui_sleep_cycle(seeded, 1, payload_bytes=2048)
+    window.refresh_train_panel()
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.No
+    )
+    window.sleep_cycles.setCurrentRow(0)
+    window.sleep_delete_btn.click()
+    qapp.processEvents()
+    assert cdir.exists()
+    assert window.sleep_cycles.count() == 1
+
+
+def test_sleep_delete_button_without_pick_warns(window, monkeypatch):
+    # R66: Delete with nothing picked warns instead of deleting.
+    _select_session(window)
+    warnings = []
+    monkeypatch.setattr(window, "_warn", warnings.append)
+    window.sleep_delete_btn.click()
+    assert warnings == ["Pick a sleep cycle first."]
+
+
+def test_sleep_prune_button_keeps_newest(
+    window, seeded, monkeypatch, qapp
+):
+    # R66: Prune with keep 1 deletes the older cycles and keeps
+    # the newest.
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QMessageBox
+
+    _select_session(window)
+    cdir1 = _seed_gui_sleep_cycle(seeded, 1, payload_bytes=1000)
+    _seed_gui_sleep_cycle(seeded, 2, payload_bytes=1000)
+    _seed_gui_sleep_cycle(seeded, 3, payload_bytes=1000)
+    window.refresh_train_panel()
+    assert window.sleep_cycles.count() == 3
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.Yes
+    )
+    window.sleep_keep_spin.setValue(1)
+    window.sleep_prune_btn.click()
+    qapp.processEvents()
+    assert not cdir1.exists()
+    assert window.sleep_cycles.count() == 1
+    assert window.sleep_cycles.item(0).data(Qt.UserRole) == 3
+    assert "Pruned 2 sleep cycles" in window.statusBar().currentMessage()
 
 
 def test_start_sleep_without_deps_logs_hint(window, monkeypatch):
@@ -2014,8 +2252,16 @@ def test_start_training_saves_dirty_window_then_starts(
     proj_win = window.open_project_window("lfm3-tool", "tool-calls")
     qapp.processEvents()
     proj_win.dataset_edit.setText("new-data.jsonl")
+    # R67: the seeded profile is role fast, so the governing-seat
+    # question fires after the save prompt — Save for the save,
+    # Yes for the seat.
     monkeypatch.setattr(
-        QMessageBox, "question", lambda *a, **k: QMessageBox.Save
+        QMessageBox, "question",
+        lambda *a, **k: (
+            QMessageBox.Yes
+            if a[1].startswith("Train a governing seat")
+            else QMessageBox.Save
+        ),
     )
     monkeypatch.setattr(train_mod, "training_deps_missing", lambda: [])
     monkeypatch.setattr(window, "_weights_offer", lambda profile: True)
@@ -2265,7 +2511,7 @@ def test_start_training_on_done_project_yes_forces(
     assert window._train_worker._force is True
 
 
-def test_start_training_on_draft_project_does_not_ask(
+def test_start_training_on_draft_project_asks_only_the_seat(
     window, seeded, monkeypatch, qapp
 ):
     from PySide6.QtWidgets import QMessageBox
@@ -2280,12 +2526,17 @@ def test_start_training_on_draft_project_does_not_ask(
     asked = []
     monkeypatch.setattr(
         QMessageBox, "question",
-        lambda *a, **k: asked.append(a[2]) or QMessageBox.No,
+        lambda *a, **k: asked.append(a[2]) or QMessageBox.Yes,
     )
     _start_training_ready(window, monkeypatch)
     window.start_training()
     qapp.processEvents()
-    assert asked == []
+    # R67: the re-train question is not asked on a draft — but the
+    # governing-seat question is (the seeded profile is role
+    # fast), and Yes proceeds.
+    assert len(asked) == 1
+    assert "already finished training" not in asked[0]
+    assert "fast seat" in asked[0]
     assert window._train_worker is not None
     assert window._train_worker._force is False
 
@@ -2347,6 +2598,13 @@ def test_go_train_starts_training(window, monkeypatch, qapp):
     monkeypatch.setattr(train_mod, "training_deps_missing", lambda: [])
     monkeypatch.setattr(window, "_weights_offer", lambda profile: True)
     monkeypatch.setattr(gui_mod.TrainWorker, "run", lambda self: None)
+    # R67: the seeded profile is role fast, so the governing-seat
+    # question fires — Yes proceeds.
+    from PySide6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.Yes
+    )
     window.job_buttons["train"].click()
     assert window.go_btn.isEnabled()
     window.go_btn.click()
@@ -3263,6 +3521,29 @@ def test_close_during_job_waits_with_feedback_and_closes(window, qapp):
         deadline += 100
     assert not window.isVisible()
     assert window._job_worker.isRunning() is False
+
+
+def test_teardown_wait_waits_for_a_running_job(window, qapp):
+    """R74: the teardown wait really waits — a job still running
+    when the wait starts is finished when it returns. Before the
+    fix, teardown was just win.close(), which closeEvent ignores
+    while a job runs (T36), so a test that forgot _wait_for_job
+    leaked its worker into the next test."""
+    import time
+
+    done = []
+
+    def job(ctx):
+        time.sleep(0.5)
+        done.append(True)
+        return "done"
+
+    assert window._start_job_worker(job, "Slow job", True)
+    assert window._job_worker.isRunning()
+    assert window.close() is False  # ignored mid-job: the leak's cause
+    _wait_for_all_workers(window, qapp)
+    assert done == [True]
+    assert not window._job_worker.isRunning()
 
 
 def test_close_during_job_subprocess_no_destroyed_thread(tmp_path):
@@ -5241,6 +5522,13 @@ def test_start_training_morphs_from_train_tile(
         "lfm3-tool", "tool-calls", dataset_ref="sample-tool-calls.jsonl"
     )
     _start_training_ready(window, monkeypatch)
+    # R67: the seeded profile is role fast, so the governing-seat
+    # question fires — Yes proceeds.
+    from PySide6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.Yes
+    )
     window.start_training()
     assert window.job_card._morph_animation is not None
     window.job_card.finish()
@@ -5673,6 +5961,13 @@ def test_proof_run_button_starts_capped_run(window, seeded, monkeypatch, qapp):
         "lfm3-tool", "tool-calls", dataset_ref="sample-tool-calls.jsonl"
     )
     _start_training_ready(window, monkeypatch)
+    # R67: the seeded profile is role fast, so the governing-seat
+    # question fires — Yes proceeds.
+    from PySide6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.Yes
+    )
     assert window.train_proof_btn.text() == "Proof run"
     assert window.train_proof_btn.isEnabled()
     window.train_proof_btn.click()
@@ -7126,6 +7421,36 @@ def test_start_training_governing_seat_abliterated_no_warning(
     assert window._train_worker is not None
 
 
+def test_start_training_governing_role_only_warns(
+    window, seeded, monkeypatch, qapp
+):
+    """R67: a governing ROLE with no marker warns before training
+    too — a role-only profile used to train for hours unwarned."""
+    from PySide6.QtWidgets import QMessageBox
+
+    seeded.create_profile(
+        "role-tool", ollama_tag="lfm3:1.7b", role="driver",
+        base_ref="LiquidAI/LFM3-1.7B",
+    )
+    seeded.create_project(
+        "role-tool", "tool-calls", dataset_ref="sample-tool-calls.jsonl"
+    )
+    window.refresh_tree()
+    window.set_session("role-tool", "tool-calls")
+    asked = []
+    monkeypatch.setattr(
+        QMessageBox, "question",
+        lambda *a, **k: asked.append(a[2]) or QMessageBox.No,
+    )
+    _start_training_ready(window, monkeypatch)
+    window.start_training()
+    qapp.processEvents()
+    assert len(asked) == 1
+    assert "driver" in asked[0]
+    assert "LiquidAI/LFM3-1.7B" in asked[0]
+    assert window._train_worker is None
+
+
 def test_delete_profile_dialog_names_item_and_counts(
     window, seeded, monkeypatch
 ):
@@ -7804,6 +8129,13 @@ def test_go_applies_step_cap(window, monkeypatch, seeded, qapp):
     monkeypatch.setattr(train_mod, "training_deps_missing", lambda: [])
     monkeypatch.setattr(window, "_weights_offer", lambda profile: True)
     monkeypatch.setattr(gui_mod.TrainWorker, "run", lambda self: None)
+    # R67: the seeded profile is role fast, so the governing-seat
+    # question fires — Yes proceeds.
+    from PySide6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.Yes
+    )
     _select_session(window)
     window.train_step_cap_spin.setValue(7)
     window._go_train()
@@ -7823,6 +8155,13 @@ def test_run_dataset_override_reaches_worker(window, monkeypatch, seeded, qapp):
     monkeypatch.setattr(train_mod, "training_deps_missing", lambda: [])
     monkeypatch.setattr(window, "_weights_offer", lambda profile: True)
     monkeypatch.setattr(gui_mod.TrainWorker, "run", lambda self: None)
+    # R67: the seeded profile is role fast, so the governing-seat
+    # question fires — Yes proceeds.
+    from PySide6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.Yes
+    )
     _select_session(window)
     window.run_dataset_edit.setText("override.jsonl")
     window.start_training()
@@ -7852,6 +8191,13 @@ def test_run_base_override_skips_weights_offer(
         lambda profile: offered.append(profile) or True,
     )
     monkeypatch.setattr(gui_mod.TrainWorker, "run", lambda self: None)
+    # R67: the seeded profile is role fast, so the governing-seat
+    # question fires — Yes proceeds.
+    from PySide6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.Yes
+    )
     _select_session(window)
     window.run_base_edit.setText("somewhere/else-base")
     window.start_training()
