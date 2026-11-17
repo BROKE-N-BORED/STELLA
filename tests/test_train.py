@@ -415,6 +415,93 @@ def test_require_training_deps_names_installer(monkeypatch):
         require_training_deps()
 
 
+def test_training_install_hint_names_click_path():
+    """R13: the missing-training hint names the click path first —
+    the button, then the desktop icon — with the terminal command
+    kept as the alternative."""
+    from stella.train import TRAINING_INSTALL_HINT
+
+    assert "Install training in the Train panel" in TRAINING_INSTALL_HINT
+    assert "Install Stella Training" in TRAINING_INSTALL_HINT
+    assert "install-training.sh" in TRAINING_INSTALL_HINT
+    assert TRAINING_INSTALL_HINT.index("Install training") < (
+        TRAINING_INSTALL_HINT.index("bash install-training.sh")
+    )
+
+
+# -- R13: click-only training install -------------------------------
+
+
+def _fake_install_script(tmp_path, body):
+    script = tmp_path / "install-training.sh"
+    script.write_text("#!/usr/bin/env bash\n" + body)
+    script.chmod(0o755)
+    return script
+
+
+def test_run_training_install_streams_lines(tmp_path):
+    """R13: a successful install streams every output line to the
+    caller, in order, and returns quietly."""
+    from stella.train import run_training_install
+
+    script = _fake_install_script(
+        tmp_path,
+        'echo "Installing..."\necho "Done."\n',
+    )
+    lines = []
+    run_training_install(script=script, on_line=lines.append)
+    assert lines == ["Installing...", "Done."]
+
+
+def test_run_training_install_failure_is_plain_error(tmp_path):
+    """R13: a failed install is a plain StellaError, and the
+    script's own lines still reach the caller first."""
+    from stella.train import run_training_install
+
+    script = _fake_install_script(
+        tmp_path,
+        'echo "disk full"\nexit 1\n',
+    )
+    lines = []
+    with pytest.raises(StellaError, match="did not finish"):
+        run_training_install(script=script, on_line=lines.append)
+    assert lines == ["disk full"]
+
+
+def test_run_training_install_missing_script_is_plain_error(tmp_path):
+    """R13: no script in the folder is a plain error, not a
+    subprocess traceback."""
+    from stella.train import run_training_install
+
+    with pytest.raises(StellaError, match="not in this Stella folder"):
+        run_training_install(script=tmp_path / "no-such-script.sh")
+
+
+def test_run_training_install_cancel_stops_it(tmp_path):
+    """R13: a cancel stops the install and kills the script —
+    the process does not keep running behind the window."""
+    import time
+
+    from stella.train import run_training_install
+
+    marker = tmp_path / "still-running"
+    script = _fake_install_script(
+        tmp_path,
+        "for i in 1 2 3 4 5 6 7 8 9 10; do "
+        "touch " + str(marker) + "; sleep 1; done\n",
+    )
+    stop = {"after": time.monotonic() + 1.5}
+    with pytest.raises(StellaError, match="cancelled"):
+        run_training_install(
+            script=script,
+            should_stop=lambda: time.monotonic() > stop["after"],
+        )
+    # The script is gone: the marker's mtime stops moving.
+    first = marker.stat().st_mtime
+    time.sleep(1.5)
+    assert marker.stat().st_mtime == first
+
+
 # -- dataset resolution ---------------------------------------------
 
 def test_resolve_dataset_ref_finds_sample(seeded):
@@ -1367,7 +1454,14 @@ class _FakeSibling:
 
 
 def _fake_hf_api(monkeypatch, siblings):
-    """Patch huggingface_hub.HfApi to return these siblings."""
+    """Patch huggingface_hub.HfApi to return these siblings.
+
+    R16: the patch imports huggingface_hub, which a base install
+    does not have — skip instead of erroring, mirroring the
+    need_torch pattern."""
+    pytest.importorskip(
+        "huggingface_hub", reason="huggingface_hub not installed"
+    )
 
     class _FakeInfo:
         pass
@@ -1480,6 +1574,12 @@ def test_remote_metadata_single_file_unresolvable_refuses(
 
 def test_fetch_hf_file_size_head_refused_ranged_get_works(monkeypatch):
     # S24: a refused HEAD falls back to a one-byte ranged GET.
+    # R16: _fetch_hf_file_size imports hf_hub_url first and
+    # returns None without the hub, so the test needs the hub
+    # present to reach the stubbed ranged GET at all.
+    pytest.importorskip(
+        "huggingface_hub", reason="huggingface_hub not installed"
+    )
     import stella.train as train_mod
 
     monkeypatch.setattr(

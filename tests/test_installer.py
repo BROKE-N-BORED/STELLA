@@ -614,6 +614,67 @@ def test_install_stella_desktop_runs_installer(tmp_path):
     assert (home / ".local" / "bin" / "stella").is_symlink()
 
 
+def test_install_training_desktop_file_is_executable_in_tree():
+    """R13: the double-click training installer must be executable
+    or Nemo will not offer to launch it."""
+    path = ROOT / "Install Training Stella.desktop"
+    assert path.is_file()
+    assert os.access(path, os.X_OK)
+
+
+def test_install_training_desktop_runs_training_installer(tmp_path):
+    """R13: the training double-click launcher resolves its own
+    folder (via %k, not the working directory) and runs
+    install-training.sh with bash. Its Exec line carries no
+    nested escaped quotes (GLib rejects those) and it asks for a
+    terminal so the result stays visible."""
+    tree = copy_tree(tmp_path)
+    home = make_home(tmp_path)
+    stubs = make_train_stubs(tmp_path)
+    make_wrapper_venv(tree, stub_dir=stubs)
+    desktop = tree / "Install Training Stella.desktop"
+    entry = parse_desktop(desktop)
+    assert entry.get("Desktop Entry", "Name") == "Install Stella Training"
+    assert entry.get("Desktop Entry", "Terminal") == "true"
+    assert entry.get("Desktop Entry", "Type") == "Application"
+    exec_line = entry.get("Desktop Entry", "Exec")
+    assert "install_training_launcher.py" in exec_line
+    assert "%k" in exec_line
+    assert '\\"' not in exec_line  # no nested escaped quotes
+    # The launcher it runs is the file that runs install-training.sh.
+    launcher_src = (tree / "install_training_launcher.py").read_text()
+    assert '"install-training.sh"' in launcher_src
+    assert '"bash"' in launcher_src
+    # Run the Exec line the way the desktop environment would, from
+    # a different working directory, with %k expanded to the file.
+    # The stubbed venv takes the training fast path (already
+    # installed), so no download happens.
+    argv = [str(desktop) if a == "%k" else a for a in shlex.split(exec_line)]
+    env = dict(os.environ)
+    env["HOME"] = str(home)
+    env["STELLA_INSTALL_MIN_FREE_KB"] = "1024"
+    res = subprocess.run(
+        argv, cwd=tmp_path, env=env, capture_output=True, text=True,
+        input="\n", timeout=300, check=False,
+    )
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "Training packages are already installed." in res.stdout
+    assert "Training install finished." in res.stdout
+
+
+def test_install_places_training_icon_on_desktop(tmp_path):
+    """R13: the base install puts the training installer on the
+    desktop too, executable, so training setup is one
+    double-click from the desktop."""
+    tree = copy_tree(tmp_path)
+    home = make_home(tmp_path, desktop=True)
+    res = installed(tree, home)
+    icon = home / "Desktop" / "Install Stella Training.desktop"
+    assert icon.is_file()
+    assert os.access(icon, os.X_OK)
+    assert "Training installs from the desktop too" in res.stdout
+
+
 # ---------------------------------------------------------------- training
 
 

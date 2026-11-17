@@ -18,6 +18,7 @@ from stella.probe import (
     is_refusal,
     probe_gate,
     probe_project,
+    require_passed_probe,
     run_probe,
 )
 
@@ -302,6 +303,61 @@ def test_probe_gate_fails_when_rate_rises():
     assert ok is False
     assert "ROSE" in msg
     assert "gate failed" in msg
+
+
+# -- R4: the gate enforced at export ---------------------------------
+
+
+def _write_probe_result(store, profile, project, *, rising):
+    """A saved probe_results.json: refusals flat or rising."""
+    result = {
+        "mode": "gate",
+        "before": {
+            "total": 2, "refusals": 0, "empty": 0, "rate": 0.0,
+        },
+        "after": {
+            "total": 2, "refusals": 1 if rising else 0, "empty": 0,
+            "rate": 0.5 if rising else 0.0,
+        },
+        "delta": 0.5 if rising else 0.0,
+    }
+    path = store.project_dir(profile, project) / "probe_results.json"
+    path.write_text(json.dumps(result), encoding="utf-8")
+
+
+def test_require_passed_probe_governing_without_result_refuses(seeded):
+    """R4: a governing profile with no probe result cannot export
+    — the refusal names the probe and how to run it."""
+    with pytest.raises(StellaError, match="refusal probe"):
+        require_passed_probe(seeded, "lfm3-tool", "tool-calls")
+
+
+def test_require_passed_probe_governing_failed_gate_refuses(seeded):
+    """R4: a governing profile whose probe FAILED cannot export."""
+    _write_probe_result(
+        seeded, "lfm3-tool", "tool-calls", rising=True
+    )
+    with pytest.raises(StellaError, match="did not pass"):
+        require_passed_probe(seeded, "lfm3-tool", "tool-calls")
+
+
+def test_require_passed_probe_governing_passed_gate_allows(seeded):
+    """R4: a governing profile with a passed probe exports — the
+    verdict text comes back for the log."""
+    _write_probe_result(
+        seeded, "lfm3-tool", "tool-calls", rising=False
+    )
+    verdict = require_passed_probe(seeded, "lfm3-tool", "tool-calls")
+    assert verdict is not None
+    assert "Gate passed" in verdict
+
+
+def test_require_passed_probe_non_governing_needs_no_probe(store):
+    """R4: a non-governing profile has no gate — no probe result
+    is needed, and the export proceeds as before."""
+    store.create_profile("plain", role="utility")
+    store.create_project("plain", "proj")
+    assert require_passed_probe(store, "plain", "proj") is None
 
 
 def test_probe_project_before_after_with_fakes(tmp_path):

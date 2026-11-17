@@ -801,8 +801,9 @@ class ChatAgent:
         if missing:
             return (
                 "Training packages missing: " + ", ".join(missing) + ". "
-                "Run this once in the Stella folder: "
-                "bash install-training.sh"
+                "Press Install training in the Train panel, or "
+                "double-click Install Stella Training in the Stella "
+                "folder. (Terminal: bash install-training.sh)"
             )
         status = weights_status(self.store, profile)
         if status["state"] == "no-repo":
@@ -1051,8 +1052,11 @@ class ChatAgent:
             )
         if not hub_available():
             return (
-                "The download tool is not installed. Run this once in "
-                "the Stella folder: bash install-training.sh"
+                "The download tool is not installed. Install "
+                "training first: press Install training in the "
+                "Train panel, or double-click Install Stella "
+                "Training in the Stella folder. "
+                "(Terminal: bash install-training.sh)"
             )
         repo = status["repo"]
         last_pct = {"value": -1}

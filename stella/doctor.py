@@ -63,17 +63,27 @@ def _run(cmd: list[str], env: dict | None = None, timeout: int = 120):
 # a real Debian package name (libegl1/libgl1/libgles2 are the
 # libglvnd dispatch libraries; the libxcb/libxkbcommon set is
 # what the Qt xcb platform plugin loads).
+# R10: the generic "libxcb" key used to swallow every libxcb-*
+# library and misdiagnose it as libxcb1 — the six unmapped ones
+# now have their own entries, and the fallback matches only the
+# bare "libxcb.so" library itself.
 _MISSING_LIBRARY_PACKAGES = (
     ("libxcb-cursor", "libxcb-cursor0"),
     ("libxcb-icccm", "libxcb-icccm4"),
     ("libxcb-image", "libxcb-image0"),
     ("libxcb-keysyms", "libxcb-keysyms1"),
     ("libxcb-render-util", "libxcb-render-util0"),
+    ("libxcb-render", "libxcb-render0"),
+    ("libxcb-shm", "libxcb-shm0"),
+    ("libxcb-shape", "libxcb-shape0"),
+    ("libxcb-randr", "libxcb-randr0"),
+    ("libxcb-xfixes", "libxcb-xfixes0"),
+    ("libxcb-sync", "libxcb-sync1"),
     ("libxcb-util", "libxcb-util1"),
     ("libxcb-xkb", "libxcb-xkb1"),
     ("libxkbcommon-x11", "libxkbcommon-x11-0"),
     ("libxkbcommon", "libxkbcommon0"),
-    ("libxcb", "libxcb1"),
+    ("libxcb.so", "libxcb1"),
     ("libEGL.so", "libegl1"),
     ("libGLESv2.so", "libgles2"),
     ("libGL.so", "libgl1"),
@@ -140,18 +150,49 @@ def _check_pyside6(venv_python: Path) -> Check:
                  "run bash install.sh again")
 
 
-def _launcher_exec_is_current(tree: Path, home: Path) -> bool:
+def _launcher_is_current(tree: Path, home: Path) -> tuple[bool, str]:
+    """(is_current, why_not). Exec must point at this tree's
+    run.sh AND Icon must be a real value: the theme name
+    "stella", or an absolute path to an icon file that exists.
+    The old check looked only at Exec, so a launcher with a
+    literal Icon=path (a mode word, never an icon value) read
+    as current forever (R9) — the second run reported OK while
+    the broken icon stayed in the file."""
     launcher = install_mod.launcher_path(home)
     if not launcher.is_file():
-        return False
+        return False, "no menu launcher"
+    exec_ok = False
+    icon_seen = False
+    icon_ok = False
     for line in launcher.read_text(errors="replace").splitlines():
         if line.startswith("Exec="):
-            return str(tree / "run.sh") in line
-    return False
+            exec_ok = str(tree / "run.sh") in line
+        elif line.startswith("Icon="):
+            icon_seen = True
+            value = line.split("=", 1)[1].strip()
+            icon_ok = value == "stella" or (
+                value.startswith("/") and Path(value).is_file()
+            )
+    if not exec_ok:
+        return False, "points at another folder"
+    if not icon_seen:
+        return False, "has no icon set"
+    if not icon_ok:
+        return False, "names an icon that does not exist"
+    return True, ""
 
 
 def _fix_launcher(tree: Path, home: Path) -> Check:
-    icon = "stella" if install_mod.hicolor_icons_present(home) else "path"
+    # R9: write_desktop_entry takes the icon VALUE (theme name or
+    # absolute path), not the mode word — the old else branch
+    # passed the literal word "path" and the launcher showed the
+    # generic icon. Same translation as the CLI wrapper
+    # (install.py main: "theme" -> "stella", "path" -> the PNG).
+    icon = (
+        "stella"
+        if install_mod.hicolor_icons_present(home)
+        else str(tree / "assets" / "stella.png")
+    )
     try:
         install_mod.write_desktop_entry(tree, home, icon)
     except OSError as exc:
@@ -203,7 +244,8 @@ def run_checks(tree: Path, home: Path, fix: bool = True) -> list[Check]:
 
     # 3. launcher
     launcher = install_mod.launcher_path(home)
-    if _launcher_exec_is_current(tree, home):
+    launcher_current, launcher_stale = _launcher_is_current(tree, home)
+    if launcher_current:
         checks.append(Check("launcher", OK, str(launcher)))
     elif not launcher.is_file():
         if fix:
@@ -217,7 +259,7 @@ def run_checks(tree: Path, home: Path, fix: bool = True) -> list[Check]:
     else:
         checks.append(Check(
             "launcher", BROKEN,
-            "the menu launcher points at another folder; "
+            f"the menu launcher {launcher_stale}; "
             "run stella doctor to re-link it"))
 
     # 4. symlink

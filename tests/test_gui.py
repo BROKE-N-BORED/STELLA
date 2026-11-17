@@ -24,9 +24,11 @@ def window(qapp, seeded, settings):
     win.show()
     qapp.processEvents()
     # The startup model-list refresh (T43) settles before the test
-    # body runs, so the cache holds the settled (Ollama-down) list
-    # and a test that seeds the cache cannot race it. Fast: the
-    # sandbox has no Ollama, so the fetch fails at once.
+    # body runs, so the cache holds the settled list and a test
+    # that seeds the cache cannot race it. Fast when Ollama is
+    # down (the fetch fails at once); when Ollama is up, the
+    # refresh lands with the real list — either way the worker
+    # has finished before the test body runs (R17).
     if win._model_list_worker is not None:
         win._model_list_worker.wait(5000)
         qapp.processEvents()
@@ -570,6 +572,65 @@ def test_trash_dialog_lists_and_purges(window, monkeypatch):
     trash.close()
 
 
+def test_trash_dialog_restore_brings_project_back(
+    window, monkeypatch, qapp
+):
+    """R2: Restore in the Trash window brings a deleted project
+    back under its real name, and it opens afterwards."""
+    from PySide6.QtWidgets import QMessageBox
+
+    _select_session(window)
+    monkeypatch.setattr(
+        QMessageBox, "exec", lambda self: QMessageBox.Yes
+    )
+    window.delete_project()
+    assert window.store.list_projects("lfm3-tool") == []
+    trash = window.open_trash_window()
+    assert trash.list_widget.count() == 1
+    # Nothing selected by default, so Restore starts off.
+    assert not trash.restore_btn.isEnabled()
+    trash.list_widget.setCurrentRow(0)
+    assert trash.restore_btn.isEnabled()
+    trash.restore_btn.click()
+    qapp.processEvents()
+    assert window.store.list_trash() == []
+    assert trash.list_widget.count() == 0
+    assert (
+        window.store.get_project("lfm3-tool", "tool-calls")["name"]
+        == "tool-calls"
+    )
+    assert "is back" in window.statusBar().currentMessage()
+    trash.close()
+
+
+def test_trash_dialog_restore_clash_warns_and_keeps_trash(
+    window, monkeypatch, qapp
+):
+    """R2: when a live project with the same name exists, Restore
+    warns in plain words and the trashed item stays put."""
+    from PySide6.QtWidgets import QMessageBox
+
+    _select_session(window)
+    monkeypatch.setattr(
+        QMessageBox, "exec", lambda self: QMessageBox.Yes
+    )
+    window.delete_project()
+    window.store.create_project("lfm3-tool", "tool-calls")
+    warned = []
+    monkeypatch.setattr(
+        QMessageBox, "warning",
+        lambda *a, **k: warned.append(a[2] if len(a) > 2 else ""),
+    )
+    trash = window.open_trash_window()
+    trash.list_widget.setCurrentRow(0)
+    trash.restore_btn.click()
+    qapp.processEvents()
+    assert warned and "already exists" in warned[0]
+    assert len(window.store.list_trash()) == 1
+    assert trash.list_widget.count() == 1
+    trash.close()
+
+
 def test_trash_dialog_empty_trash(window, monkeypatch):
     # T23: Empty trash purges everything, with a confirm.
     from PySide6.QtWidgets import QMessageBox
@@ -757,6 +818,34 @@ def test_sleep_cycle_list_shows_cycles(window, seeded):
     assert window.sleep_cycles.item(0).data(Qt.UserRole) == 1
 
 
+def test_sleep_cycle_list_shows_unhealed_cycle(window, seeded):
+    """R8: a cycle that could not be recovered is listed too,
+    plainly — with its reason, not silently dropped."""
+    import json
+
+    from PySide6.QtCore import Qt
+
+    _select_session(window)
+    cdir = (
+        seeded.project_dir("lfm3-tool", "tool-calls")
+        / "sleep" / "cycle-1"
+    )
+    cdir.mkdir(parents=True)
+    (cdir / "report.json").write_text(json.dumps({
+        "cycle": 1, "status": "OK", "timestamp": "2026-11-13T00:00:00",
+        "real_rows": 6, "dreamed_rows": 0, "steps": 3,
+        "old_loss_before": None, "old_loss_after": None, "new_loss": 1.5,
+    }))
+    # No cycle_input.json: the cycle cannot be healed.
+    window.refresh_train_panel()
+    assert window.sleep_cycles.count() == 1
+    text = window.sleep_cycles.item(0).text()
+    assert "cycle 1" in text
+    assert "could not be recovered" in text
+    assert "input file" in text
+    assert window.sleep_cycles.item(0).data(Qt.UserRole) == 1
+
+
 def test_start_sleep_without_deps_logs_hint(window, monkeypatch):
     import stella.train as train_mod
 
@@ -800,6 +889,8 @@ def test_start_download_no_hub_warns(window, monkeypatch, tmp_path):
     window.start_download()
     assert warnings
     assert "install-training.sh" in warnings[0]
+    # R13: the hint names the click path first — no terminal needed.
+    assert "Install training" in warnings[0]
 
 
 def test_start_training_offers_download_when_weights_missing(
@@ -1144,19 +1235,19 @@ def test_settings_window_chat_model_picker(window, seed_models):
     seed_models(["lfm3:1.7b", "qwen3.5:2b"])
     settings_win = window.open_settings_window()
     # Nothing selected by default. The list is grouped: an Ollama
-    # header + 2 models, a Groq header + 3, a Gemini header + 3.
+    # header + 2 models, a Groq header + 2, a Gemini header + 2.
     # No key saved, so the cloud models are greyed out.
     assert settings_win.chat_combo.currentIndex() == -1
-    assert settings_win.chat_combo.count() == 11
+    assert settings_win.chat_combo.count() == 9
     combo = settings_win.chat_combo
     assert combo.itemText(0) == "On this PC (Ollama)"
     assert not combo.model().item(0).isEnabled()
     assert combo.itemData(1) == "ollama|lfm3:1.7b"
     assert combo.model().item(1).isEnabled()
     assert combo.itemText(3) == "Groq"
-    assert combo.itemData(4) == "groq|llama-3.3-70b-versatile"
+    assert combo.itemData(4) == "groq|openai/gpt-oss-120b"
     assert not combo.model().item(4).isEnabled()
-    assert combo.itemText(7) == "Gemini"
+    assert combo.itemText(6) == "Gemini"
     combo.setCurrentText("qwen3.5:2b")
     assert window.chat_model == "qwen3.5:2b"
     assert window.chat_provider == "ollama"
@@ -1181,7 +1272,7 @@ def test_settings_providers_save_and_remove(window, seed_models):
     assert settings_win._key_fields["groq"].text() == ""
     # Saving a key ungreys that provider's models in the picker.
     combo = settings_win.chat_combo
-    groq_index = combo.findData("groq|llama-3.3-70b-versatile")
+    groq_index = combo.findData("groq|openai/gpt-oss-120b")
     assert groq_index >= 0
     assert combo.model().item(groq_index).isEnabled()
     settings_win._provider_buttons["groq"]["remove"].click()
@@ -1260,10 +1351,10 @@ def test_chat_window_matches_cloud_model_name(window, seed_models, qapp):
     chat = ChatWindow(window)
     chat.show()
     qapp.processEvents()
-    chat.input.setText("llama-3.3-70b-versatile")
+    chat.input.setText("openai/gpt-oss-120b")
     chat.send_btn.click()
     qapp.processEvents()
-    assert window.chat_model == "llama-3.3-70b-versatile"
+    assert window.chat_model == "openai/gpt-oss-120b"
     assert window.chat_provider == "groq"
     chat.close()
 
@@ -2692,10 +2783,20 @@ def test_new_profile_dialog_rows_show_what_and_fit(window, monkeypatch, seed_mod
 
 
 def test_new_profile_tap_shows_details(window, monkeypatch, qapp, seed_models):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
     dialog = _patched_dialog(window, monkeypatch, seed_models)
     dialog.show()
     qapp.processEvents()
-    dialog.model_list.setCurrentRow(0)
+    QTest.qWait(50)
+    # A real tap on row 0 (R1): a programmatic setCurrentRow is
+    # not a pick, so the test clicks like the user does.
+    rect = dialog.model_list.visualItemRect(dialog.model_list.item(0))
+    QTest.mouseClick(
+        dialog.model_list.viewport(), Qt.LeftButton, pos=rect.center()
+    )
+    qapp.processEvents()
     assert dialog.details_label.isVisible()
     details = dialog.details_label.text()
     assert "6.4 GB" in details  # RAM to train
@@ -2704,17 +2805,72 @@ def test_new_profile_tap_shows_details(window, monkeypatch, qapp, seed_models):
     dialog.close()
 
 
+def test_new_profile_dialog_shown_has_no_selection(
+    window, monkeypatch, qapp, seed_models
+):
+    """R1: a SHOWN dialog has no row selected. Qt selects row 0
+    by itself after show() — the dialog must undo that, and a
+    refill landing afterwards must not re-select it either. The
+    T18 tests never showed the dialog, which is why the suite
+    stayed green on a false DONE."""
+    from PySide6.QtTest import QTest
+
+    dialog = _patched_dialog(window, monkeypatch, seed_models)
+    dialog.show()
+    qapp.processEvents()
+    QTest.qWait(50)
+    assert dialog.model_list.currentRow() == -1
+    assert dialog.model_list.currentItem() is None
+    assert not dialog.picked_model()
+    assert dialog.name_note.text() == ""
+    assert not dialog.details_label.isVisible()
+    # A refill (the background refresh landing) does not re-pick.
+    dialog._fill_model_list()
+    qapp.processEvents()
+    assert dialog.model_list.currentRow() == -1
+    assert not dialog.picked_model()
+    dialog.close()
+
+
+def test_new_profile_keyboard_down_picks_a_row(
+    window, monkeypatch, qapp, seed_models
+):
+    """R1: arrowing to a row IS a pick — the keyboard path sets
+    the pick flag, so the details and the name note appear."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    dialog = _patched_dialog(window, monkeypatch, seed_models)
+    dialog.show()
+    qapp.processEvents()
+    QTest.qWait(50)
+    assert not dialog.picked_model()
+    dialog.model_list.setFocus()
+    QTest.keyClick(dialog.model_list, Qt.Key_Down)
+    qapp.processEvents()
+    assert dialog.picked_model() == "lfm3:1.7b"
+    assert dialog.name_note.text() == "Profile name: lfm3-1-7b"
+    assert dialog.details_label.isVisible()
+    dialog.close()
+
+
 def test_new_profile_enter_with_no_pick_does_nothing(
-    window, seeded, monkeypatch, seed_models
+    window, seeded, monkeypatch, qapp, seed_models
 ):
     """T18: Enter with nothing picked does nothing — no profile,
-    no warning, no dialog accepted."""
+    no warning, no dialog accepted. R1: the dialog is SHOWN
+    first, because Qt's auto-select only happens after show()."""
     from PySide6.QtCore import QEvent, Qt
     from PySide6.QtGui import QKeyEvent
+    from PySide6.QtTest import QTest
 
     dialog = _patched_dialog(window, monkeypatch, seed_models)
     warnings = []
     monkeypatch.setattr(window, "_warn", warnings.append)
+    dialog.show()
+    qapp.processEvents()
+    QTest.qWait(50)
+    assert dialog.model_list.currentRow() == -1
     dialog.type_edit.returnPressed.emit()
     assert [p["name"] for p in seeded.list_profiles()] == ["lfm3-tool"]
     event = QKeyEvent(
@@ -2970,6 +3126,59 @@ def test_train_refused_while_job_runs_and_names_it(window, monkeypatch, qapp):
     assert any("Refusal probe is already running" in s for s in said)
     window.job_card.cancel_btn.click()
     QTest.qWait(500)
+
+
+def test_install_training_button_runs_install_with_progress(
+    window, monkeypatch, qapp
+):
+    """R13: the Install training button runs the training install
+    as a job, streaming its lines to the Train log — no terminal."""
+    from PySide6.QtTest import QTest
+
+    import stella.train as train_mod
+
+    assert window.install_training_btn.text() == "Install training"
+    assert window.install_training_btn.isEnabled()
+
+    def fake_install(*, on_line=None, should_stop=None, script=None):
+        on_line("Installing the training packages...")
+        on_line("Training packages are already installed.")
+
+    monkeypatch.setattr(train_mod, "run_training_install", fake_install)
+    window.install_training_btn.click()
+    _wait_for_job(window, qapp)
+    log = window.train_log.toPlainText()
+    assert "Installing the training packages..." in log
+    assert "Training packages are already installed." in log
+    assert "Training installed." in window.statusBar().currentMessage()
+
+
+def test_install_training_button_disabled_while_job_runs(
+    window, monkeypatch, qapp
+):
+    """R13: Install training is off while a job runs — one job at
+    a time, like every other job button."""
+    import time
+
+    from PySide6.QtTest import QTest
+
+    assert window.install_training_btn.isEnabled()
+
+    def job(ctx):
+        for _ in range(40):
+            if ctx.is_cancelled():
+                return "stopped"
+            time.sleep(0.05)
+        return "done"
+
+    window._start_job_worker(job, "A long job", False)
+    assert window._job_worker.isRunning()
+    window._refresh_go()
+    assert not window.install_training_btn.isEnabled()
+    window.job_card.cancel_btn.click()
+    QTest.qWait(500)
+    window._refresh_go()
+    assert window.install_training_btn.isEnabled()
 
 
 def test_probe_refused_while_export_runs(window, monkeypatch, qapp):
@@ -3527,7 +3736,11 @@ def test_bento_page_background_is_dark(window, qapp):
 def test_press_dip_shrinks_then_restores(qapp):
     """T81: a button press dips to 97% over 150 ms, then comes
     back to its original geometry. resize(), not setFixedSize:
-    a fixed size clamps setGeometry and the dip never shows."""
+    a fixed size clamps setGeometry and the dip never shows.
+    R18: the dip is asserted on the animation's own key values,
+    not on sampled geometry — a 150 ms animation with a 2 px
+    bottom is missed by sampling under load (5/10 probe runs
+    sampled only the unshrunk width)."""
     from PySide6.QtCore import Qt
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QPushButton
@@ -3544,17 +3757,23 @@ def test_press_dip_shrinks_then_restores(qapp):
         QTest.mousePress(button, Qt.LeftButton)
         # An animation is running for this button.
         assert button in dips._animations
-        # Sample through the dip: the width must go below the
-        # original at some point (the 97% bottom is brief, so a
-        # single sample can miss it).
-        min_width = original.width()
+        animation = dips._animations[button]
+        # The dip itself, from the animation's keyframes: the
+        # mid keyframe is the shrunk rect (97% — 118 px wide
+        # here), and both ends are the original rect.
+        assert animation.duration() == 150
+        assert animation.keyValueAt(0.0) == original
+        mid = animation.keyValueAt(0.5)
+        assert mid.width() < original.width()
+        assert mid.width() == 118
+        assert animation.keyValueAt(1.0) == original
+        # Wait for the animation to finish, then the geometry
+        # is restored exactly.
         deadline = 0
         while button in dips._animations:
             QTest.qWait(20)
-            min_width = min(min_width, button.geometry().width())
             deadline += 20
             assert deadline < 5000
-        assert min_width < original.width(), min_width
         assert button.geometry() == original
     finally:
         qapp.removeEventFilter(dips._filter)
@@ -3930,6 +4149,19 @@ def test_model_list_refresh_button_refetches(
             "the dialog list to show the two fetched models",
         )
         assert dialog.model_list.count() == 2
+        # The list count alone does not prove the dialog's first
+        # refresh finished: the cache was already loaded by the
+        # main window's fetch, so the list shows two rows before
+        # the dialog's own worker lands — and Refresh is a no-op
+        # while that worker is still running. Wait for it first,
+        # or the click races the in-flight refresh and the third
+        # fetch never happens.
+        _wait_until(
+            qapp,
+            lambda: dialog._model_worker is None
+            or not dialog._model_worker.isRunning(),
+            "the dialog's first refresh to finish",
+        )
         dialog.refresh_btn.click()
         _wait_hits(qapp, state, 3)
         _wait_until(
@@ -4869,12 +5101,12 @@ def test_settings_status_checks_without_blocking(
     win.close()
 
 
-def test_settings_status_says_when_ollama_down(window, qapp):
+def test_settings_status_says_when_ollama_down(window, qapp, seed_models):
     """T146: when the refresh lands with Ollama down, the status
-    says so."""
-    from stella.gui import MODEL_CACHE
-
-    MODEL_CACHE.set_snapshot([], {}, ollama_up=False)
+    says so. R17: seeded through seed_models, like the
+    neighbouring test — the raw set_snapshot seed could be
+    overwritten by the Settings window's own live refresh."""
+    seed_models([], ollama_up=False)
     win = window.open_settings_window()
     win._on_models_refreshed()
     assert "not reachable" in win.ollama_status.text()
@@ -5711,9 +5943,12 @@ def test_export_offers_preview_and_go_back_cancels(
     from stella.gui import ProbeResultsDialog
 
     _select_session(window)
+    # R4: the probe must PASS the gate for the preview to open —
+    # a rising (failed-gate) result on this governing profile
+    # would refuse the export before the preview.
     (
         seeded.project_dir("lfm3-tool", "tool-calls") / "probe_results.json"
-    ).write_text(json.dumps(_probe_result()))
+    ).write_text(json.dumps(_probe_result(rising=False)))
     opened = []
     monkeypatch.setattr(
         ProbeResultsDialog, "exec",
@@ -5742,9 +5977,11 @@ def test_export_preview_export_goes_ahead(window, seeded, monkeypatch, qapp):
     from stella.gui import ProbeResultsDialog
 
     _select_session(window)
+    # R4: the probe must PASS the gate for the preview to open —
+    # see test_export_offers_preview_and_go_back_cancels.
     (
         seeded.project_dir("lfm3-tool", "tool-calls") / "probe_results.json"
-    ).write_text(json.dumps(_probe_result()))
+    ).write_text(json.dumps(_probe_result(rising=False)))
     opened = []
     monkeypatch.setattr(
         ProbeResultsDialog, "exec",
@@ -5773,12 +6010,15 @@ def test_export_without_probe_results_skips_preview(
     window, seeded, monkeypatch, qapp
 ):
     # T148: with no probe results there is nothing to preview —
-    # the export proceeds straight to the folder pick.
+    # the export proceeds straight to the folder pick. R4: the
+    # profile is non-governing here — a governing profile with no
+    # probe is refused outright (see the R4 tests below).
     from PySide6.QtWidgets import QFileDialog
 
     import stella.gguf as gguf_mod
     from stella.gui import ProbeResultsDialog
 
+    seeded.update_profile("lfm3-tool", role="utility")
     _select_session(window)
     monkeypatch.setattr(
         ProbeResultsDialog, "exec",
@@ -5802,6 +6042,71 @@ def test_export_without_probe_results_skips_preview(
     assert window._job_worker is not None
     window._job_worker.wait(5000)
     qapp.processEvents()
+
+
+def test_export_governing_without_probe_is_refused(
+    window, seeded, monkeypatch, qapp
+):
+    """R4: a governing profile with no probe result cannot export
+    from the window — it warns in plain words, never asks for a
+    folder, and starts no job."""
+    from PySide6.QtWidgets import QFileDialog
+
+    from stella.gui import ProbeResultsDialog
+
+    _select_session(window)
+    warned = []
+    monkeypatch.setattr(window, "_warn", warned.append)
+    monkeypatch.setattr(
+        ProbeResultsDialog, "exec",
+        lambda self: (_ for _ in ()).throw(
+            AssertionError("preview opened on a refused export")
+        ),
+    )
+    picked = []
+    monkeypatch.setattr(
+        QFileDialog, "getExistingDirectory",
+        lambda *a, **k: picked.append(True) or "/tmp/fake-export",
+    )
+    window.export_gguf_gui()
+    qapp.processEvents()
+    assert warned and "refusal probe" in warned[0]
+    assert picked == []
+    assert window._job_worker is None
+
+
+def test_export_governing_failed_gate_is_refused(
+    window, seeded, monkeypatch, qapp
+):
+    """R4: a governing profile whose probe FAILED cannot export —
+    the preview never opens, because there is nothing to go ahead
+    with."""
+    from PySide6.QtWidgets import QFileDialog
+
+    from stella.gui import ProbeResultsDialog
+
+    _select_session(window)
+    (
+        seeded.project_dir("lfm3-tool", "tool-calls") / "probe_results.json"
+    ).write_text(json.dumps(_probe_result(rising=True)))
+    warned = []
+    monkeypatch.setattr(window, "_warn", warned.append)
+    monkeypatch.setattr(
+        ProbeResultsDialog, "exec",
+        lambda self: (_ for _ in ()).throw(
+            AssertionError("preview opened on a refused export")
+        ),
+    )
+    picked = []
+    monkeypatch.setattr(
+        QFileDialog, "getExistingDirectory",
+        lambda *a, **k: picked.append(True) or "/tmp/fake-export",
+    )
+    window.export_gguf_gui()
+    qapp.processEvents()
+    assert warned and "did not pass" in warned[0]
+    assert picked == []
+    assert window._job_worker is None
 
 
 # -- T141: corrupt-block tests for the GUI list + detail fill + save --
@@ -6480,6 +6785,10 @@ def test_gguf_job_shows_phase_progress(
 
     import stella.gguf as gguf_mod
 
+    # R4: a governing profile with no probe is refused before the
+    # job starts — this test is about the job's bar, so the
+    # profile is non-governing here.
+    seeded.update_profile("lfm3-tool", role="utility")
     _select_session(window)
     dest = tmp_path / "gguf"
     dest.mkdir()
@@ -7592,6 +7901,77 @@ def test_gguf_checkpoint_picker_lists_checkpoints(window, seeded):
     assert combo.itemData(2) == 5
 
 
+def _make_sleep_cycle(store, profile, project, cycle):
+    """A finished sleep cycle: an adapter on disk the export
+    picker can offer."""
+    adapter = (
+        store.project_dir(profile, project)
+        / "sleep" / f"cycle-{cycle}" / "adapter"
+    )
+    adapter.mkdir(parents=True, exist_ok=True)
+    (adapter / "adapter_config.json").write_text("{}")
+
+
+def test_gguf_picker_lists_sleep_cycles(window, seeded):
+    """R3: a finished sleep cycle appears in the GGUF picker after
+    the checkpoints, as a sleep adapter source — and a cycle with
+    no adapter on disk does not."""
+    _make_checkpoint(seeded, "lfm3-tool", "tool-calls", 2)
+    _make_sleep_cycle(seeded, "lfm3-tool", "tool-calls", 1)
+    _make_sleep_cycle(seeded, "lfm3-tool", "tool-calls", 3)
+    unfinished = (
+        seeded.project_dir("lfm3-tool", "tool-calls")
+        / "sleep" / "cycle-4" / "adapter"
+    )
+    unfinished.mkdir(parents=True)
+    _select_session(window)
+    window.refresh_train_panel()
+    combo = window.gguf_checkpoint_combo
+    assert combo.count() == 4
+    assert combo.itemText(0) == "Trained adapter"
+    assert combo.itemText(1) == "Checkpoint step 2"
+    assert combo.itemText(2) == "Sleep cycle 1"
+    assert combo.itemData(2) == ("sleep", 1)
+    assert combo.itemText(3) == "Sleep cycle 3"
+    assert combo.itemData(3) == ("sleep", 3)
+
+
+def test_gguf_export_uses_picked_sleep_cycle(
+    window, seeded, monkeypatch, tmp_path, qapp
+):
+    """R3: Export GGUF with a sleep cycle picked passes
+    --from-sleep to the engine (and no checkpoint)."""
+    import stella.gguf as gguf_mod
+    from PySide6.QtWidgets import QFileDialog
+
+    # R4: a governing profile with no probe is refused before the
+    # job starts (a modal warning) — this test is about the picked
+    # sleep cycle, so the profile is non-governing here.
+    seeded.update_profile("lfm3-tool", role="utility")
+    _make_sleep_cycle(seeded, "lfm3-tool", "tool-calls", 1)
+    _select_session(window)
+    window.refresh_train_panel()
+    window.gguf_checkpoint_combo.setCurrentIndex(1)
+    captured = {}
+
+    def fake_export(store, profile, project, dest, **kw):
+        captured.update(kw)
+        return {
+            "gguf": "x.gguf", "gguf_bytes": 123,
+            "ollama_create": "ollama create x",
+        }
+
+    monkeypatch.setattr(gguf_mod, "export_gguf", fake_export)
+    monkeypatch.setattr(
+        QFileDialog, "getExistingDirectory",
+        lambda *a, **k: str(tmp_path),
+    )
+    window.export_gguf_gui()
+    _wait_for_job(window, qapp)
+    assert captured["from_sleep"] == 1
+    assert captured["from_checkpoint"] is None
+
+
 def test_gguf_export_uses_picked_quant_and_checkpoint(
     window, seeded, monkeypatch, tmp_path, qapp
 ):
@@ -7600,6 +7980,10 @@ def test_gguf_export_uses_picked_quant_and_checkpoint(
     import stella.gguf as gguf_mod
     from PySide6.QtWidgets import QFileDialog
 
+    # R4: a governing profile with no probe is refused before the
+    # job starts — this test is about the picked quant, so the
+    # profile is non-governing here.
+    seeded.update_profile("lfm3-tool", role="utility")
     _make_checkpoint(seeded, "lfm3-tool", "tool-calls", 2)
     _select_session(window)
     window.refresh_train_panel()

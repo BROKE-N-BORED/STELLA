@@ -177,6 +177,93 @@ def test_restore_by_moving_back(store):
     assert store.list_trash() == []
 
 
+# -- R2: restore from the trash ---------------------------------------
+
+
+def test_restore_trash_profile_opens_afterwards(store):
+    """R2: a restored profile comes back under its real name and
+    opens — the dated trash folder is not the name it keeps."""
+    store.create_profile("p1", ollama_tag="x:1b")
+    store.create_project("p1", "proj")
+    trashed = store.delete_profile("p1")
+    restored = store.restore_trash(trashed.name)
+    assert restored == {
+        "kind": "profile", "profile": "p1", "project": "",
+    }
+    assert store.get_profile("p1")["ollama_tag"] == "x:1b"
+    assert [p["name"] for p in store.list_projects("p1")] == ["proj"]
+    assert store.list_trash() == []
+
+
+def test_restore_trash_project_keeps_contents(store):
+    """R2: a restored project comes back with its notes and
+    checkpoints, under its real name inside its profile."""
+    store.create_profile("p1")
+    store.create_project("p1", "proj")
+    store.write_notes("p1", "proj", "keep me\n")
+    ckpt = store.project_dir("p1", "proj") / "checkpoints" / "1"
+    ckpt.mkdir(parents=True)
+    (ckpt / "adapter_model.safetensors").write_bytes(b"w")
+    trashed = store.delete_project("p1", "proj")
+    restored = store.restore_trash(trashed.name)
+    assert restored == {
+        "kind": "project", "profile": "p1", "project": "proj",
+    }
+    assert store.get_project("p1", "proj")["name"] == "proj"
+    assert store.read_notes("p1", "proj") == "keep me\n"
+    assert (
+        store.project_dir("p1", "proj") / "checkpoints" / "1"
+        / "adapter_model.safetensors"
+    ).read_bytes() == b"w"
+    assert store.list_trash() == []
+
+
+def test_restore_trash_refuses_name_clash(store):
+    """R2: when a live profile with the same name exists, the
+    restore is refused — nothing is renamed or overwritten, and
+    the trashed item stays in the trash."""
+    store.create_profile("p1")
+    trashed = store.delete_profile("p1")
+    store.create_profile("p1", ollama_tag="new:1b")
+    with pytest.raises(StellaError, match="already exists"):
+        store.restore_trash(trashed.name)
+    assert trashed.is_dir()
+    assert store.get_profile("p1")["ollama_tag"] == "new:1b"
+
+
+def test_restore_trash_refuses_project_without_profile(store):
+    """R2: a trashed project whose profile is gone is refused —
+    restore the profile first."""
+    store.create_profile("p1")
+    store.create_project("p1", "proj")
+    trashed = store.delete_project("p1", "proj")
+    store.delete_profile("p1")
+    with pytest.raises(StellaError, match="profile .* is gone"):
+        store.restore_trash(trashed.name)
+    assert trashed.is_dir()
+
+
+def test_restore_trash_refuses_unknown_item(store):
+    """R2: a trash folder with no manifest cannot be identified,
+    so it cannot be restored."""
+    store.trash_dir.mkdir(parents=True, exist_ok=True)
+    mystery = store.trash_dir / "mystery-20260101-000000"
+    mystery.mkdir()
+    (mystery / "some-file.txt").write_text("x")
+    with pytest.raises(StellaError, match="no manifest"):
+        store.restore_trash(mystery.name)
+    assert mystery.is_dir()
+
+
+def test_restore_trash_rejects_paths(store):
+    """R2: the restore name is a plain trash entry name, never a
+    path — the same guard as purge."""
+    with pytest.raises(StellaError):
+        store.restore_trash("../profiles")
+    with pytest.raises(StellaError):
+        store.restore_trash("no-such-item")
+
+
 def test_purge_trash_deletes_forever(store):
     # T23: purge is the only permanent delete.
     store.create_profile("p1")
@@ -637,6 +724,61 @@ def test_list_profiles_keeps_good_rows_beside_damaged(store):
     assert [r["name"] for r in rows] == ["broken", "good"]
     assert rows[0]["_damaged"] is True
     assert rows[1].get("_damaged") is None
+
+
+def test_list_profiles_bad_bytes_are_one_damaged_row(store):
+    """R7: invalid UTF-8 in one manifest is one damaged row — the
+    rest of the list still works. UnicodeDecodeError is neither a
+    JSONDecodeError nor an OSError, so it used to escape the
+    damaged-row handling and take out the whole list."""
+    store.create_profile("good", ollama_tag="x:1b")
+    store.create_profile("broken", ollama_tag="y:1b")
+    manifest = store.home / "profiles" / "broken" / "profile.json"
+    manifest.write_bytes(b'{"name": "broken", "role": "\xff\xfe"}')
+    rows = store.list_profiles()
+    assert [r["name"] for r in rows] == ["broken", "good"]
+    assert rows[0]["_damaged"] is True
+    assert "cannot read" in rows[0]["_error"]
+    assert rows[1].get("_damaged") is None
+
+
+def test_list_projects_bad_bytes_are_one_damaged_row(seeded):
+    """R7: invalid UTF-8 in one project manifest is one damaged
+    row, like a bad profile manifest."""
+    manifest = (
+        seeded.home / "profiles" / "lfm3-tool" / "projects"
+        / "tool-calls" / "project.json"
+    )
+    manifest.write_bytes(b'{"name": "tool-calls", "\xff": 1}')
+    rows = seeded.list_projects("lfm3-tool")
+    assert len(rows) == 1
+    assert rows[0]["name"] == "tool-calls"
+    assert rows[0]["_damaged"] is True
+    assert "cannot read" in rows[0]["_error"]
+
+
+def test_read_notes_bad_bytes_raise_plain_error(seeded):
+    """R7: invalid UTF-8 in a project's notes is a plain error
+    naming the project, not a raw UnicodeDecodeError."""
+    from stella.model import StellaError
+
+    notes = (
+        seeded.home / "profiles" / "lfm3-tool" / "projects"
+        / "tool-calls" / "notes.md"
+    )
+    notes.write_bytes(b"# notes\n\xff\xfe bad bytes\n")
+    with pytest.raises(StellaError, match="cannot read"):
+        seeded.read_notes("lfm3-tool", "tool-calls")
+
+
+def test_read_profile_notes_bad_bytes_raise_plain_error(seeded):
+    """R7: the same bad-bytes guard for profile notes."""
+    from stella.model import StellaError
+
+    notes = seeded.home / "profiles" / "lfm3-tool" / "notes.md"
+    notes.write_bytes(b"\xff\xfe")
+    with pytest.raises(StellaError, match="cannot read"):
+        seeded.read_profile_notes("lfm3-tool")
 
 
 def test_rename_profile_skips_damaged_project(seeded):

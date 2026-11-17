@@ -41,6 +41,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import (
+    QEvent,
     QObject,
     QProcess,
     QProcessEnvironment,
@@ -405,12 +406,21 @@ class NewProfileDialog(QDialog):
         measurement = measure_pc()
         ram_free = measurement.get("ram_available_gb")
         self._ram_free = ram_free
+        # R1: whether the USER picked a row. Qt selects row 0 by
+        # itself when the list gains focus after show(), so the
+        # current row alone is not a pick — only a click, a tap,
+        # or a navigation key sets this (see eventFilter).
+        self._user_picked = False
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("Pick a model: that is all it takes."))
         self.model_list = QListWidget()
         self.model_list.setMinimumWidth(520)
         self.model_list.setMinimumHeight(180)
         self.model_list.setCurrentRow(-1)
+        self.model_list.installEventFilter(self)
+        # Clicks land on the list's viewport, not the list itself —
+        # the pick flag needs the press from there too (R1).
+        self.model_list.viewport().installEventFilter(self)
         layout.addWidget(self.model_list)
         self.details_label = QLabel("")
         self.details_label.setWordWrap(True)
@@ -456,6 +466,40 @@ class NewProfileDialog(QDialog):
         # when it lands, so the dialog never waits on Ollama.
         self._refresh_models()
 
+    def showEvent(self, event):
+        # R1: a fresh open has no pick. Qt selects row 0 on its
+        # own once the list gains focus after show(), so the
+        # selection is cleared again once the event loop has run
+        # — the clear is deferred because the auto-select happens
+        # after showEvent returns.
+        self._user_picked = False
+        QTimer.singleShot(0, self._clear_unpicked_selection)
+        super().showEvent(event)
+
+    def eventFilter(self, obj, event):
+        # R1: only real user input counts as a pick. A mouse press
+        # or a navigation key on the list sets the flag BEFORE the
+        # widget moves the selection, so currentItemChanged sees
+        # it. Focus alone never picks: the deferred clear undoes
+        # Qt's focus-in auto-select of row 0.
+        if obj is self.model_list or obj is self.model_list.viewport():
+            if event.type() == QEvent.MouseButtonPress:
+                self._user_picked = True
+            elif event.type() == QEvent.KeyPress and event.key() in (
+                Qt.Key_Up, Qt.Key_Down, Qt.Key_Home, Qt.Key_End,
+                Qt.Key_PageUp, Qt.Key_PageDown, Qt.Key_Space,
+            ):
+                self._user_picked = True
+            elif event.type() == QEvent.FocusIn:
+                QTimer.singleShot(0, self._clear_unpicked_selection)
+        return super().eventFilter(obj, event)
+
+    def _clear_unpicked_selection(self):
+        """Clear the list selection unless the user picked a row
+        (R1). Runs deferred, after Qt's own focus-in selection."""
+        if not self._user_picked:
+            self.model_list.setCurrentRow(-1)
+
     def _fill_model_list(self):
         """Fill the list from the cached model list (T43): no
         fetch, so this is instant. A pick the user already made
@@ -470,10 +514,12 @@ class NewProfileDialog(QDialog):
         # The row pick survives a refill (the typed text is in its
         # own field and is untouched). Read the row directly: this
         # also runs from __init__, before the type field exists.
+        # R1: only a USER pick survives — an auto-selected row 0
+        # is not restored, or a refill would undo the show clear.
         current = self.model_list.currentItem()
         picked = (
             str(current.data(Qt.UserRole) or "")
-            if current is not None else ""
+            if current is not None and self._user_picked else ""
         )
         self.model_list.clear()
         self.details_label.setText("")
@@ -540,14 +586,18 @@ class NewProfileDialog(QDialog):
         super().closeEvent(event)
 
     def picked_model(self) -> str:
-        """The picked model: the tapped row, or the typed text."""
+        """The picked model: the tapped row, or the typed text.
+        A row counts only when the user picked it (R1) — Qt
+        selects row 0 by itself on show, and that is not a pick."""
         current = self.model_list.currentItem()
-        if current is not None:
+        if current is not None and self._user_picked:
             return str(current.data(Qt.UserRole) or "").strip()
         return self.type_edit.text().strip()
 
     def _on_row_picked(self, current, _previous):
-        if current is None:
+        if current is None or not self._user_picked:
+            # No pick yet (or Qt's own auto-select): no details,
+            # and the auto-select never clears typed text.
             self.details_label.setText("")
             self.details_label.setVisible(False)
         else:
@@ -564,6 +614,9 @@ class NewProfileDialog(QDialog):
 
     def _on_typed(self):
         if self.type_edit.text().strip():
+            # Typing replaces the list pick (R1): the row is
+            # cleared and the pick flag goes with it.
+            self._user_picked = False
             self.model_list.setCurrentRow(-1)
         self._update_name_note()
 
@@ -2445,9 +2498,10 @@ class TrashDialog(QDialog):
     """Deleted profiles and projects, with the purge action (T23).
 
     Deleting moves a folder to the trash, dated, with everything
-    inside intact — so a misclick is recoverable by moving the
-    folder back. This window is where things are deleted FOREVER:
-    pick an item and press Delete forever (with its own confirm,
+    inside intact — so a misclick is recoverable: pick the item
+    and press Restore (R2), and it comes back under its real name.
+    This window is also where things are deleted FOREVER: pick an
+    item and press Delete forever (with its own confirm,
     defaulting to No), or Empty trash for all of them. Nothing is
     selected by default.
     """
@@ -2462,8 +2516,8 @@ class TrashDialog(QDialog):
         layout.addWidget(
             _help_label(
                 "Deleted profiles and projects live here, with "
-                "everything inside them. To get one back, move its "
-                f"folder back out of {main.store.trash_dir}. "
+                "everything inside them. To get one back, pick it "
+                "and press Restore. "
                 "Delete forever removes it for good."
             )
         )
@@ -2475,6 +2529,9 @@ class TrashDialog(QDialog):
         layout.addWidget(self.empty_label)
 
         btns = QHBoxLayout()
+        self.restore_btn = QPushButton("Restore")
+        self.restore_btn.setEnabled(False)
+        self.restore_btn.clicked.connect(self._restore_selected)
         self.purge_btn = QPushButton("Delete forever")
         self.purge_btn.setEnabled(False)
         self.purge_btn.clicked.connect(self._purge_selected)
@@ -2482,6 +2539,7 @@ class TrashDialog(QDialog):
         self.empty_btn.clicked.connect(self._empty_trash)
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.close)
+        btns.addWidget(self.restore_btn)
         btns.addWidget(self.purge_btn)
         btns.addWidget(self.empty_btn)
         btns.addStretch(1)
@@ -2513,11 +2571,38 @@ class TrashDialog(QDialog):
         self.list_widget.setVisible(bool(entries))
         self.empty_btn.setEnabled(bool(entries))
         self.purge_btn.setEnabled(False)
+        self.restore_btn.setEnabled(False)
 
     def _on_selection(self):
-        self.purge_btn.setEnabled(
-            self.list_widget.currentItem() is not None
-        )
+        picked = self.list_widget.currentItem() is not None
+        self.purge_btn.setEnabled(picked)
+        self.restore_btn.setEnabled(picked)
+
+    def _restore_selected(self):
+        """Restore the picked item (R2): back under its real name,
+        so it opens again. A clash or a missing parent profile
+        refuses with a plain message, and nothing moves."""
+        item = self.list_widget.currentItem()
+        if item is None:
+            return
+        name = item.data(Qt.UserRole)
+        try:
+            restored = self._main.store.restore_trash(name)
+        except StellaError as exc:
+            QMessageBox.warning(self, "Stella", str(exc))
+            return
+        self._main.debug_log.action(f"trash restored: {name}")
+        if restored["kind"] == "profile":
+            self._main._say(
+                f"Profile {restored['profile']} is back."
+            )
+        else:
+            self._main._say(
+                f"Project {restored['project']} is back in profile "
+                f"{restored['profile']}."
+            )
+        self._main.refresh_tree()
+        self._refresh()
 
     def _confirm_purge(self, text: str) -> bool:
         """A destructive confirmation that defaults to No (U23/U31),
@@ -4465,6 +4550,18 @@ class MainWindow(QMainWindow):
         self.go_btn.clicked.connect(self._on_go)
         self.go_btn.setEnabled(False)
         hero_layout.addWidget(self.go_btn)
+        # R13: the click-only training install — the button runs
+        # install-training.sh with progress in the Train log, so
+        # training setup never needs a terminal.
+        self.install_training_btn = QPushButton("Install training")
+        self.install_training_btn.setToolTip(
+            "Install the training packages (about 2 GB). Needed "
+            "once before training works."
+        )
+        self.install_training_btn.clicked.connect(
+            self._install_training_gui
+        )
+        hero_layout.addWidget(self.install_training_btn)
 
         # Inline project naming (T15 supersedes T113: the job picker
         # is project creation now, and the name becomes part of the
@@ -4744,12 +4841,12 @@ class MainWindow(QMainWindow):
             "balance of size and quality."
         )
         gguf_row.addWidget(self.gguf_quant_combo)
-        gguf_row.addWidget(QLabel("From checkpoint"))
+        gguf_row.addWidget(QLabel("From"))
         self.gguf_checkpoint_combo = QComboBox()
         self.gguf_checkpoint_combo.addItem("Trained adapter")
         self.gguf_checkpoint_combo.setToolTip(
-            "Export from a checkpoint's adapter instead of the "
-            "trained adapter."
+            "Which adapter to export: the trained adapter, a "
+            "checkpoint's adapter, or a sleep cycle's adapter."
         )
         gguf_row.addWidget(self.gguf_checkpoint_combo, 1)
         checkpoints_section.content_layout.addLayout(gguf_row)
@@ -5799,6 +5896,9 @@ class MainWindow(QMainWindow):
             except StellaError:
                 has_export = False
         self.train_create_ollama_btn.setEnabled(has_export)
+        # R13: Install training needs no session — it is live
+        # whenever nothing is running.
+        self.install_training_btn.setEnabled(not running)
         self._menu_action_run.setEnabled(self.go_btn.isEnabled())
 
     def _running_job_name(self) -> str | None:
@@ -6349,8 +6449,11 @@ class MainWindow(QMainWindow):
             return
         if not provision.hub_available():
             self._warn(
-                "The download tool is not installed. Run this once in "
-                "the Stella folder: bash install-training.sh"
+                "The download tool is not installed. Install "
+                "training first: press Install training in the "
+                "Train panel, or double-click Install Stella "
+                "Training in the Stella folder. "
+                "(Terminal: bash install-training.sh)"
             )
             return
         repo = status["repo"]
@@ -8118,6 +8221,11 @@ class MainWindow(QMainWindow):
             self.checkpoint_disk_label.setText("No checkpoints yet.")
         # T161: the GGUF checkpoint picker follows the same list —
         # the trained adapter first, then one entry per checkpoint.
+        # R3: then one entry per finished sleep cycle (an adapter
+        # on disk), carrying ("sleep", cycle) so the export knows
+        # which source was picked.
+        from .sleep import list_sleep_adapters
+
         self.gguf_checkpoint_combo.blockSignals(True)
         try:
             self.gguf_checkpoint_combo.clear()
@@ -8125,6 +8233,12 @@ class MainWindow(QMainWindow):
             for ck in checkpoints:
                 self.gguf_checkpoint_combo.addItem(
                     f"Checkpoint step {ck['step']}", ck["step"]
+                )
+            for cycle in list_sleep_adapters(
+                self.store, self._current_profile, self._current_project
+            ):
+                self.gguf_checkpoint_combo.addItem(
+                    f"Sleep cycle {cycle}", ("sleep", cycle)
                 )
         finally:
             self.gguf_checkpoint_combo.blockSignals(False)
@@ -8162,7 +8276,7 @@ class MainWindow(QMainWindow):
             item.setData(Qt.UserRole, run["run_id"])
             self.run_history_list.addItem(item)
         self._refresh_export_estimate()
-        from .sleep import list_sleep_cycles
+        from .sleep import list_sleep_cycles, load_sleep_manifest
 
         for c in list_sleep_cycles(
             self.store, self._current_profile, self._current_project
@@ -8180,6 +8294,19 @@ class MainWindow(QMainWindow):
             )
             item = QListWidgetItem(label)
             item.setData(Qt.UserRole, c["cycle"])
+            self.sleep_cycles.addItem(item)
+        # R8: cycles that could not be recovered are listed too,
+        # plainly — the rows they slept on are not recorded, so
+        # they will sleep again in a later cycle. Clicking one
+        # still shows its report, which exists.
+        for u in load_sleep_manifest(
+            self.store, self._current_profile, self._current_project
+        ).get("unhealed_cycles", []):
+            item = QListWidgetItem(
+                f"cycle {u['cycle']}: could not be recovered, "
+                f"{u['reason']}"
+            )
+            item.setData(Qt.UserRole, u["cycle"])
             self.sleep_cycles.addItem(item)
         if self._training_running():
             return  # never wipe the live log mid-run
@@ -8647,6 +8774,30 @@ class MainWindow(QMainWindow):
             return False
         return True
 
+    def _install_training_gui(self):
+        """Install the training packages by clicking (R13): runs
+        install-training.sh in a job worker, streaming its output
+        to the Train log with progress shown — no terminal needed.
+        The same script the terminal path runs, so the install is
+        identical either way."""
+        if self._job_already_running():
+            return
+        from .train import run_training_install
+
+        def job(ctx):
+            ctx.progress(0, 0)  # busy: the download has no count
+            ctx.log(
+                "Installing the training packages "
+                "(about 2 GB, a few minutes)..."
+            )
+            run_training_install(
+                on_line=ctx.log,
+                should_stop=ctx.is_cancelled,
+            )
+            return "Training installed. You can train now."
+
+        self._start_job_worker(job, "Installing training", False)
+
     def start_training(self, resume: bool = False,
                        max_steps: int | None = None,
                        from_checkpoint: int | None = None,
@@ -9039,12 +9190,26 @@ class MainWindow(QMainWindow):
             return
         if self._job_already_running():
             return
+        # R4: the refusal-probe gate, enforced before the folder
+        # pick — a governing-seat tune cannot be exported without
+        # a passed probe, so there is no point asking where to put
+        # an export that will be refused. (The engine enforces it
+        # too, so the CLI and chat paths are gated the same way.)
+        from .probe import require_passed_probe
+
+        try:
+            require_passed_probe(self.store, profile, project)
+        except StellaError as exc:
+            self._warn(str(exc))
+            return
         # T148: before export, show what the tune changed — the
         # probe's before/after replies, in the same dialog the
         # probe itself opens (T94). Export goes ahead; Go back
         # cancels before any folder is picked or any work starts.
         # With no probe results there is nothing to preview, and
-        # the export proceeds as before.
+        # the export proceeds as before — for a non-governing
+        # profile (a governing profile without a passed probe was
+        # refused above, R4).
         # Modal audit: this dialog opens only when probe results
         # exist for the project. No existing test has any (the
         # export tests refuse the start or have no results file),
@@ -9056,8 +9221,16 @@ class MainWindow(QMainWindow):
         # still runs.
         # T161: the quant and the checkpoint come from the pickers
         # beside the button — the CLI's --quant / --from-checkpoint.
+        # R3: a sleep entry carries ("sleep", cycle) and becomes
+        # the CLI's --from-sleep instead.
         quant = self.gguf_quant_combo.currentText().strip() or DEFAULT_QUANT
-        from_checkpoint = self.gguf_checkpoint_combo.currentData()
+        picked = self.gguf_checkpoint_combo.currentData()
+        from_checkpoint = None
+        from_sleep = None
+        if isinstance(picked, tuple) and picked and picked[0] == "sleep":
+            from_sleep = picked[1]
+        elif picked is not None:
+            from_checkpoint = picked
         estimate_text = None
         try:
             from .gguf import estimate_export, format_export_estimate
@@ -9104,6 +9277,7 @@ class MainWindow(QMainWindow):
                 self.store, profile, project, dest,
                 quant=quant,
                 from_checkpoint=from_checkpoint,
+                from_sleep=from_sleep,
                 on_warning=ctx.log,  # T31: converter warning, before the merge
                 on_event=on_event,
                 should_stop=ctx.is_cancelled,
@@ -9288,16 +9462,9 @@ class MainWindow(QMainWindow):
         when there is none (or it cannot be read). A missing or
         corrupt file is not an error here — the caller decides
         what to say."""
-        path = (
-            self.store.project_dir(profile, project) / "probe_results.json"
-        )
-        if not path.is_file():
-            return None
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return None
-        return data if isinstance(data, dict) else None
+        from .probe import load_probe_results
+
+        return load_probe_results(self.store, profile, project)
 
     def _view_probe_results(self):
         """Re-open the saved probe results (T94): the evidence

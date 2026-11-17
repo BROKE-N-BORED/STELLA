@@ -1,5 +1,90 @@
 # Changelog
 
+## v0.25.0 — 2026-11-17
+
+The P1 batch of the 2026-11-15 full-product review (R1–R18): the
+New Profile dialog no longer picks a model by itself, the trash has
+a Restore button, sleep adapters can be exported to GGUF, the
+refusal-probe gate is enforced at export for governing seats, vision
+models can no longer be silently exported or requanted as text-only,
+the doctor's two live bugs are fixed, the Groq and Gemini model
+lists are current (re-checked against the providers' own pages on
+build day), and training installs with one click — no terminal.
+R19–R23 stay hard-gated on Joshua's PC. Full record:
+docs/stella-review-task-list-2026-11-15.md.
+
+- R1 — New Profile dialog: no row is selected when the dialog opens
+  (a deferred clear in showEvent), and only a real user pick (mouse,
+  arrow keys, Space) counts — a background refresh can no longer
+  re-select row 0. Enter with no pick does nothing.
+- R2 — Trash window gains a Restore button (disabled until a row is
+  picked). Restore moves the dated trash folder back under its
+  manifest name; a name clash or a project whose profile is gone is
+  refused in plain words, never renamed or overwritten silently.
+  The help text now says "pick it and press Restore".
+- R3 — Sleep adapters have a GGUF export path: `export_gguf(...,
+  from_sleep=N)`, CLI `--from-sleep N`, and a "From" picker beside
+  the Export button listing sleep cycles (via
+  `sleep.list_sleep_adapters()`). Two adapter sources at once is a
+  plain refusal, not a silent pick.
+- R4 — The refusal-probe gate is enforced: `require_passed_probe`
+  runs in `export_gguf` (engine level, before any folder is made)
+  and in the GUI export (before the folder pick), so the GUI, CLI,
+  and chat paths are all gated. Hard block, no bypass flag; a
+  governing profile with no passed probe cannot export. An
+  old-version probe result with no before/after rates fails the
+  gate rather than passing vacuously. Non-governing profiles are
+  untouched.
+- R5 — Vision models refuse, in plain words, in both export and
+  requant: `gguf_has_vision()` scans the GGUF header for a vision
+  tower, and `is_vision_architecture()` refuses vision config
+  architectures at export. Text-only Gemma 3 1B shares the Gemma 3
+  arch, so it is deliberately excluded from the GGUF arch list.
+- R6 — Reading a model's type reads only the first 4 bytes
+  (`resolve_model_blob`), never the whole file into RAM.
+- R7 — Bad UTF-8 in a profile or project manifest is one damaged
+  row, not a crash: `UnicodeDecodeError` is caught in `_read_json`
+  (wrapped as StellaError), in notes reads, in history read/trim,
+  and in export manifest loading.
+- R8 — Sleep heal rebuilds hashes from the orphan cycle's own
+  `cycle_input.json` + `val_rows.jsonl`; orphans with no input file
+  are refused and recorded in `unhealed_cycles` (recomputed from
+  disk on every manifest read).
+- R9 — The doctor's launcher fix writes the real icon path, and a
+  new `_launcher_is_current()` checks Exec AND Icon, so a fixed
+  launcher stays fixed.
+- R10 — The doctor's libxcb map grows from 14 to 20 entries, and
+  the generic fallback is narrowed from `libxcb` to `libxcb.so`,
+  so the libxcb misdiagnosis is gone.
+- R11 — Groq model list refreshed (openai/gpt-oss-120b,
+  openai/gpt-oss-20b), re-checked live on build day. qwen/qwen3.8-27b
+  is preview and is not added.
+- R12 — Gemini model list refreshed (gemini-3.8-flash,
+  gemini-3.5-flash-lite), re-checked live on build day.
+  gemini-3.1-pro-preview has zero free-tier quota and is not added.
+- R13 — Training installs with one click: an "Install training"
+  button in the Train panel (live whenever no job runs, streaming
+  output to the Train log), plus a double-clickable `Install
+  Training Stella.desktop` on the desktop (same script, result
+  stays visible until Enter). install.sh copies the icon and makes
+  it trusted. Every GUI and How to Use surface names the click
+  path first.
+- R14 — CLI chat shows narration and progress lines ahead of the
+  final `Stella:` reply.
+- R15 — The sleep command's no-dataset error now names the full
+  command (`stella sleep <profile> <project> --rows my-data.jsonl`)
+  instead of pointing at a "Train panel".
+- R16 — Tests that need huggingface_hub are gated with
+  `pytest.importorskip("huggingface_hub")`, so the 4 tests that
+  failed on a base-only install now skip cleanly. The hub is
+  deliberately NOT added to the base requirements.
+- R17 — The Ollama-down settings test seeds its own models via the
+  `seed_models` fixture, so a live Ollama on the machine can no
+  longer flip it mid-run.
+- R18 — The press-dip test asserts on the animation's key values
+  (start, 118 px at halfway, restored at the end) instead of
+  sampling geometry, so load can no longer miss the dip.
+
 ## v0.24.0 — 2026-11-15
 
 The Stella half of the Stella + OST improvement list (from hands-on

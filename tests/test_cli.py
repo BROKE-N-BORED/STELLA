@@ -278,6 +278,31 @@ def test_cli_sleep_status_no_cycles(home):
     assert "No sleep cycles yet" in res.stdout
 
 
+def test_cli_sleep_status_names_unhealed_cycle(home):
+    # R8: a cycle that could not be recovered is named on the
+    # status line, with its reason and what happens next.
+    import json
+
+    from stella.model import Store
+
+    run_cli(home, "create-profile", "p1", "--tag", "x:1b")
+    run_cli(home, "create-project", "p1", "proj")
+    store = Store(home)
+    cdir = store.project_dir("p1", "proj") / "sleep" / "cycle-1"
+    cdir.mkdir(parents=True)
+    (cdir / "report.json").write_text(json.dumps({
+        "cycle": 1, "status": "OK", "timestamp": "2026-11-13T00:00:00",
+        "real_rows": 6, "dreamed_rows": 0, "steps": 3,
+        "old_loss_before": None, "old_loss_after": None, "new_loss": 1.5,
+    }))
+    # No cycle_input.json: the cycle cannot be healed.
+    res = run_cli(home, "sleep-status", "p1", "proj")
+    assert res.returncode == 0
+    assert "cycle 1 could not be recovered" in res.stdout
+    assert "input file" in res.stdout
+    assert "will sleep again" in res.stdout
+
+
 def test_cli_sleep_no_base_ref(home):
     # Cheap checks first: no base ref is reported even before the
     # dependency gate, in both envs (base and training). The profile
@@ -288,6 +313,17 @@ def test_cli_sleep_no_base_ref(home):
     res = run_cli(home, "sleep", "p1", "proj")
     assert res.returncode == 1
     assert "base_ref" in res.stderr
+
+
+def test_cli_sleep_no_dataset_names_rows_flag(home):
+    """R15: sleep with no dataset tells a CLI user what to type
+    (--rows with a file), never a GUI panel."""
+    run_cli(home, "create-profile", "p1", "--base", "test/tiny-model")
+    run_cli(home, "create-project", "p1", "proj")
+    res = run_cli(home, "sleep", "p1", "proj")
+    assert res.returncode == 1
+    assert "--rows my-data.jsonl" in res.stderr
+    assert "Train panel" not in res.stderr
 
 
 def test_cli_sleep_missing_deps_in_process(home, monkeypatch, capsys):
@@ -304,6 +340,48 @@ def test_cli_sleep_missing_deps_in_process(home, monkeypatch, capsys):
     code = cli_mod.main(["sleep", "p1", "proj"])
     assert code == 1
     assert "install-training.sh" in capsys.readouterr().err
+
+
+def test_cli_chat_shows_narration_and_progress(
+    home, monkeypatch, capsys
+):
+    """R14: CLI chat prints the agent's narration and progress as
+    the run goes — not silence until the final reply."""
+    import builtins
+
+    import stella.chat_agent as chat_agent_mod
+    import stella.cli as cli_mod
+
+    monkeypatch.setenv("STELLA_HOME", str(home))
+
+    class FakeAgent:
+        def __init__(self, store, model, **kwargs):
+            self._on_narration = kwargs.get("on_narration")
+            self._on_progress = kwargs.get("on_progress")
+
+        def reply(self, text):
+            assert self._on_narration is not None
+            assert self._on_progress is not None
+            self._on_narration("Setting up the project...")
+            self._on_progress("Step 25/100, loss 2.3456.")
+            return "Done. The project is ready."
+
+    monkeypatch.setattr(chat_agent_mod, "ChatAgent", FakeAgent)
+    answers = iter(["train lfm3 to write short replies", "/quit"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": next(answers))
+    code = cli_mod.main(["chat", "--model", "fake:1b"])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "Setting up the project..." in out
+    assert "Step 25/100, loss 2.3456." in out
+    # The narration and progress come BEFORE the final reply,
+    # as the run goes — not after it.
+    assert out.index("Setting up the project...") < out.index(
+        "Stella: Done. The project is ready."
+    )
+    assert out.index("Step 25/100, loss 2.3456.") < out.index(
+        "Stella: Done. The project is ready."
+    )
 
 
 # -- pc-info --------------------------------------------------------
@@ -1309,6 +1387,12 @@ def test_cli_error_strings_name_no_gui_controls():
     hits = [line for line in lines if "Train panel" in line]
     assert hits, "the comment moved; re-audit"
     assert all(line.strip().startswith("#") for line in hits)
+    # R15: sleep.py's errors reach CLI users too (stella sleep) —
+    # the T111 guard used to grep only cli.py, so the "Train
+    # panel" message in sleep.py slipped through.
+    sleep_lines = (ROOT / "stella" / "sleep.py").read_text().splitlines()
+    sleep_hits = [line for line in sleep_lines if "Train panel" in line]
+    assert sleep_hits == [], sleep_hits
 
 
 # -- T141: corrupt-block tests for the CLI list -----------------------

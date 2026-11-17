@@ -1,3 +1,67 @@
+# STELLA v0.25.0 — Test Report
+
+Verified 2026-11-17 by the coordinator from a FRESH UNZIP of
+stella-v0.25.zip (1,081,271 bytes, SHA-256
+46d00c4cd486cd4c7fffee4048a352dfa920b3c060d72117562333ae49083e27),
+not from the builders' claims. Python 3.12.3, PySide6 offscreen Qt,
+forge-v2-testenv; TMPDIR under the workspace (STELLA has no
+QFileSystemWatcher, so this is safe).
+
+## Suite: 1485 passed, 64 skipped (1551 collected)
+
+The single-process full run OOMs on this 6 GB VM (killed at ~51%),
+so the suite ran in 4 chunks, all from the same fresh unzip:
+non-GUI 1134 passed + 64 skipped, test_gui.py in 3 chunks
+(122 + 114 + 115 passed). Counts reconcile exactly to the
+1551 collected.
+
+Two chunk failures, both proven load flakes by 3/3 solo re-runs:
+test_cli_train_second_ctrl_c_exits_at_once (signal timing under a
+load average above 10) and
+test_job_card_finish_moment_shows_summary_then_hides (250 ms
+animation timing under the same load). Neither builder touched the
+code under either test.
+
+One real merge-interaction defect, found by the chunked run and
+fixed in place: Builder A's new R3 GUI test exported from the
+seeded governing profile, and Builder B's R4 gate refuses that
+export with a modal warning — the test hung in the modal with no
+user to dismiss it. The test now uses a non-governing profile,
+exactly like B's T161 test. It passes solo in 14 s and inside the
+re-run chunk (115 passed).
+
+## CLI smoke: green
+
+`stella-cli --version` reports 0.25.0; `profiles` gives the
+plain-words empty state; `pc-info` picks rank 4 / seq 512 at low
+available RAM; `export-gguf --help` lists `--from-sleep`; `chat
+--help` works.
+
+## GUI drive: green
+
+drive_gui.py offscreen: window opens, menu bar File/View/Help, job
+buttons Train / Sleep / Make smaller / Teach a small model, Go,
+Export GGUF, Run refusal probe, Install training button visible,
+no settings strings on screen. Screenshot eyeballed clean.
+
+## Sweeps
+
+Em-dash sweep of non-docstring string literals: 0 hits (one new
+em-dash in the R3 How to Use text was found and fixed in place).
+Secrets grep: clean. Zip modes: all scripts 0o100755, all plain
+files 0o100644, file-type bits present; all entries deflated.
+
+## Not verified (needs his PC / real services)
+
+R19–R23 stay hard-gated: the LFM3 proof run, a real sleep-adapter
+merge, a real `ollama create` from a Stella export, the literal
+double-click of Install Stella.desktop on Mint, and the real 2 GB
+training install. Groq/Gemini lists were re-checked against the
+providers' pages on build day and tested against fake servers
+only — no live key was used.
+
+---
+
 # STELLA v0.3 — Test Report
 
 Verified 2026-11-13 in the sandbox (Python 3.12.3, PySide6 offscreen

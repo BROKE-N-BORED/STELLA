@@ -24,6 +24,7 @@ from stella.requant import (
     _read_gguf_source_quant,
     default_new_tag,
     find_llama_quantize,
+    gguf_has_vision,
     requant_model,
     resolve_model_blob,
     validate_new_tag,
@@ -214,6 +215,27 @@ def test_resolve_blob_not_gguf(tmp_path):
         resolve_model_blob("qwen3.5:4b", models)
 
 
+def test_resolve_blob_reads_only_the_magic(tmp_path):
+    # R6: the magic check reads 4 bytes, not the file. A 256 MB
+    # sparse blob (a header, then holes) resolves with a traced
+    # peak far under the file size — the old read_bytes() peaked
+    # at the whole blob (1.05 GB for a 1.1 GB model).
+    import tracemalloc
+
+    models, blob = fake_ollama_models(tmp_path)
+    with open(blob, "r+b") as handle:
+        handle.seek(256 * 1024 * 1024 - 1)
+        handle.write(b"\x00")
+    assert blob.stat().st_size == 256 * 1024 * 1024
+    tracemalloc.start()
+    try:
+        assert resolve_model_blob("qwen3.5:4b", models) == blob
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 16 * 1024 * 1024
+
+
 def test_resolve_blob_via_modelfile_fallback(tmp_path, monkeypatch):
     models = tmp_path / "ollama-models"
     models.mkdir()
@@ -288,6 +310,97 @@ def test_read_gguf_source_quant_missing_file(tmp_path):
     assert _read_gguf_source_quant(tmp_path / "ghost.gguf") == (
         None, None,
     )
+
+
+# -- R5: vision detection ---------------------------------------------
+
+
+def _gguf_with_arch_and_tensors(arch=None, tensor_names=("weight.q",)):
+    """A GGUF header with an optional general.architecture metadata
+    entry and the given tensor names."""
+    out = bytearray()
+    out += b"GGUF"
+    out += struct.pack("<I", 3)  # version
+    out += struct.pack("<Q", len(tensor_names))  # tensor count
+    out += struct.pack("<Q", 1 if arch is not None else 0)  # kv count
+    if arch is not None:
+        key = b"general.architecture"
+        out += struct.pack("<Q", len(key)) + key
+        out += struct.pack("<I", 8)  # string
+        value = arch.encode()
+        out += struct.pack("<Q", len(value)) + value
+    for name in tensor_names:
+        encoded = name.encode()
+        out += struct.pack("<Q", len(encoded)) + encoded
+        out += struct.pack("<I", 1)  # n_dims
+        out += struct.pack("<Q", 128)  # dim 0
+        out += struct.pack("<I", 8)  # Q8_0
+        out += struct.pack("<Q", 0)  # offset
+    return bytes(out)
+
+
+def test_gguf_has_vision_detects_projector_tensors(tmp_path):
+    header = tmp_path / "vl.gguf"
+    header.write_bytes(_gguf_with_arch_and_tensors(
+        tensor_names=("blk.0.attn_q.weight", "mmproj.weight")))
+    assert gguf_has_vision(header) is True
+    header.write_bytes(_gguf_with_arch_and_tensors(
+        tensor_names=("blk.0.attn_q.weight", "token_embd.weight")))
+    assert gguf_has_vision(header) is False
+
+
+def test_gguf_has_vision_detects_vision_architecture(tmp_path):
+    header = tmp_path / "vl.gguf"
+    for arch in ("llava", "qwen2vl", "qwen3vl", "moondream2"):
+        header.write_bytes(_gguf_with_arch_and_tensors(arch=arch))
+        assert gguf_has_vision(header) is True, arch
+    for arch in ("llama", "qwen2", "gpt2"):
+        header.write_bytes(_gguf_with_arch_and_tensors(arch=arch))
+        assert gguf_has_vision(header) is False, arch
+    header.write_bytes(b"not a gguf file at all")
+    assert gguf_has_vision(header) is False
+    assert gguf_has_vision(tmp_path / "ghost.gguf") is False
+
+
+def _fake_vision_models(tmp_path):
+    """fake_ollama_models plus a projector layer in the manifest:
+    the shape Ollama stores a vision model in."""
+    models, blob = fake_ollama_models(tmp_path)
+    manifest_path = (
+        models / "manifests" / "registry.ollama.ai" / "library"
+        / "qwen3.5" / "4b"
+    )
+    manifest = json.loads(manifest_path.read_text())
+    manifest["layers"].append({
+        "mediaType": "application/vnd.ollama.image.projector",
+        "digest": "sha256:" + "ef" * 32,
+        "size": 12345,
+    })
+    manifest_path.write_text(json.dumps(manifest))
+    return models, blob
+
+
+def test_requant_refuses_vision_model_with_projector_layer(tmp_path):
+    # R5: a manifest with a projector layer is a vision model —
+    # requant refuses before llama-quantize or `ollama create`
+    # ever run, so no text-only copy is ever registered.
+    models, _blob = _fake_vision_models(tmp_path)
+    runner = FakeRunner()
+    with pytest.raises(StellaError, match="can see pictures"):
+        requant_model("qwen3.5:4b", _models_dir=models, _runner=runner)
+    assert runner.commands == []
+
+
+def test_requant_refuses_vision_model_with_mmproj_tensors(tmp_path):
+    # R5: the header-scan backstop, for a GGUF carrying its
+    # projector tensors in the model file itself.
+    blob_bytes = _gguf_with_arch_and_tensors(
+        tensor_names=("mmproj.weight", "mmproj.bias"))
+    models, _blob = fake_ollama_models(tmp_path, blob_bytes=blob_bytes)
+    runner = FakeRunner()
+    with pytest.raises(StellaError, match="can see pictures"):
+        requant_model("qwen3.5:4b", _models_dir=models, _runner=runner)
+    assert runner.commands == []
 
 
 # -- llama.cpp discovery ----------------------------------------------

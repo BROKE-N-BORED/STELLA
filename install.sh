@@ -177,6 +177,20 @@ if [ -d "$HOME/Desktop" ]; then
   fi
 fi
 
+# Training installer icon on the desktop too (R13): the training
+# install is click-only — double-click the icon, no terminal.
+# Same trust treatment as the Stella icon above.
+TRAIN_DESKTOP_OK=0
+if [ -d "$HOME/Desktop" ] && [ -f "$DIR/Install Training Stella.desktop" ]; then
+  if cp "$DIR/Install Training Stella.desktop" "$HOME/Desktop/Install Stella Training.desktop" 2>/dev/null; then
+    TRAIN_DESKTOP_OK=1
+    chmod +x "$HOME/Desktop/Install Stella Training.desktop" 2>/dev/null || true
+    if command -v gio >/dev/null 2>&1; then
+      gio set "$HOME/Desktop/Install Stella Training.desktop" metadata::trusted true 2>/dev/null || true
+    fi
+  fi
+fi
+
 # Command line: `stella` on PATH after install.
 mkdir -p "$HOME/.local/bin"
 ln -sf "$DIR/stella-cli" "$HOME/.local/bin/stella"
@@ -199,6 +213,9 @@ echo "Stella $STELLA_VERSION is installed."
 echo "Open it from the app menu (Stella)."
 if [ "$DESKTOP_OK" -eq 1 ]; then
   echo "Or double-click Stella on the desktop. No terminal needed."
+fi
+if [ "$TRAIN_DESKTOP_OK" -eq 1 ]; then
+  echo "Training installs from the desktop too (Install Stella Training)."
 fi
 case ":$PATH:" in
   *":$HOME/.local/bin:"*)

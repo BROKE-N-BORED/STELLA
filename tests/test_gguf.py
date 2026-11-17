@@ -14,6 +14,7 @@ from stella.gguf import (
     convert_to_gguf,
     export_gguf,
     find_llama_cpp,
+    is_vision_architecture,
     merge_adapter,
     write_modelfile,
 )
@@ -195,6 +196,274 @@ def test_export_gguf_without_adapter_fails(tmp_path):
     with pytest.raises(StellaError, match="no trained adapter"):
         export_gguf(store, "tiny", "proof", tmp_path / "out",
                     _runner=FakeRunner())
+
+
+# -- R5: vision models refuse, in plain words ------------------------
+
+
+@pytest.mark.parametrize("arch", [
+    "Qwen2_5_VLForConditionalGeneration",
+    "Qwen2VLForConditionalGeneration",
+    "Qwen3VLForConditionalGeneration",
+    "LlavaForConditionalGeneration",
+    "Gemma3ForConditionalGeneration",
+    "Llama4ForConditionalGeneration",
+    "Idefics3ForConditionalGeneration",
+    "PaliGemmaForConditionalGeneration",
+    "MiniCPMV",
+    "Moondream2ForConditionalGeneration",
+])
+def test_is_vision_architecture_spots_vision_models(arch):
+    assert is_vision_architecture(arch) is True
+
+
+@pytest.mark.parametrize("arch", [
+    "LlamaForCausalLM",
+    "Qwen2ForCausalLM",
+    "GPT2LMHeadModel",
+    "GemmaForCausalLM",
+    "MistralForCausalLM",
+    "Lfm2ForCausalLM",
+    "",
+])
+def test_is_vision_architecture_leaves_text_models_alone(arch):
+    assert is_vision_architecture(arch) is False
+
+
+def test_is_vision_architecture_flags_any_vl_name():
+    # The "VL" marker is deliberately broad: no real text-only
+    # architecture carries "VL" in its name, so flagging one is
+    # the safe direction (a refusal, not a lost-vision export).
+    assert is_vision_architecture("Qwen2_5_VLForCausalLM") is True
+
+
+def test_export_gguf_refuses_vision_base(tmp_path):
+    # R5: a vision base refuses before the merge starts — the
+    # loader is never called, so no merge is attempted and no
+    # half-finished weights are left behind.
+    from stella.model import Store
+
+    store = Store(tmp_path / "home")
+    store.create_profile("vl", base_ref="Qwen/Qwen2.5-VL-3B-Instruct")
+    store.create_project("vl", "proof")
+    adapter = store.project_dir("vl", "proof") / "adapter"
+    adapter.mkdir()
+    (adapter / "adapter_config.json").write_text("{}\n")
+
+    def never_called(base_ref, adapter_dir):
+        raise AssertionError("the merge must not start for a VL base")
+
+    with pytest.raises(StellaError, match="can see pictures"):
+        export_gguf(
+            store, "vl", "proof", tmp_path / "out",
+            _runner=FakeRunner(), _model_loader=never_called,
+            _base_arch="Qwen2_5_VLForConditionalGeneration",
+        )
+    assert not (tmp_path / "out" / "proof-merged-hf").exists()
+
+
+# -- R3: sleep adapters export through the same GGUF path -------------
+
+
+def _sleep_project(tmp_path, cycle=2):
+    """A project with a finished sleep cycle adapter (and no
+    trained adapter, so a plain export would refuse)."""
+    from stella.model import Store
+
+    store = Store(tmp_path / "home")
+    store.create_profile("tiny", base_ref="test/tiny-model")
+    store.create_project("tiny", "proof")
+    adapter = (
+        store.project_dir("tiny", "proof")
+        / "sleep" / f"cycle-{cycle}" / "adapter"
+    )
+    adapter.mkdir(parents=True)
+    (adapter / "adapter_config.json").write_text("{}\n")
+    return store, adapter
+
+
+class _StubModel:
+    """A torch-free stand-in for a merged model: records what the
+    merge was asked to save."""
+
+    def merge_and_unload(self):
+        return self
+
+    def save_pretrained(self, out_dir):
+        out = Path(out_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "config.json").write_text(
+            '{"model_type": "gpt2"}\n'
+        )
+        (out / "model.safetensors").write_bytes(b"stub weights")
+
+
+class _StubTokenizer:
+    def save_pretrained(self, out_dir):
+        Path(out_dir, "tokenizer_config.json").write_text("{}\n")
+
+
+def test_export_gguf_from_sleep_uses_cycle_adapter(monkeypatch, tmp_path):
+    # R3: --from-sleep N merges the sleep cycle's adapter, not the
+    # trained one — the loader receives the cycle's adapter dir,
+    # and the record names the cycle. Torch-free: the loader and
+    # the training-deps check are stubbed (this pins the adapter
+    # resolution, not the merge).
+    import stella.train
+
+    store, adapter = _sleep_project(tmp_path)
+    seen = {}
+    monkeypatch.setattr(
+        stella.train, "require_training_deps", lambda: None
+    )
+
+    def stub_loader(base_ref, adapter_dir):
+        seen["adapter_dir"] = Path(adapter_dir)
+        return _StubModel(), _StubTokenizer()
+
+    result = export_gguf(
+        store, "tiny", "proof", tmp_path / "out",
+        from_sleep=2, _runner=FakeRunner(), _model_loader=stub_loader,
+        _base_arch="GPT2LMHeadModel",
+    )
+    assert seen["adapter_dir"] == adapter
+    assert Path(result["gguf"]).read_bytes() == b"GGUF-Q4_K_M-fake"
+    record = json.loads(
+        (tmp_path / "out" / "gguf-export.json").read_text()
+    )
+    assert record["from_sleep"] == 2
+    assert record["adapter"] == str(adapter)
+
+
+def test_export_gguf_from_sleep_missing_cycle_refuses(tmp_path):
+    # R3: a cycle with no adapter on disk refuses before the merge
+    # starts — the loader is never called.
+    from stella.model import Store
+
+    store = Store(tmp_path / "home")
+    store.create_profile("tiny", base_ref="test/tiny-model")
+    store.create_project("tiny", "proof")
+
+    def never_called(base_ref, adapter_dir):
+        raise AssertionError("the merge must not start")
+
+    with pytest.raises(StellaError, match="no sleep adapter for cycle 3"):
+        export_gguf(
+            store, "tiny", "proof", tmp_path / "out",
+            from_sleep=3, _runner=FakeRunner(),
+            _model_loader=never_called,
+        )
+
+
+def test_export_gguf_from_sleep_and_checkpoint_refuses(tmp_path):
+    # R3: two adapter sources at once is a plain refusal, not a
+    # silent pick of one over the other.
+    store, _adapter = _sleep_project(tmp_path)
+    with pytest.raises(StellaError, match="pick one adapter"):
+        export_gguf(
+            store, "tiny", "proof", tmp_path / "out",
+            from_sleep=2, from_checkpoint=1,
+            _runner=FakeRunner(), _model_loader=lambda a, b: (None, None),
+        )
+
+
+# -- R4: the refusal-probe gate enforced at export -------------------
+
+
+def _gated_store(tmp_path, *, governing=True, probe=None):
+    """A store with a trained adapter and an optional saved probe
+    result ('passed', 'failed', or None for no result)."""
+    import json
+
+    from stella.model import Store
+
+    store = Store(tmp_path / "home")
+    store.create_profile(
+        "tiny", base_ref="test/tiny-model",
+        role="fast" if governing else "utility",
+    )
+    store.create_project("tiny", "proof")
+    adapter = store.project_dir("tiny", "proof") / "adapter"
+    adapter.mkdir()
+    (adapter / "adapter_config.json").write_text("{}\n")
+    if probe is not None:
+        rising = probe == "failed"
+        result = {
+            "mode": "gate",
+            "before": {
+                "total": 2, "refusals": 0, "empty": 0, "rate": 0.0,
+            },
+            "after": {
+                "total": 2, "refusals": 1 if rising else 0,
+                "empty": 0, "rate": 0.5 if rising else 0.0,
+            },
+            "delta": 0.5 if rising else 0.0,
+        }
+        path = (
+            store.project_dir("tiny", "proof") / "probe_results.json"
+        )
+        path.write_text(json.dumps(result), encoding="utf-8")
+    return store
+
+
+def _fake_merge_adapter(base_ref, adapter_dir, merged_dir, **kwargs):
+    """A merge that writes a minimal HF dir, no weights needed."""
+    merged_dir.mkdir(parents=True, exist_ok=True)
+    (merged_dir / "config.json").write_text(
+        '{"model_type": "gpt2"}\n'
+    )
+
+
+def test_export_gguf_governing_without_probe_refuses(tmp_path):
+    """R4: a governing profile with no probe result cannot export
+    — refused before any folder is made or any work starts."""
+    store = _gated_store(tmp_path, governing=True, probe=None)
+    with pytest.raises(StellaError, match="refusal probe"):
+        export_gguf(store, "tiny", "proof", tmp_path / "out",
+                    _runner=FakeRunner())
+    assert not (tmp_path / "out").exists()
+
+
+def test_export_gguf_governing_failed_gate_refuses(tmp_path):
+    """R4: a governing profile whose probe failed cannot export."""
+    store = _gated_store(tmp_path, governing=True, probe="failed")
+    with pytest.raises(StellaError, match="did not pass"):
+        export_gguf(store, "tiny", "proof", tmp_path / "out",
+                    _runner=FakeRunner())
+    assert not (tmp_path / "out").exists()
+
+
+def test_export_gguf_governing_passed_gate_proceeds(
+    tmp_path, monkeypatch
+):
+    """R4: a governing profile with a passed probe exports."""
+    import stella.gguf as gguf_mod
+
+    store = _gated_store(tmp_path, governing=True, probe="passed")
+    monkeypatch.setattr(gguf_mod, "merge_adapter", _fake_merge_adapter)
+    result = export_gguf(
+        store, "tiny", "proof", tmp_path / "out",
+        _runner=FakeRunner(),
+        _model_loader=lambda *a, **k: (None, None),
+    )
+    assert Path(result["gguf"]).is_file()
+
+
+def test_export_gguf_non_governing_needs_no_probe(
+    tmp_path, monkeypatch
+):
+    """R4: a non-governing profile exports with no probe result —
+    the gate does not apply, and nothing else changed."""
+    import stella.gguf as gguf_mod
+
+    store = _gated_store(tmp_path, governing=False, probe=None)
+    monkeypatch.setattr(gguf_mod, "merge_adapter", _fake_merge_adapter)
+    result = export_gguf(
+        store, "tiny", "proof", tmp_path / "out",
+        _runner=FakeRunner(),
+        _model_loader=lambda *a, **k: (None, None),
+    )
+    assert Path(result["gguf"]).is_file()
 
 
 # -- T102: the quantizer must be executable at discovery -------------

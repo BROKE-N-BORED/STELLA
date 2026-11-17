@@ -2,8 +2,7 @@
 
 **From:** the full-product review of STELLA v0.24.0, 2026-11-15
 (see `docs/review-2026-11-15.md` for the report).
-**Status:** 129 tasks, all not started. 0 P0. 23 P1 (18 buildable + 5
-hard-gated on Joshua's PC), 52 P2, 54 P3.
+**Status:** 129 tasks: 18 done, 105 to do, 6 hard-gated. 0 P0. 23 P1, 52 P2, 54 P3.
 **How to read it:** each task has an ID (R1–R129), a priority, the area,
 the source finding(s) from the nine audits, the evidence (file:line or
 a measured probe), a one-line plain-words description, and what "done"
@@ -33,7 +32,7 @@ re-filed here.
 ## P1 — important (R1–R23)
 
 ### R1 — New Profile dialog picks the first model by itself; Enter creates a profile you never picked
-- **Priority:** P1 · **Area:** GUI · **Sources:** A4-F1 · **Status:** not started
+- **Priority:** P1 · **Area:** GUI · **Sources:** A4-F1 · **Status:** DONE in 0.25.0
 - **Evidence:** `stella/gui.py:413` sets `setCurrentRow(-1)` and
   `gui.py:574-575, 582-588` guards Enter with `picked_model()`, but
   after `show()` + `processEvents()` Qt selects row 0 on its own
@@ -55,7 +54,7 @@ re-filed here.
   with no pick creates nothing; the regression test shows the dialog.
 
 ### R2 — The trash has no way back: no Restore button, and the documented move-back is a trap
-- **Priority:** P1 · **Area:** Profiles / GUI · **Sources:** A3-F1, A4-F6 · **Status:** not started
+- **Priority:** P1 · **Area:** Profiles / GUI · **Sources:** A3-F1, A4-F6 · **Status:** DONE in 0.25.0
 - **Evidence:** the Trash window offers only "Delete forever", "Empty
   trash", "Close" (`stella/gui.py:2447-2614`); `stella/model.py` has
   `list_trash` / `purge_trash` / `empty_trash` (`model.py:474-530`)
@@ -76,7 +75,7 @@ re-filed here.
   Trash window and opens afterwards; the trap is gone.
 
 ### R3 — Sleep adapters have no way into a model: the merge path the docs claim does not exist
-- **Priority:** P1 · **Area:** Sleep / GGUF · **Sources:** A8-1 · **Status:** not started
+- **Priority:** P1 · **Area:** Sleep / GGUF · **Sources:** A8-1 · **Status:** DONE in 0.25.0
 - **Evidence:** GGUF export merges only the project adapter or a
   checkpoint (`stella/gguf.py:704-715`); zero "sleep" references in
   `gguf.py`. No `--from-sleep` or cycle picker exists anywhere. Yet
@@ -92,7 +91,7 @@ re-filed here.
   source for a GGUF export, or the docs no longer claim it can.
 
 ### R4 — The refusal probe gate is never enforced: a tune can reach Ollama without ever passing it
-- **Priority:** P1 · **Area:** Probe / governing seats · **Sources:** A8-2 · **Status:** not started
+- **Priority:** P1 · **Area:** Probe / governing seats · **Sources:** A8-2 · **Status:** DONE in 0.25.0
 - **Evidence:** nothing auto-probes after training; export never
   consults probe results and proceeds with none
   (`stella/gui.py:9042-9048`); the T148 preview is a choice, not a
@@ -107,7 +106,7 @@ re-filed here.
   passed probe, or the opt-in nature is stated where the user sees it.
 
 ### R5 — Vision models silently lose their vision when requanted or exported
-- **Priority:** P1 · **Area:** GGUF / requant · **Sources:** A2-F2 · **Status:** not started
+- **Priority:** P1 · **Area:** GGUF / requant · **Sources:** A2-F2 · **Status:** DONE in 0.25.0
 - **Evidence:** zero `projector` / `mmproj` references anywhere in the
   tree. Requanting `qwen3-vl:2b-instruct` would register a text-only
   copy with no warning; export has no vision detection or refusal
@@ -122,7 +121,7 @@ re-filed here.
   its vision or refuses with a message that says why.
 
 ### R6 — Reading a model's type loads the whole model file into RAM
-- **Priority:** P1 · **Area:** Requant · **Sources:** A2-F1, A9-8 · **Status:** not started
+- **Priority:** P1 · **Area:** Requant · **Sources:** A2-F1, A9-8 · **Status:** DONE in 0.25.0
 - **Evidence:** `stella/requant.py:320` does `blob.read_bytes()[:4]`
   for a 4-byte magic check. Measured live: 1.05 GB peak RSS for the
   1.1 GB lfm3 blob. A 2.7 GB model would cost 2.7 GB of transient RAM
@@ -135,7 +134,7 @@ re-filed here.
   large sparse blob proves it.
 
 ### R7 — One profile with bad characters in its notes breaks the whole profile list
-- **Priority:** P1 · **Area:** Profiles · **Sources:** A3-F2 · **Status:** not started
+- **Priority:** P1 · **Area:** Profiles · **Sources:** A3-F2 · **Status:** DONE in 0.25.0
 - **Evidence:** invalid UTF-8 in a manifest or notes escapes the
   damaged-row handling as a raw `UnicodeDecodeError` (neither
   `JSONDecodeError` nor `OSError`), so the whole list fails instead of
@@ -152,7 +151,7 @@ re-filed here.
   and the rest of the list still works.
 
 ### R8 — Healing an orphaned sleep report drops its hashes, so rows get re-slept and the next check is empty
-- **Priority:** P1 · **Area:** Sleep · **Sources:** A8-3 · **Status:** not started
+- **Priority:** P1 · **Area:** Sleep · **Sources:** A8-3 · **Status:** DONE in 0.25.0
 - **Evidence:** proven in a scratch probe: the healed cycle reappears
   in the list but `slept_hashes` / `dreamed_hashes` / `old_val_rows`
   stay empty, so rows get re-slept and the next replay check is
@@ -165,7 +164,7 @@ re-filed here.
   replay check still has something to check against.
 
 ### R9 — The doctor writes a launcher with a literal "path" as its icon, and the error is sticky
-- **Priority:** P1 · **Area:** Doctor · **Sources:** A7-F1 · **Status:** not started
+- **Priority:** P1 · **Area:** Doctor · **Sources:** A7-F1 · **Status:** DONE in 0.25.0
 - **Evidence:** proved live, twice: `stella/doctor.py:154` passes the
   mode word where `stella/install.py:66-79` expects the icon value, so
   the doctor writes a launcher with a literal `Icon=path` when
@@ -180,7 +179,7 @@ re-filed here.
   no longer calls a `Icon=path` launcher OK.
 
 ### R10 — The doctor tells the user to install the wrong package for missing libxcb libraries
-- **Priority:** P1 · **Area:** Doctor · **Sources:** A7-F2 · **Status:** not started
+- **Priority:** P1 · **Area:** Doctor · **Sources:** A7-F2 · **Status:** DONE in 0.25.0
 - **Evidence:** proved via direct `_missing_library` calls: the generic
   `("libxcb", "libxcb1")` substring fallback (`stella/doctor.py:76`)
   catches `libxcb-render` / `shm` / `shape` / `randr` / `xfixes` /
@@ -196,7 +195,7 @@ re-filed here.
   package.
 
 ### R11 — The Groq model list is stale: the default model errors for ordinary accounts
-- **Priority:** P1 · **Area:** Providers · **Sources:** A5-F1 · **Status:** not started
+- **Priority:** P1 · **Area:** Providers · **Sources:** A5-F1 · **Status:** DONE in 0.25.0
 - **Evidence:** `stella/providers.py:56-58` lists `llama-3.3-70b-versatile`
   (first, so the default), `llama-3.1-8b-instant`, and
   `openai/gpt-oss-120b`. Confirmed via Groq's own deprecations page
@@ -213,7 +212,7 @@ re-filed here.
   starting with the default.
 
 ### R12 — The Gemini model list is stale: all three listed models fail for a new user
-- **Priority:** P1 · **Area:** Providers · **Sources:** A5-F2 · **Status:** not started
+- **Priority:** P1 · **Area:** Providers · **Sources:** A5-F2 · **Status:** DONE in 0.25.0
 - **Evidence:** `stella/providers.py:69-71` lists `gemini-2.0-flash`,
   `gemini-2.5-flash`, `gemini-2.5-pro`. Confirmed via web sources
   (checked 2026-11-15): `gemini-2.0-flash` shut down 2026-06-01; the
@@ -230,7 +229,7 @@ re-filed here.
 - **Done when:** every Gemini model listed works with a new key.
 
 ### R13 — There is no click-only way to install training: the core purpose still needs a terminal
-- **Priority:** P1 · **Area:** Installer · **Sources:** A7-F3 · **Status:** not started
+- **Priority:** P1 · **Area:** Installer · **Sources:** A7-F3 · **Status:** DONE in 0.25.0
 - **Evidence:** no `.desktop` file, no GUI button. Every surface says
   `bash install-training.sh`: `stella/gui.py:6353`, `stella/cli.py:374`,
   `stella/train.py:54`, `stella/howto.py:36, 315`,
@@ -245,7 +244,7 @@ re-filed here.
   shown, no terminal needed.
 
 ### R14 — Chat on the command line goes silent for the whole run: no narration, no progress
-- **Priority:** P1 · **Area:** CLI / chat · **Sources:** A5-F3 · **Status:** not started
+- **Priority:** P1 · **Area:** CLI / chat · **Sources:** A5-F3 · **Status:** DONE in 0.25.0
 - **Evidence:** `stella/cli.py:1494` builds the agent with no
   callbacks, so every narration/progress callback is swallowed;
   verified live. During a hours-long training run the user sees
@@ -258,7 +257,7 @@ re-filed here.
   the GUI chat shows, as the run goes.
 
 ### R15 — `sleep` with no dataset tells the user to pick one "in the Train panel"
-- **Priority:** P1 · **Area:** CLI / sleep · **Sources:** A6-W1 · **Status:** not started
+- **Priority:** P1 · **Area:** CLI / sleep · **Sources:** A6-W1 · **Status:** DONE in 0.25.0
 - **Evidence:** `stella/sleep.py:596-597` prints "Pick a .jsonl dataset
   in the Train panel, or pass --rows". The A5-U5 defect T111 missed,
   because its guard test greps only `cli.py`. Also a truncated tail.
@@ -270,7 +269,7 @@ re-filed here.
   guard test covers `sleep.py`.
 
 ### R16 — Four tests fail on a plain install without the training stack, so CI's base job would go red
-- **Priority:** P1 · **Area:** Tests · **Sources:** A9-1 · **Status:** not started
+- **Priority:** P1 · **Area:** Tests · **Sources:** A9-1 · **Status:** DONE in 0.25.0
 - **Evidence:** `tests/test_train.py:1411, 1440, 1460` call
   `monkeypatch.setattr("huggingface_hub.HfApi")` with no skip gate
   (→ `ModuleNotFoundError` without the package); `:1481` asserts 2e9
@@ -286,7 +285,7 @@ re-filed here.
   `huggingface_hub`, and CI's base job is green.
 
 ### R17 — The Ollama-down settings test is genuinely fragile: a background refresh can overwrite its seed
-- **Priority:** P1 · **Area:** Tests · **Sources:** A9-2 · **Status:** not started
+- **Priority:** P1 · **Area:** Tests · **Sources:** A9-2 · **Status:** DONE in 0.25.0
 - **Evidence:** `test_settings_status_says_when_ollama_down` seeds
   "down" via raw `set_snapshot` without `seed_models`, but
   `SettingsWindow.__init__` (`stella/gui.py:2760`) starts a live
@@ -301,7 +300,7 @@ re-filed here.
   depends on refresh timing.
 
 ### R18 — The button-press test is genuinely fragile: under load it misses the dip entirely
-- **Priority:** P1 · **Area:** Tests · **Sources:** A9-3 · **Status:** not started
+- **Priority:** P1 · **Area:** Tests · **Sources:** A9-3 · **Status:** DONE in 0.25.0
 - **Evidence:** `test_press_dip_shrinks_then_restores`, reproduced: a
   150 ms animation, a 2 px dip, 20 ms sampling; clean runs always
   sampled min=119 (never 118 — 1 px real margin); under CPU load 5/10
@@ -319,7 +318,7 @@ These cannot be closed on the VM. They are P1 because each one is the
 only proof of a claim the product already makes.
 
 ### R19 — [HARD-GATED] Run the LFM3 proof run end to end on his PC
-- **Priority:** P1 · **Area:** Training · **Sources:** A1-F1 · **Status:** not started
+- **Priority:** P1 · **Area:** Training · **Sources:** A1-F1 · **Status:** HARD-GATED (needs Joshua's PC)
 - **Evidence:** the v0.24.0 RAM recalibration rests on ONE 0.5B probe
   run, never measured at LFM3 1.7B scale or on his PC. If the true
   resident share at 1.7B is 0.8 not 0.5, the true total is ~1 GB over
@@ -332,7 +331,7 @@ only proof of a claim the product already makes.
   exists, and the estimate matches it.
 
 ### R20 — [HARD-GATED] Merge a sleep adapter for real with llama.cpp
-- **Priority:** P1 · **Area:** Sleep / GGUF · **Sources:** G2 · **Status:** not started
+- **Priority:** P1 · **Area:** Sleep / GGUF · **Sources:** G2 · **Status:** HARD-GATED (needs Joshua's PC)
 - **Evidence:** the merge path does not exist yet (R3); no sleep
   adapter has ever been merged by llama.cpp in a real run.
 - **Problem:** the sleep feature's payoff has never been shown to work
@@ -343,7 +342,7 @@ only proof of a claim the product already makes.
   loads. Depends on R3.
 
 ### R21 — [HARD-GATED] Create a model in Ollama from a real Stella export
-- **Priority:** P1 · **Area:** GGUF · **Sources:** G3 · **Status:** not started
+- **Priority:** P1 · **Area:** GGUF · **Sources:** G3 · **Status:** HARD-GATED (needs Joshua's PC)
 - **Evidence:** no real `ollama create` from a Stella export has ever
   run; the code itself flags the quoted FROM line as unprobed.
 - **Problem:** the export's final step — the model actually appearing
@@ -353,7 +352,7 @@ only proof of a claim the product already makes.
 - **Done when:** a Stella export has been created in Ollama and answers.
 
 ### R22 — [HARD-GATED] Double-click Install Stella.desktop for real on Mint
-- **Priority:** P1 · **Area:** Installer · **Sources:** G4 · **Status:** not started
+- **Priority:** P1 · **Area:** Installer · **Sources:** G4 · **Status:** HARD-GATED (needs Joshua's PC)
 - **Evidence:** the double-click path has only ever been probed via
   `gio launch` and direct libgio calls; `gio launch` passed `%k`
   empty where direct libgio passed the correct path, so it is not a
@@ -366,7 +365,7 @@ only proof of a claim the product already makes.
 - **Done when:** a literal double-click on Mint has installed Stella.
 
 ### R23 — [HARD-GATED] Run the real 2 GB training install on his PC
-- **Priority:** P1 · **Area:** Installer · **Sources:** G5 · **Status:** not started
+- **Priority:** P1 · **Area:** Installer · **Sources:** G5 · **Status:** HARD-GATED (needs Joshua's PC)
 - **Evidence:** no real training install has ever run on his PC; time,
   peak disk, and peak RAM are all unmeasured (see also R61: the 3 GB
   preflight understates the ~4 GB+ peak).
@@ -1175,7 +1174,7 @@ only proof of a claim the product already makes.
   schedule.
 
 ### R92 — How to Use opens on an empty pane, not Getting started
-- **Priority:** P3 · **Area:** GUI · **Sources:** A4-F8 · **Status:** not started
+- **Priority:** P3 · **Area:** GUI · **Sources:** A4-F8 · **Status:** HARD-GATED (design decision for Joshua)
 - **Evidence:** opening How to Use shows no topic selected and the
   placeholder "Pick a topic on the left to read how it works."
   (probe3.out). In v0.8.0 it opened on "Getting started" with the body

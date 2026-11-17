@@ -112,6 +112,10 @@ def _empty_manifest() -> dict:
         "dreamed_hashes": [],
         "old_val_rows": [],
         "cycles": [],
+        # Cycles with a report but no recoverable input file (R8):
+        # listed here, never healed into `cycles`, so the rows
+        # they slept on are never mistaken for recorded ones.
+        "unhealed_cycles": [],
     }
 
 
@@ -120,7 +124,14 @@ def load_sleep_manifest(store: Store, profile: str, project: str) -> dict:
 
     A cycle dir with a report.json but no manifest entry (a crash
     between the report write and the manifest update) is healed
-    back into the cycle list from its report.
+    back into the cycle list from its report — and, since R8,
+    its hash sets and old val rows are rebuilt from its own
+    cycle_input.json / val_rows.jsonl, so the rows are not
+    re-slept and the next replay check still has something to
+    check against. When the input file is missing or damaged the
+    hashes cannot be rebuilt: the cycle is NOT healed, and it is
+    recorded under `unhealed_cycles` with the reason, so the
+    state is visible instead of silently wrong.
     """
     path = sleep_dir(store, profile, project) / "manifest.json"
     manifest = _empty_manifest()
@@ -134,6 +145,10 @@ def load_sleep_manifest(store: Store, profile: str, project: str) -> dict:
                 if key in data:
                     manifest[key] = data[key]
     known = {c.get("cycle") for c in manifest["cycles"] if isinstance(c, dict)}
+    # Unhealed cycles are recomputed from disk on every read, like
+    # the heal itself — a saved entry goes stale the moment the
+    # cycle dir is deleted, so the file's copy is never trusted.
+    manifest["unhealed_cycles"] = []
     sdir = sleep_dir(store, profile, project)
     if sdir.is_dir():
         for cdir in sorted(sdir.iterdir()):
@@ -152,6 +167,50 @@ def load_sleep_manifest(store: Store, profile: str, project: str) -> dict:
                 report = json.loads(report_path.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
                 continue
+            # R8: rebuild the hash sets from the cycle's own input
+            # file — the old heal restored the cycle list but left
+            # slept_hashes / dreamed_hashes / old_val_rows empty,
+            # so the rows were re-slept and the next replay check
+            # was vacuous (empty old val -> loss None -> OK).
+            try:
+                cycle_input = json.loads(
+                    (cdir / "cycle_input.json").read_text(encoding="utf-8")
+                )
+                real_hashes = cycle_input["real_hashes"]
+                dreamed_hashes = cycle_input["dreamed_hashes"]
+                if not isinstance(real_hashes, list) or not isinstance(
+                    dreamed_hashes, list
+                ):
+                    raise TypeError("hash lists are not lists")
+            except (OSError, json.JSONDecodeError, KeyError, TypeError):
+                manifest["unhealed_cycles"].append({
+                    "cycle": number,
+                    "reason": (
+                        "its input file is missing or damaged, so the "
+                        "rows it slept on cannot be recovered"
+                    ),
+                })
+                continue
+            manifest["slept_hashes"] = sorted(
+                set(manifest["slept_hashes"]) | set(real_hashes)
+            )
+            manifest["dreamed_hashes"] = sorted(
+                set(manifest["dreamed_hashes"]) | set(dreamed_hashes)
+            )
+            try:
+                val_rows = _load_rows_file(cdir / "val_rows.jsonl")
+            except StellaError:
+                # The val file is best effort: the hashes above are
+                # the record that must survive, and a cycle whose
+                # val rows are gone still heals (the next replay
+                # check uses whatever old val rows remain).
+                val_rows = []
+            if val_rows:
+                kept = manifest["old_val_rows"] + [
+                    _example_from_messages(ex["messages"])
+                    for ex in val_rows
+                ]
+                manifest["old_val_rows"] = kept[-MAX_OLD_VAL_ROWS:]
             manifest["cycles"].append(_cycle_summary(report))
             known.add(number)
     manifest["cycles"].sort(key=lambda c: c.get("cycle", 0))
@@ -181,6 +240,27 @@ def _cycle_summary(report: dict) -> dict:
 def list_sleep_cycles(store: Store, profile: str, project: str) -> list[dict]:
     """Per-cycle summaries, oldest first (from the manifest)."""
     return list(load_sleep_manifest(store, profile, project)["cycles"])
+
+
+def list_sleep_adapters(store: Store, profile: str, project: str) -> list[int]:
+    """Cycle numbers whose adapter can be exported (R3): the
+    adapter dir exists and holds an adapter_config.json. A cycle
+    whose training crashed before the adapter was written is not
+    listed — there is nothing to export. Sorted oldest first."""
+    sleep_dir = store.project_dir(profile, project) / "sleep"
+    if not sleep_dir.is_dir():
+        return []
+    numbers = []
+    for child in sleep_dir.iterdir():
+        if not child.is_dir() or not child.name.startswith("cycle-"):
+            continue
+        try:
+            number = int(child.name.split("-", 1)[1])
+        except ValueError:
+            continue
+        if (child / "adapter" / "adapter_config.json").is_file():
+            numbers.append(number)
+    return sorted(numbers)
 
 
 def read_cycle_report(
@@ -592,9 +672,15 @@ def sleep_project(
         else:
             dataset_ref = proj.get("dataset_ref") or ""
             if not dataset_ref:
+                # R15: this error reaches CLI users too, and there
+                # is no GUI panel in front of them — name the CLI
+                # way, with the full command (the old tail was
+                # truncated at "--rows").
                 raise StellaError(
-                    f"project {project!r} has no dataset set. Pick a "
-                    ".jsonl dataset in the Train panel, or pass --rows"
+                    f"project {project!r} has no dataset set. Pass "
+                    "--rows with a .jsonl file of examples, for "
+                    "example: stella "
+                    f"sleep {profile} {project} --rows my-data.jsonl"
                 )
             data_path = resolve_dataset_ref(
                 store, profile, project, dataset_ref
@@ -645,7 +731,15 @@ def sleep_project(
         dreamed_hashes = [row_hash(ex) for ex in dreamed_rows]
         real_count = len(new_rows)
         dreamed_count = len(dreamed_rows)
-        cycle_no = max([c.get("cycle", 0) for c in manifest["cycles"]], default=0) + 1
+        # R8: unhealed cycles still occupy their number — the
+        # orphan dir (and its adapter) must never be overwritten
+        # by a fresh cycle reusing the number.
+        known_numbers = [c.get("cycle", 0) for c in manifest["cycles"]]
+        known_numbers += [
+            u.get("cycle", 0)
+            for u in manifest.get("unhealed_cycles", [])
+        ]
+        cycle_no = max(known_numbers, default=0) + 1
         cycle_dir = sleep_dir(store, profile, project) / f"cycle-{cycle_no}"
         cycle_dir.mkdir(parents=True, exist_ok=True)
         _write_rows_jsonl(cycle_dir / "train_rows.jsonl", train_rows)
@@ -819,6 +913,7 @@ def sleep_status(store: Store, profile: str, project: str) -> dict:
         "profile": profile,
         "project": project,
         "cycles": manifest["cycles"],
+        "unhealed_cycles": manifest.get("unhealed_cycles", []),
         "slept_rows": len(slept),
         "dreamed_rows": len(manifest["dreamed_hashes"]),
         "old_val_rows": len(manifest["old_val_rows"]),

@@ -82,6 +82,27 @@ _TENSOR_TYPE_QUANT = {
 
 # Ollama's own layout: manifests name the model, blobs hold the bytes.
 MODEL_MEDIA_TYPE = "application/vnd.ollama.image.model"
+
+# Ollama's projector layer: a manifest carrying one means the
+# model sees pictures — its vision parts live in a blob of their
+# own, which the requant path never touches (R5).
+PROJECTOR_MEDIA_TYPE = "application/vnd.ollama.image.projector"
+
+# GGUF architectures that can see pictures (general.architecture
+# in the file's metadata). A model with one of these is a vision
+# model, not a text model.
+_VISION_GGUF_ARCHS = frozenset({
+    "llava", "qwen2vl", "qwen2.5vl", "qwen3vl", "moondream2",
+    "minicpmv", "mllama", "pixtral", "internvl", "llama4",
+})
+
+# Tensor-name markers for vision weights inside a GGUF file (the
+# projector and the vision tower). No text model names a tensor
+# this way.
+_VISION_TENSOR_MARKERS = (
+    "mmproj", "vision_tower", "vision_model",
+    "multi_modal_projector",
+)
 DEFAULT_REGISTRY = "registry.ollama.ai"
 
 # Slack on top of the estimated output size for the disk check.
@@ -300,6 +321,146 @@ def _read_gguf_source_quant(path: Path) -> tuple[str | None, float | None]:
     return entry
 
 
+def gguf_has_vision(path: Path) -> bool:
+    """True when a GGUF file carries vision weights: a vision
+    architecture in its `general.architecture` metadata, or
+    projector / vision-tower tensors in its tensor list.
+
+    Streams the header like `_read_gguf_source_quant` (1 MB
+    chunks, 64 MB cap) and stops at the first marker — the
+    weights are never read. False when the header cannot be
+    read: an unreadable header is a corrupt file, and for an
+    Ollama model the manifest check is the primary signal
+    anyway (the projector lives in a blob of its own).
+    """
+    _VALUE_SIZES = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4,
+                    7: 1, 10: 8, 11: 8, 12: 8}
+    _CHUNK = 1 * 1024 * 1024
+    _MAX_HEADER = 64 * 1024 * 1024
+    try:
+        handle = open(path, "rb")
+    except OSError:
+        return False
+    buf = bytearray()
+    pos = 0
+    try:
+        def need(count: int) -> None:
+            """Grow the buffer until `count` bytes past `pos`
+            are available, or raise EOFError."""
+            nonlocal buf
+            while len(buf) < pos + count:
+                if len(buf) >= _MAX_HEADER:
+                    raise EOFError("header over 64 MB")
+                chunk = handle.read(
+                    max(_CHUNK, pos + count - len(buf))
+                )
+                if not chunk:
+                    raise EOFError("short file")
+                buf += chunk
+
+        def read_string() -> str:
+            nonlocal pos
+            need(8)
+            (length,) = struct.unpack_from("<Q", buf, pos)
+            pos += 8
+            need(length)
+            text = bytes(buf[pos:pos + length]).decode(
+                "utf-8", "replace"
+            )
+            pos += length
+            return text
+
+        def skip_value(vtype: int) -> None:
+            nonlocal pos
+            if vtype == 8:  # string
+                read_string()
+                return
+            if vtype == 9:  # array: element type + count + elements
+                need(4)
+                etype = struct.unpack_from("<I", buf, pos)[0]
+                pos += 4
+                need(8)
+                count = struct.unpack_from("<Q", buf, pos)[0]
+                pos += 8
+                for _ in range(count):
+                    skip_value(etype)
+                return
+            pos += _VALUE_SIZES[vtype]
+
+        need(24)
+        if len(buf) < 24 or bytes(buf[:4]) != b"GGUF":
+            return False
+        pos = 8  # magic + version
+        need(8)
+        tensor_count = struct.unpack_from("<Q", buf, pos)[0]
+        pos += 8
+        need(8)
+        kv_count = struct.unpack_from("<Q", buf, pos)[0]
+        pos += 8
+
+        for _ in range(kv_count):
+            key = read_string()
+            need(4)
+            vtype = struct.unpack_from("<I", buf, pos)[0]
+            pos += 4
+            if key == "general.architecture" and vtype == 8:
+                if read_string().strip().lower() in _VISION_GGUF_ARCHS:
+                    return True
+            else:
+                skip_value(vtype)
+
+        for _ in range(min(tensor_count, 10000)):
+            name = read_string().lower()
+            if any(m in name for m in _VISION_TENSOR_MARKERS):
+                return True
+            need(4)
+            n_dims = struct.unpack_from("<I", buf, pos)[0]
+            pos += 4 + 8 * n_dims
+            need(4)
+            pos += 4 + 8  # type + offset
+    except (struct.error, IndexError, KeyError, ValueError, EOFError,
+            OSError):
+        return False
+    finally:
+        handle.close()
+    return False
+
+
+def _manifest_has_projector(tag: str, models_dir: Path) -> bool:
+    """True when the tag's Ollama manifest carries a projector
+    layer — the model's vision parts, in a blob of their own.
+    False when the manifest is missing or unreadable."""
+    registry, name, version = _split_tag(tag)
+    manifest = models_dir / "manifests" / registry / name / version
+    if not manifest.is_file():
+        return False
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    layers = data.get("layers") if isinstance(data, dict) else None
+    if not isinstance(layers, list):
+        return False
+    return any(
+        isinstance(layer, dict)
+        and layer.get("mediaType") == PROJECTOR_MEDIA_TYPE
+        for layer in layers
+    )
+
+
+def model_is_vision(
+    tag: str, blob: Path, models_dir: Path | None = None
+) -> bool:
+    """True when an installed model can see pictures: its Ollama
+    manifest carries a projector layer, or its GGUF file carries
+    vision weights. Both checks are cheap (a small JSON read, a
+    streamed header scan) and run before any work starts."""
+    models_dir = Path(models_dir) if models_dir else ollama_models_dir()
+    if _manifest_has_projector(tag, models_dir):
+        return True
+    return gguf_has_vision(blob)
+
+
 def resolve_model_blob(tag: str, models_dir: Path | None = None) -> Path:
     """Find the GGUF file for an installed Ollama tag.
 
@@ -316,8 +477,13 @@ def resolve_model_blob(tag: str, models_dir: Path | None = None) -> Path:
             f"Ollama does not have a model called {tag!r} installed "
             "on this PC. Check the tag, or pull the model first."
         )
+    # R6: read 4 bytes, not the file. The old read_bytes() pulled
+    # the whole multi-GB blob into RAM for a 4-byte magic check
+    # (1.05 GB peak for a 1.1 GB blob) — on an 8 GB PC, at the
+    # start of a job that then runs a quantizer.
     try:
-        magic = blob.read_bytes()[:4]
+        with open(blob, "rb") as handle:
+            magic = handle.read(4)
     except OSError as exc:
         raise StellaError(
             f"Could not read the model file for {tag!r}: {exc}"
@@ -555,6 +721,18 @@ def requant_model(
     """
     quant = validate_quant(quant)
     source = resolve_model_blob(tag, _models_dir)
+    # R5: refuse vision models BEFORE anything is registered — a
+    # requant keeps only the model layer, so the smaller copy
+    # would lose its vision with no warning. The check sits next
+    # to the quant validation, before llama-quantize or
+    # `ollama create` ever run.
+    if model_is_vision(tag, source, _models_dir):
+        raise StellaError(
+            f"{tag!r} can see pictures (it has vision parts). "
+            "Stella cannot shrink vision models yet: requanting "
+            "would keep only the text parts, and the smaller copy "
+            "would no longer see. The original is untouched."
+        )
     source_bytes = source.stat().st_size
     source_quant, source_bpw = _read_gguf_source_quant(source)
 

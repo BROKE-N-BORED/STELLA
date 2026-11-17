@@ -32,8 +32,9 @@ The short path, first time:
    You can pause and pick it up later.
 
 You need the training packages installed once before training
-works. If they are missing, Stella tells you to run this once in
-the Stella folder: bash install-training.sh""",
+works. Press Install training in the Train panel, or
+double-click Install Stella Training in the Stella folder. It
+downloads about 2 GB.""",
     ),
     (
         "Chat",
@@ -246,7 +247,12 @@ merge step needs several gigabytes of free disk for the merged
 model; Stella cleans up the intermediate files when it is done.
 
 The tuned model keeps the base model's name with the project
-name added, so you can tell it apart in Ollama.""",
+name added, so you can tell it apart in Ollama.
+
+The From list beside the button picks which adapter is merged:
+the trained adapter, a checkpoint's adapter, or a sleep cycle's
+adapter (Sleep cycle N). A finished sleep cycle exports the
+same way as everything else.""",
     ),
     (
         "Making a model smaller",
@@ -311,8 +317,9 @@ else.""",
 list. Ollama may not be running. Start Ollama, then reopen the
 profile window. The list refreshes each time the window opens.
 
-Training packages missing. Run this once in the Stella folder:
-bash install-training.sh. It downloads about 2 GB.
+Training packages missing. Press Install training in the Train
+panel, or double-click Install Stella Training in the Stella
+folder. It downloads about 2 GB.
 
 Weights missing. Open the profile and press Download model. If
 Base ref is empty, set it to the Hugging Face name first, for

@@ -18,8 +18,11 @@ Design rules for this machine (Ryzen 3 3250U, 8 GB RAM, no GPU):
   Hugging Face repo id (e.g. LiquidAI/LFM3-1.7B) or a local HF folder.
 - torch / transformers / peft are OPTIONAL imports. This module must
   import cleanly on a base Stella install (PySide6 only); every
-  function that needs the training stack raises a StellaError naming
-  `bash install-training.sh` when the stack is missing.
+  function that needs the training stack raises a StellaError with
+  TRAINING_INSTALL_HINT, which names the click path first
+  (Install training in the Train panel, or double-clicking
+  Install Stella Training) and keeps the terminal command as the
+  fallback.
 
 LFM3 note: LiquidAI/LFM3-1.7B ships remote modeling code (its
 config.json maps AutoModel to modeling_lfm3.py), so loading uses
@@ -50,8 +53,10 @@ LFM3_HF_REPO = "LiquidAI/LFM3-1.7B"
 TRAINING_DEPS = ("torch", "transformers", "peft", "accelerate")
 TRAINING_INSTALL_HINT = (
     "Training needs the training packages (torch, transformers, peft, "
-    "accelerate). Run this once in the Stella folder:\n"
-    "  bash install-training.sh"
+    "accelerate). Install them by pressing Install training in the "
+    "Train panel, or by double-clicking Install Stella Training in "
+    "the Stella folder. It downloads about 2 GB. "
+    "In a terminal: bash install-training.sh"
 )
 
 # 8 GB is the hard ceiling on Joshua's PC; 1 GB stays reserved for the
@@ -229,6 +234,88 @@ def training_deps_missing() -> list[str]:
         name for name in TRAINING_DEPS
         if importlib.util.find_spec(name) is None
     ]
+
+
+def training_install_script() -> Path:
+    """install-training.sh beside this Stella install (R13)."""
+    return Path(__file__).resolve().parent.parent / "install-training.sh"
+
+
+def run_training_install(
+    *,
+    on_line=None,
+    should_stop=None,
+    script: Path | None = None,
+) -> None:
+    """Run install-training.sh, streaming its output (R13).
+
+    The click-only training install from the GUI: the Install
+    training button runs the script through this function so the
+    output shows as progress in the Train log. (The desktop
+    launcher runs the same script directly; it does not come
+    through here.) Each output line goes to `on_line` as it
+    callable) cancels between lines, killing the install. Raises
+    StellaError, in plain words, when the script is missing, the
+    install is cancelled, or the install fails. `script`
+    overrides the script path (tests).
+    """
+    import select
+    import signal
+    import subprocess
+
+    path = Path(script) if script is not None else training_install_script()
+    if not path.is_file():
+        raise StellaError(
+            "The training installer is not in this Stella folder. "
+            "Reinstall Stella, then try again."
+        )
+    proc = subprocess.Popen(
+        ["bash", str(path)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        # Its own session, so a cancel kills the whole install
+        # (bash and the pip it started), not just the shell.
+        start_new_session=True,
+    )
+    assert proc.stdout is not None
+    try:
+        while True:
+            if should_stop is not None and should_stop():
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                except (ProcessLookupError, PermissionError):
+                    pass
+                proc.wait()
+                raise StellaError("Training install cancelled.")
+            ready, _, _ = select.select([proc.stdout], [], [], 0.5)
+            if ready:
+                line = proc.stdout.readline()
+                if not line:
+                    break
+                if on_line is not None:
+                    on_line(line.rstrip("\n"))
+            elif proc.poll() is not None:
+                break
+        rc = proc.wait()
+        # Drain lines the read buffer already holds: a fast exit
+        # can leave the last lines buffered past the select loop.
+        for line in proc.stdout:
+            if on_line is not None:
+                on_line(line.rstrip("\n"))
+    finally:
+        # A failure above must not leave the install running.
+        if proc.poll() is None:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
+            proc.wait()
+    if rc != 0:
+        raise StellaError(
+            "Training install did not finish. Check the lines above "
+            "for the reason, then press Install training again."
+        )
 
 
 def require_training_deps() -> None:

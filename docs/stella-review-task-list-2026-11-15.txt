@@ -1,30 +1,31 @@
 STELLA - task list from the full review, 2026-11-15
 
-129 tasks, none started yet. 0 urgent. 23 important, 52 correctness and polish, 54 nice to have.
+129 tasks: 18 done, 105 to do, 6 gated. 0 urgent. 23 important, 52 correctness and polish, 54 nice to have.
 The 5 marked (needs your PC) can only be done on your machine.
+The 1 marked (needs your call) is a design choice for you.
 Full detail for every task - evidence, what to fix, what done looks like -
 is in stella-review-task-list-2026-11-15.md in this same folder.
 
 P1 - IMPORTANT
 
-R1. New Profile dialog picks the first model by itself; Enter creates a profile you never picked
-R2. The trash has no way back: no Restore button, and the documented move-back is a trap
-R3. Sleep adapters have no way into a model: the merge path the docs claim does not exist
-R4. The refusal probe gate is never enforced: a tune can reach Ollama without ever passing it
-R5. Vision models silently lose their vision when requanted or exported
-R6. Reading a model's type loads the whole model file into RAM
-R7. One profile with bad characters in its notes breaks the whole profile list
-R8. Healing an orphaned sleep report drops its hashes, so rows get re-slept and the next check is empty
-R9. The doctor writes a launcher with a literal "path" as its icon, and the error is sticky
-R10. The doctor tells the user to install the wrong package for missing libxcb libraries
-R11. The Groq model list is stale: the default model errors for ordinary accounts
-R12. The Gemini model list is stale: all three listed models fail for a new user
-R13. There is no click-only way to install training: the core purpose still needs a terminal
-R14. Chat on the command line goes silent for the whole run: no narration, no progress
-R15. sleep with no dataset tells the user to pick one "in the Train panel"
-R16. Four tests fail on a plain install without the training stack, so CI's base job would go red
-R17. The Ollama-down settings test is genuinely fragile: a background refresh can overwrite its seed
-R18. The button-press test is genuinely fragile: under load it misses the dip entirely
+R1. New Profile dialog picks the first model by itself; Enter creates a profile you never picked [DONE]
+R2. The trash has no way back: no Restore button, and the documented move-back is a trap [DONE]
+R3. Sleep adapters have no way into a model: the merge path the docs claim does not exist [DONE]
+R4. The refusal probe gate is never enforced: a tune can reach Ollama without ever passing it [DONE]
+R5. Vision models silently lose their vision when requanted or exported [DONE]
+R6. Reading a model's type loads the whole model file into RAM [DONE]
+R7. One profile with bad characters in its notes breaks the whole profile list [DONE]
+R8. Healing an orphaned sleep report drops its hashes, so rows get re-slept and the next check is empty [DONE]
+R9. The doctor writes a launcher with a literal "path" as its icon, and the error is sticky [DONE]
+R10. The doctor tells the user to install the wrong package for missing libxcb libraries [DONE]
+R11. The Groq model list is stale: the default model errors for ordinary accounts [DONE]
+R12. The Gemini model list is stale: all three listed models fail for a new user [DONE]
+R13. There is no click-only way to install training: the core purpose still needs a terminal [DONE]
+R14. Chat on the command line goes silent for the whole run: no narration, no progress [DONE]
+R15. sleep with no dataset tells the user to pick one "in the Train panel" [DONE]
+R16. Four tests fail on a plain install without the training stack, so CI's base job would go red [DONE]
+R17. The Ollama-down settings test is genuinely fragile: a background refresh can overwrite its seed [DONE]
+R18. The button-press test is genuinely fragile: under load it misses the dip entirely [DONE]
 R19. Run the LFM3 proof run end to end (needs your PC)
 R20. Merge a sleep adapter for real with llama.cpp (needs your PC)
 R21. Create a model in Ollama from a real Stella export (needs your PC)
@@ -104,7 +105,7 @@ R88. settings_source is silently lost on a round-trip (auto becomes manual)
 R89. The LFM3 template still carries a dead settings["notes"] key
 R90. CLI --purge has no prompt
 R91. The trash shows no size and has no auto-purge age
-R92. How to Use opens on an empty pane, not Getting started
+R92. How to Use opens on an empty pane, not Getting started (needs your call)
 R93. A picked job cannot be un-picked; Go stays armed
 R94. No Quit in the File menu, no Ctrl+Q
 R95. The finish moment lasts 250 ms: too brief to read

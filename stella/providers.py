@@ -52,10 +52,15 @@ PROVIDERS = {
         "display": "Groq",
         "needs_key": True,
         "endpoint": "https://api.groq.com/openai/v1/chat/completions",
+        # R11: checked 2026-11-17 against Groq's own models page.
+        # The Llama models shut down for free/developer tiers on
+        # 2026-08-16 and are Enterprise-only now; the self-serve
+        # production text models are the two GPT-OSS models.
+        # qwen/qwen3.8-27b is deliberately NOT listed: it is a
+        # preview model Groq may discontinue at short notice.
         "models": [
-            "llama-3.3-70b-versatile",
-            "llama-3.1-8b-instant",
             "openai/gpt-oss-120b",
+            "openai/gpt-oss-20b",
         ],
     },
     "gemini": {
@@ -65,10 +70,15 @@ PROVIDERS = {
             "https://generativelanguage.googleapis.com/v1beta/openai/"
             "chat/completions"
         ),
+        # R12: checked 2026-11-17 against Google's models page.
+        # gemini-2.0-flash is shut down; the 2.5 models are
+        # deprecated and closed to new users (they auto-route
+        # from 2026-12-01). Google names these two for new
+        # projects, and both are free-tier. gemini-3.1-pro-preview
+        # is deliberately NOT listed: it has zero free-tier quota.
         "models": [
-            "gemini-2.5-flash",
-            "gemini-2.0-flash",
-            "gemini-2.5-pro",
+            "gemini-3.8-flash",
+            "gemini-3.5-flash-lite",
         ],
     },
     "custom": {

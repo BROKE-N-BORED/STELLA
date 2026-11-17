@@ -137,6 +137,30 @@ def converter_supported_archs(convert_path: str | Path) -> set[str] | None:
     return found or None
 
 
+# R5: Hugging Face architecture names that can see pictures.
+# A base with one of these cannot be merged — AutoModelForCausalLM
+# has no vision-language mapping — and even if it could, the
+# converter would drop the vision parts. The export refuses up
+# front with plain words instead of failing at the merge.
+_VISION_ARCH_MARKERS = (
+    "VL", "Llava", "Vision", "PaliGemma", "Idefics", "Moondream",
+    "MiniCPMV",
+)
+
+
+def is_vision_architecture(arch: str) -> bool:
+    """True when an HF architecture name is a vision-language
+    model: the ForConditionalGeneration family (Qwen2_5_VL,
+    Llava, Gemma3, Idefics3, PaliGemma, Llama4, ...), or a name
+    carrying a vision marker. Text architectures
+    (ForCausalLM and friends) never match."""
+    if not arch:
+        return False
+    if arch.endswith("ForConditionalGeneration"):
+        return True
+    return any(marker in arch for marker in _VISION_ARCH_MARKERS)
+
+
 def check_converter_supports_arch(
     arch: str, convert_path: str | Path
 ) -> None:
@@ -660,6 +684,7 @@ def export_gguf(
     *,
     quant: str = DEFAULT_QUANT,
     from_checkpoint: int | None = None,
+    from_sleep: int | None = None,
     llama_cpp: tuple[Path, Path] | None = None,
     on_warning=None,
     on_event=None,
@@ -673,7 +698,8 @@ def export_gguf(
     """Full round-trip for one trained project.
 
     Merges the adapter (project adapter/, or checkpoints/step-N with
-    --from-checkpoint), converts, quantizes, writes the Modelfile.
+    --from-checkpoint, or sleep/cycle-N/adapter with --from-sleep),
+    converts, quantizes, writes the Modelfile.
     Returns paths + the ollama create command. `on_warning` (a
     callable taking one string) is called up front, before the
     merge, with any converter warning (T31). `on_event` (T74) gets
@@ -701,7 +727,23 @@ def export_gguf(
     prof = store.get_profile(profile)
     proj = store.get_project(profile, project)
     project_dir = store.project_dir(profile, project)
-    if from_checkpoint is not None:
+    if from_sleep is not None and from_checkpoint is not None:
+        raise StellaError(
+            "pick one adapter to export: a sleep cycle "
+            "(--from-sleep) or a checkpoint (--from-checkpoint), "
+            "not both"
+        )
+    if from_sleep is not None:
+        adapter_dir = (
+            project_dir / "sleep" / f"cycle-{from_sleep}" / "adapter"
+        )
+        if not (adapter_dir / "adapter_config.json").is_file():
+            raise StellaError(
+                f"no sleep adapter for cycle {from_sleep} in project "
+                f"{project!r}. Run sleep first (stella sleep "
+                f"{profile} {project}), or pick a finished cycle."
+            )
+    elif from_checkpoint is not None:
         adapter_dir = project_dir / "checkpoints" / f"step-{from_checkpoint}"
         if not (adapter_dir / "adapter_config.json").is_file():
             raise StellaError(
@@ -722,6 +764,14 @@ def export_gguf(
             f"profile {profile!r} has no base_ref. Set it to the "
             f"Hugging Face repo of the base model (e.g. {LFM3_HF_REPO!r})"
         )
+    # R4: the refusal-probe gate, enforced at export — a
+    # governing-seat tune cannot reach Ollama without a passed
+    # probe. Checked here, after the cheap validations and before
+    # any folder is made or any work starts. Non-governing
+    # profiles pass through untouched.
+    from .probe import require_passed_probe
+
+    require_passed_probe(store, profile, project)
     dest = Path(dest).expanduser()
     dest.mkdir(parents=True, exist_ok=True)
     gguf_name = f"{project}-{quant.lower().replace('_', '-')}.gguf"
@@ -768,10 +818,25 @@ def export_gguf(
     # before the merge, not after it. The arch comes from the base
     # config (or the _base_arch test hook); when it cannot be
     # read, the check is skipped rather than guessed.
-    base_arch = _base_arch
-    if base_arch is None and meta is not None:
+    if _base_arch is not None:
+        archs = [_base_arch]
+    elif meta is not None:
         archs = meta.get("architectures") or []
-        base_arch = archs[0] if archs else None
+    else:
+        archs = []
+    base_arch = archs[0] if archs else None
+    # R5: a vision base cannot be merged (AutoModelForCausalLM
+    # has no vision-language mapping) and its vision parts would
+    # be lost — refuse with plain words before the merge starts.
+    for arch in archs:
+        if is_vision_architecture(arch):
+            raise StellaError(
+                f"The base model {base_ref!r} can see pictures "
+                f"(architecture {arch}). Stella cannot export "
+                "vision models yet: the merge only handles text "
+                "models, and the vision parts would be lost. "
+                "Export from a text-only base model instead."
+            )
     if base_arch is not None and llama_cpp is not None:
         check_converter_supports_arch(base_arch, llama_cpp[0])
 
@@ -826,6 +891,7 @@ def export_gguf(
             "project": project,
             "base_ref": base_ref,
             "adapter": str(adapter_dir),
+            "from_sleep": from_sleep,
             "merged_hf": str(merged_dir),
             "gguf": str(gguf_path),
             "quant": quant,

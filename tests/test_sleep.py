@@ -15,6 +15,7 @@ import pytest
 from stella.model import StellaError, Store
 from stella.sleep import (
     dream_rows,
+    list_sleep_adapters,
     list_sleep_cycles,
     load_sleep_manifest,
     replay_check,
@@ -91,23 +92,160 @@ def test_sleep_manifest_round_trip(tmp_path):
     assert again["cycles"][0]["cycle"] == 1
 
 
+def _plant_orphan_cycle(store, cycle=1, with_input=True):
+    """A cycle dir as a crash between the report write and the
+    manifest update leaves it: report + input + val rows (the
+    input file is written before training starts, so a real
+    crash always leaves it). Returns (cdir, real_hashes,
+    dreamed_hashes, val_rows)."""
+    cdir = (
+        store.project_dir("p", "proj") / "sleep" / f"cycle-{cycle}"
+    )
+    cdir.mkdir(parents=True)
+    (cdir / "report.json").write_text(json.dumps({
+        "cycle": cycle, "status": "OK",
+        "timestamp": "2026-11-13T00:00:00",
+        "real_rows": 4, "dreamed_rows": 1, "steps": 3,
+        "old_loss_before": None, "old_loss_after": None, "new_loss": 1.5,
+    }))
+    real_hashes = [f"real-{cycle}-{i}" for i in range(4)]
+    dreamed_hashes = [f"dreamed-{cycle}-0"]
+    val_rows = [
+        {"messages": [{"role": "user", "content": f"Val Q{cycle}?"},
+                      {"role": "assistant", "content": "Val A."}]},
+        {"messages": [{"role": "user", "content": f"Val Q{cycle}b?"},
+                      {"role": "assistant", "content": "Val B."}]},
+    ]
+    if with_input:
+        (cdir / "cycle_input.json").write_text(json.dumps({
+            "real_hashes": real_hashes,
+            "dreamed_hashes": dreamed_hashes,
+            "real_rows": 4,
+            "dreamed_rows": 1,
+            "new_val_in_sample": False,
+            "stella_version": "0.24.0",
+        }))
+        (cdir / "val_rows.jsonl").write_text("".join(
+            json.dumps(row) + "\n" for row in val_rows
+        ))
+    return cdir, real_hashes, dreamed_hashes, val_rows
+
+
+def test_list_sleep_adapters_lists_finished_cycles_only(tmp_path):
+    # R3: only cycles with a real adapter on disk are exportable —
+    # a cycle whose training crashed before the adapter was written
+    # is not offered, and a stray non-cycle dir is ignored.
+    store = Store(tmp_path / "home")
+    store.create_profile("p")
+    store.create_project("p", "proj")
+    sleep_dir = store.project_dir("p", "proj") / "sleep"
+    for cycle in (1, 3):
+        adapter = sleep_dir / f"cycle-{cycle}" / "adapter"
+        adapter.mkdir(parents=True)
+        (adapter / "adapter_config.json").write_text("{}\n")
+    (sleep_dir / "cycle-2" / "adapter").mkdir(parents=True)
+    (sleep_dir / "cycle-not-a-number").mkdir(parents=True)
+    (sleep_dir / "notes.txt").write_text("not a cycle\n")
+    assert list_sleep_adapters(store, "p", "proj") == [1, 3]
+
+
 def test_manifest_reconciles_orphan_report(tmp_path):
     # A cycle dir with a report.json but no manifest entry (a crash
     # between the report write and the manifest update) heals itself.
     store = Store(tmp_path / "home")
     store.create_profile("p")
     store.create_project("p", "proj")
-    cdir = store.project_dir("p", "proj") / "sleep" / "cycle-1"
-    cdir.mkdir(parents=True)
-    (cdir / "report.json").write_text(json.dumps({
-        "cycle": 1, "status": "OK", "timestamp": "2026-11-13T00:00:00",
-        "real_rows": 4, "dreamed_rows": 0, "steps": 3,
-        "old_loss_before": None, "old_loss_after": None, "new_loss": 1.5,
-    }))
+    _plant_orphan_cycle(store)
     manifest = load_sleep_manifest(store, "p", "proj")
     assert len(manifest["cycles"]) == 1
     assert manifest["cycles"][0]["cycle"] == 1
     assert manifest["cycles"][0]["new_loss"] == 1.5
+
+
+def test_manifest_heal_keeps_hashes_and_val_rows(tmp_path):
+    # R8: the heal rebuilds the hash sets and the old val rows
+    # from the orphan cycle's own files — the old heal restored
+    # the cycle list but left all three empty, so the rows were
+    # re-slept and the next replay check was vacuous.
+    store = Store(tmp_path / "home")
+    store.create_profile("p")
+    store.create_project("p", "proj")
+    _cdir, real, dreamed, val_rows = _plant_orphan_cycle(store)
+    manifest = load_sleep_manifest(store, "p", "proj")
+    assert manifest["slept_hashes"] == sorted(real)
+    assert manifest["dreamed_hashes"] == sorted(dreamed)
+    assert len(manifest["old_val_rows"]) == 2
+    assert manifest["old_val_rows"][0]["messages"][0]["content"] == "Val Q1?"
+    assert manifest["unhealed_cycles"] == []
+
+
+def test_manifest_heal_merges_with_existing_hashes(tmp_path):
+    # R8: the rebuild unions with what the manifest already holds
+    # (an earlier cycle's hashes are not wiped by the heal).
+    store = Store(tmp_path / "home")
+    store.create_profile("p")
+    store.create_project("p", "proj")
+    manifest = load_sleep_manifest(store, "p", "proj")
+    manifest["slept_hashes"] = ["older-row"]
+    manifest["cycles"] = [{
+        "cycle": 0, "status": "OK", "timestamp": "",
+        "real_rows": 1, "dreamed_rows": 0, "steps": 1,
+        "old_loss_before": None, "old_loss_after": None, "new_loss": 1.0,
+    }]
+    save_sleep_manifest(store, "p", "proj", manifest)
+    _cdir, real, _dreamed, _val = _plant_orphan_cycle(store)
+    healed = load_sleep_manifest(store, "p", "proj")
+    assert "older-row" in healed["slept_hashes"]
+    assert set(real) <= set(healed["slept_hashes"])
+    assert [c["cycle"] for c in healed["cycles"]] == [0, 1]
+
+
+def test_manifest_refuses_orphan_without_input(tmp_path):
+    # R8: a report with no input file cannot be rebuilt — the
+    # cycle is NOT healed into the list, and it is recorded with
+    # the reason instead of silently pretending it recovered.
+    store = Store(tmp_path / "home")
+    store.create_profile("p")
+    store.create_project("p", "proj")
+    _plant_orphan_cycle(store, with_input=False)
+    manifest = load_sleep_manifest(store, "p", "proj")
+    assert manifest["cycles"] == []
+    assert manifest["slept_hashes"] == []
+    assert len(manifest["unhealed_cycles"]) == 1
+    entry = manifest["unhealed_cycles"][0]
+    assert entry["cycle"] == 1
+    assert "input file" in entry["reason"]
+    # And the refusal is visible through sleep_status too.
+    assert sleep_status(store, "p", "proj")["unhealed_cycles"] == [
+        entry
+    ]
+
+
+def test_healed_cycle_rows_are_not_reslept(tmp_path):
+    # R8 end to end at the status level: a healed cycle's rows
+    # count as slept, so the next cycle does not train them again.
+    store = _tiny_project(Store(tmp_path / "home"), tmp_path, rows=6)
+    examples, _ = load_dataset(tmp_path / "tiny.jsonl")
+    hashes = [row_hash(ex) for ex in examples]
+    cdir = store.project_dir("tiny", "proof") / "sleep" / "cycle-1"
+    cdir.mkdir(parents=True)
+    (cdir / "report.json").write_text(json.dumps({
+        "cycle": 1, "status": "OK", "timestamp": "2026-11-13T00:00:00",
+        "real_rows": 6, "dreamed_rows": 0, "steps": 3,
+        "old_loss_before": None, "old_loss_after": None, "new_loss": 1.5,
+    }))
+    (cdir / "cycle_input.json").write_text(json.dumps({
+        "real_hashes": hashes,
+        "dreamed_hashes": [],
+        "real_rows": 6,
+        "dreamed_rows": 0,
+        "new_val_in_sample": False,
+        "stella_version": "0.24.0",
+    }))
+    (cdir / "val_rows.jsonl").write_text(json.dumps(examples[0]) + "\n")
+    status = sleep_status(store, "tiny", "proof")
+    assert status["slept_rows"] == 6
+    assert status["unslept_rows"] == 0
 
 
 def test_sleep_status_counts_unslept(tmp_path):
@@ -632,3 +770,56 @@ def test_sleep_corrupt_cycle_input_is_a_plain_error(need_torch, tmp_path):
             store, "tiny", "proof",
             _model_loader=tiny_model_and_tokenizer, _dtype="float32",
         )
+
+
+def test_unhealed_cycle_number_is_not_reused(tmp_path, monkeypatch):
+    # R8: an unhealed cycle still occupies its number — the next
+    # fresh cycle takes the next number, and the orphan dir (and
+    # its adapter) is never overwritten. The train + replay steps
+    # are faked (this pins the numbering, not the training).
+    import stella.sleep as sleep_mod
+
+    store = _tiny_project(Store(tmp_path / "home"), tmp_path, rows=6)
+    cdir = store.project_dir("tiny", "proof") / "sleep" / "cycle-1"
+    (cdir / "adapter").mkdir(parents=True)
+    (cdir / "adapter" / "adapter_config.json").write_text('{"r": 2}\n')
+    (cdir / "report.json").write_text(json.dumps({
+        "cycle": 1, "status": "OK", "timestamp": "2026-11-13T00:00:00",
+        "real_rows": 6, "dreamed_rows": 0, "steps": 3,
+        "old_loss_before": None, "old_loss_after": None, "new_loss": 1.5,
+    }))
+    # No cycle_input.json: the cycle cannot be healed.
+    assert load_sleep_manifest(store, "tiny", "proof")["unhealed_cycles"]
+
+    def fake_train(*args, **kwargs):
+        work_dir = kwargs["work_dir"]
+        adapter = work_dir / "adapter"
+        adapter.mkdir(parents=True, exist_ok=True)
+        (adapter / "adapter_config.json").write_text("{}\n")
+        return {
+            "stopped": False, "steps": 3, "final_loss": 1.0,
+            "trainable_params": 10, "ram_estimate_gb": 0.1,
+        }
+
+    def fake_replay(*args, **kwargs):
+        return {
+            "status": "OK", "old_loss_before": None,
+            "old_loss_after": None, "new_loss": 1.0,
+            "old_delta_relative": None, "old_val_rows": 0,
+            "new_val_rows": 1,
+        }
+
+    monkeypatch.setattr(sleep_mod, "train_project", fake_train)
+    monkeypatch.setattr(sleep_mod, "replay_check", fake_replay)
+    report = sleep_project(store, "tiny", "proof")
+    assert report["cycle"] == 2
+    # The orphan's adapter and report are untouched.
+    assert (cdir / "adapter" / "adapter_config.json").read_text() == (
+        '{"r": 2}\n'
+    )
+    assert json.loads((cdir / "report.json").read_text())["cycle"] == 1
+    # And the new cycle's own adapter landed in cycle-2, not cycle-1.
+    assert (
+        store.project_dir("tiny", "proof") / "sleep" / "cycle-2"
+        / "adapter" / "adapter_config.json"
+    ).is_file()

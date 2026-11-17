@@ -1093,7 +1093,8 @@ def _adapter_manifest_block(
     if config_path.is_file():
         try:
             config = json.loads(config_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+            # R7: bad bytes read as no config, like a bad file.
             config = {}
         if isinstance(config, dict) and isinstance(config.get("r"), int):
             rank = config["r"]
@@ -1458,6 +1459,11 @@ def _load_manifest(path: Path) -> dict:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise StellaError(f"manifest.json is not valid JSON: {exc}") from exc
+    except UnicodeDecodeError as exc:
+        # R7: bad bytes are a damaged package, not a crash.
+        raise StellaError(
+            f"manifest.json has characters Stella cannot read: {exc}"
+        ) from exc
     if not isinstance(manifest, dict):
         raise StellaError("not a Stella export: bad manifest kind")
     return manifest
@@ -1557,6 +1563,10 @@ def _check_export_opened(root: Path, record, checks, path: Path) -> dict:
     except OSError as exc:
         record("Manifest is valid JSON", False, str(exc))
         return {"ok": False, "kind": "", "checks": checks, "manifest": None}
+    except UnicodeDecodeError as exc:
+        # R7: bad bytes fail the manifest check like bad JSON.
+        record("Manifest is valid JSON", False, str(exc))
+        return {"ok": False, "kind": "", "checks": checks, "manifest": None}
     if not isinstance(manifest, dict):
         record(
             "Manifest is valid JSON", False,
@@ -1649,7 +1659,8 @@ def _is_placeholder_readme(path: Path) -> bool:
         return path.read_text(encoding="utf-8").startswith(
             "No trained adapter yet."
         )
-    except OSError:
+    except (OSError, UnicodeDecodeError):
+        # R7: a bad byte is not the placeholder note.
         return False
 
 

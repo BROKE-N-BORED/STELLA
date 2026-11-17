@@ -435,6 +435,66 @@ def probe_gate(result: dict, *, max_increase: float = 0.0) -> tuple[bool, str]:
     )
 
 
+def load_probe_results(store: Store, profile: str, project: str) -> dict | None:
+    """The saved probe_results.json for a project, or None when
+    there is none (or it cannot be read). A missing or corrupt
+    file is not an error here — the caller decides what to say."""
+    path = store.project_dir(profile, project) / "probe_results.json"
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def require_passed_probe(store: Store, profile: str, project: str) -> str | None:
+    """The refusal-probe gate, enforced at export (R4).
+
+    A profile bound for a governing seat may not be exported to
+    GGUF — the path to Ollama — without a PASSED refusal probe.
+    Returns the gate verdict text when the gate passes, or None
+    when the profile is not governing (no gate applies). Raises
+    StellaError, in plain words, when the profile is governing
+    and there is no probe result or the gate failed.
+
+    "Passed" is probe_gate's verdict on the saved result: a
+    result from an older version with no before/after rates fails
+    the gate instead of passing vacuously, the same as
+    probe_gate itself treats it.
+
+    Design decision (R4): the gate's opt-in nature was
+    unrecorded — it may have been deliberate UX — but the review
+    ordered enforcement, and a seat-safety rule that can be
+    skipped by never running the probe is not a gate. So the
+    enforcement is a hard block at the engine level (every export
+    path: GUI, CLI, chat), with no bypass flag. Non-governing
+    profiles are untouched: their probe stays informational and
+    their exports proceed as before.
+    """
+    prof = store.get_profile(profile)
+    if not is_governing_profile(prof):
+        return None
+    result = load_probe_results(store, profile, project)
+    if result is None:
+        raise StellaError(
+            f"profile {profile!r} is bound for a governing seat, "
+            "so it cannot be exported until its refusal probe "
+            "passes. Run the refusal probe first (Run refusal "
+            "probe in the Train panel, or stella probe "
+            f"{profile} {project})."
+        )
+    passed, verdict = probe_gate(result)
+    if not passed:
+        raise StellaError(
+            f"profile {profile!r} is bound for a governing seat, "
+            f"and its refusal probe did not pass: {verdict}. "
+            "Fix the tune, then run the probe again before exporting."
+        )
+    return verdict
+
+
 def probe_project(
     store: Store,
     profile: str,

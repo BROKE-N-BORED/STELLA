@@ -1154,6 +1154,33 @@ def test_check_export_no_manifest_names_the_check(tmp_path):
     assert report["manifest"] is None
 
 
+def test_check_export_bad_bytes_manifest_fails_json_check(
+    seeded, tmp_path
+):
+    """R7: a manifest with invalid UTF-8 fails the JSON check
+    like bad JSON — it does not raise out of check_export."""
+    out = export_mod.export_project(seeded, "lfm3-tool", "tool-calls", tmp_path)
+    (out / "manifest.json").write_bytes(b'{"kind": "\xff"}')
+    report = export_mod.check_export(out)
+    assert report["ok"] is False
+    failed = [c for c in report["checks"] if not c["passed"]]
+    assert len(failed) == 1
+    assert failed[0]["name"] == "Manifest is valid JSON"
+
+
+def test_verify_export_bad_bytes_manifest_is_plain_error(
+    seeded, tmp_path
+):
+    """R7: a manifest with invalid UTF-8 is a plain StellaError
+    from verify, not a raw UnicodeDecodeError."""
+    from stella.model import StellaError
+
+    out = export_mod.export_project(seeded, "lfm3-tool", "tool-calls", tmp_path)
+    (out / "manifest.json").write_bytes(b'{"kind": "\xff"}')
+    with pytest.raises(StellaError, match="cannot read"):
+        export_mod.verify_export(out)
+
+
 def test_check_export_imports_nothing(seeded, tmp_path):
     """T105 Done: verify never imports, good package or bad."""
     out = export_mod.export_project(seeded, "lfm3-tool", "tool-calls", tmp_path)

@@ -164,7 +164,7 @@ def test_groq_chat_request_shape(home, monkeypatch):
         _fake_urlopen_factory(seen, _chat_payload("Hi from Groq.")),
     )
     text = chat(
-        "groq", "llama-3.3-70b-versatile",
+        "groq", "openai/gpt-oss-120b",
         [{"role": "user", "content": "Say hi."}], home,
     )
     assert text == "Hi from Groq."
@@ -174,7 +174,7 @@ def test_groq_chat_request_shape(home, monkeypatch):
     assert req.get_header("Authorization") == f"Bearer {FAKE_KEY}"
     assert req.get_header("Content-type") == "application/json"
     body = _request_body(req)
-    assert body["model"] == "llama-3.3-70b-versatile"
+    assert body["model"] == "openai/gpt-oss-120b"
     assert body["messages"] == [{"role": "user", "content": "Say hi."}]
     assert body["temperature"] == 0.3
 
@@ -187,7 +187,7 @@ def test_gemini_chat_uses_bearer_and_openai_endpoint(home, monkeypatch):
         _fake_urlopen_factory(seen, _chat_payload("Hi from Gemini.")),
     )
     text = chat(
-        "gemini", "gemini-2.5-flash",
+        "gemini", "gemini-3.8-flash",
         [{"role": "user", "content": "Say hi."}], home,
     )
     assert text == "Hi from Gemini."
@@ -219,7 +219,7 @@ def test_custom_chat_uses_saved_base_url(home, monkeypatch):
 def test_chat_missing_key_is_plain_words(home):
     with pytest.raises(ProviderError) as exc:
         chat(
-            "groq", "llama-3.3-70b-versatile",
+            "groq", "openai/gpt-oss-120b",
             [{"role": "user", "content": "hi"}], home,
         )
     assert "No Groq key saved yet" in str(exc.value)
@@ -252,7 +252,7 @@ def test_chat_401_says_the_key_was_rejected(home, monkeypatch):
     )
     with pytest.raises(ProviderError) as exc:
         chat(
-            "groq", "llama-3.3-70b-versatile",
+            "groq", "openai/gpt-oss-120b",
             [{"role": "user", "content": "hi"}], home,
         )
     assert "key was rejected" in str(exc.value)
@@ -266,7 +266,7 @@ def test_chat_429_says_busy(home, monkeypatch):
     )
     with pytest.raises(ProviderError) as exc:
         chat(
-            "groq", "llama-3.3-70b-versatile",
+            "groq", "openai/gpt-oss-120b",
             [{"role": "user", "content": "hi"}], home,
         )
     assert "busy" in str(exc.value)
@@ -282,7 +282,7 @@ def test_chat_network_failure_is_plain_words(home, monkeypatch):
     )
     with pytest.raises(ProviderError) as exc:
         chat(
-            "gemini", "gemini-2.5-flash",
+            "gemini", "gemini-3.8-flash",
             [{"role": "user", "content": "hi"}], home,
         )
     assert "Could not reach Gemini" in str(exc.value)
@@ -296,7 +296,7 @@ def test_chat_empty_reply_is_plain_words(home, monkeypatch):
     )
     with pytest.raises(ProviderError) as exc:
         chat(
-            "groq", "llama-3.3-70b-versatile",
+            "groq", "openai/gpt-oss-120b",
             [{"role": "user", "content": "hi"}], home,
         )
     assert "no text" in str(exc.value)
@@ -305,7 +305,7 @@ def test_chat_empty_reply_is_plain_words(home, monkeypatch):
 def test_make_chat_fn_missing_key_raises_only_when_called(home):
     fn = make_chat_fn("groq", home)
     with pytest.raises(ProviderError) as exc:
-        fn("llama-3.3-70b-versatile", [{"role": "user", "content": "hi"}])
+        fn("openai/gpt-oss-120b", [{"role": "user", "content": "hi"}])
     assert "No Groq key saved yet" in str(exc.value)
 
 
@@ -362,6 +362,58 @@ def test_test_connection_custom_needs_a_model(home):
     assert "model" in message.lower()
 
 
+# -- R11/R12: the curated lists hold models that work ----------------
+
+
+def test_curated_model_lists_are_current():
+    """R11/R12, checked 2026-11-17 against the providers' own
+    pages: Groq self-serve is the two GPT-OSS production models
+    (the Llamas are Enterprise-only since 2026-08-16); Gemini
+    for a new key is 3.8-flash + 3.5-flash-lite (2.0-flash shut
+    down, 2.5 deprecated and closed to new users). The dead IDs
+    must not creep back, and neither may the two traps:
+    qwen/qwen3.8-27b (preview, may be discontinued) and
+    gemini-3.1-pro-preview (zero free-tier quota)."""
+    assert PROVIDERS["groq"]["models"] == [
+        "openai/gpt-oss-120b",
+        "openai/gpt-oss-20b",
+    ]
+    assert PROVIDERS["gemini"]["models"] == [
+        "gemini-3.8-flash",
+        "gemini-3.5-flash-lite",
+    ]
+    dead = {
+        "llama-3.3-70b-versatile",
+        "llama-3.1-8b-instant",
+        "gemini-2.0-flash",
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
+        "qwen/qwen3.8-27b",
+        "gemini-3.1-pro-preview",
+    }
+    for provider in ("groq", "gemini"):
+        assert not (set(PROVIDERS[provider]["models"]) & dead)
+
+
+def test_test_connection_uses_the_working_default(home, monkeypatch):
+    """R11/R12: with no model picked, Test connection calls the
+    first curated model — which must be one that works for an
+    ordinary key. Proven against the fake server: the request
+    body carries the new default, not a dead Llama or 2.5 ID."""
+    for provider, default in (
+        ("groq", "openai/gpt-oss-120b"),
+        ("gemini", "gemini-3.8-flash"),
+    ):
+        save_key(home, provider, FAKE_KEY)
+        seen = []
+        monkeypatch.setattr(
+            "urllib.request.urlopen", _fake_urlopen_factory(seen)
+        )
+        ok, _message = providers_mod.test_connection(provider, home=home)
+        assert ok is True
+        assert _request_body(seen[0])["model"] == default
+
+
 # -- the agent on a cloud provider ----------------------------------
 
 
@@ -376,7 +428,7 @@ def test_agent_missing_key_reply_is_plain_words(store, monkeypatch):
             seen, error=urllib.error.URLError("no route"),
         ),
     )
-    agent = ChatAgent(store, "llama-3.3-70b-versatile", provider="groq")
+    agent = ChatAgent(store, "openai/gpt-oss-120b", provider="groq")
     reply = agent.reply("hi")
     assert "No Groq key saved yet" in reply
     assert "Settings" in reply
@@ -390,7 +442,7 @@ def test_agent_replies_through_a_cloud_provider(store, monkeypatch):
         "urllib.request.urlopen",
         _fake_urlopen_factory([], _chat_payload("Hello, cloud user.")),
     )
-    agent = ChatAgent(store, "llama-3.3-70b-versatile", provider="groq")
+    agent = ChatAgent(store, "openai/gpt-oss-120b", provider="groq")
     assert agent.reply("hi") == "Hello, cloud user."
 
 
@@ -402,9 +454,9 @@ def test_agent_set_provider_switches_the_client(store, monkeypatch):
         _fake_urlopen_factory(seen, _chat_payload("Hi from Gemini.")),
     )
     agent = ChatAgent(store, "lfm3:1.7b", provider="ollama")
-    agent.set_provider("gemini", "gemini-2.5-flash")
+    agent.set_provider("gemini", "gemini-3.8-flash")
     assert agent.provider == "gemini"
-    assert agent.model == "gemini-2.5-flash"
+    assert agent.model == "gemini-3.8-flash"
     assert agent.reply("hi") == "Hi from Gemini."
     # The first call is the local Ollama model list; the chat call
     # itself went to Gemini.
@@ -462,7 +514,7 @@ def test_cli_chat_missing_key_exits_1(store, monkeypatch, capsys):
 
     monkeypatch.setenv("STELLA_HOME", str(store.home))
     code = main(
-        ["chat", "--provider", "groq", "--model", "llama-3.3-70b-versatile"]
+        ["chat", "--provider", "groq", "--model", "openai/gpt-oss-120b"]
     )
     assert code == 1
     assert "No Groq key saved yet" in capsys.readouterr().out

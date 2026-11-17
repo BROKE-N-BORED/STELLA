@@ -30,7 +30,7 @@ from pathlib import Path
 
 from .autoconfig import compute_settings, measure_pc
 
-STELLA_VERSION = "0.24.0"
+STELLA_VERSION = "0.25.0"
 
 # Slug: lowercase letters, digits, dash, underscore. Must start alnum.
 # No dots, no slashes — a slug can never climb out of its directory.
@@ -420,6 +420,14 @@ def _read_json(path: Path) -> dict:
         data = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise StellaError(f"{path.name} is not valid JSON: {exc}") from exc
+    except UnicodeDecodeError as exc:
+        # R7: bad bytes are a damaged row, not a crash — a
+        # UnicodeDecodeError is neither a JSONDecodeError nor an
+        # OSError, so without this catch one bad manifest took
+        # out the whole profile/project list.
+        raise StellaError(
+            f"{path.name} has characters Stella cannot read: {exc}"
+        ) from exc
     if not isinstance(data, dict):
         raise StellaError(f"{path.name} must hold a JSON object")
     return data
@@ -526,6 +534,83 @@ class Store:
         if not target.is_dir():
             raise StellaError(f"nothing in the trash named {name!r}")
         shutil.rmtree(target)
+
+    def restore_trash(self, name: str) -> dict:
+        """Move one trashed item back where it came from (R2).
+
+        The manifest inside the folder names the real thing — a
+        profile's name, or a project's profile + name — and the
+        folder moves back under THAT name, not the dated trash
+        name. (A dated folder moved back as-is lists but will not
+        open: get_profile looks the folder up by its real name,
+        so the dated name is the trap R2 closes.)
+
+        Name-clash rule: when a live profile or project with the
+        same name already exists, the restore is REFUSED with a
+        plain message — nothing is renamed or overwritten silently.
+        A trashed project whose profile is gone is refused too
+        (restore the profile first). An item whose manifest is
+        missing or damaged cannot be identified, so it cannot be
+        restored either. Returns {"kind", "profile", "project"}.
+        """
+        if not name or "/" in name or "\\" in name or name in (".", ".."):
+            raise StellaError(f"not a trash item: {name!r}")
+        target = self.trash_dir / name
+        if not target.is_dir():
+            raise StellaError(f"nothing in the trash named {name!r}")
+        prof_manifest = target / "profile.json"
+        proj_manifest = target / "project.json"
+        if prof_manifest.is_file():
+            kind = "profile"
+            manifest_path = prof_manifest
+        elif proj_manifest.is_file():
+            kind = "project"
+            manifest_path = proj_manifest
+        else:
+            raise StellaError(
+                f"cannot restore {name!r}: it has no manifest, "
+                "so Stella cannot tell what it was"
+            )
+        try:
+            data = _read_json(manifest_path)
+        except StellaError as exc:
+            raise StellaError(
+                f"cannot restore {name!r}: its manifest is damaged "
+                f"({exc})"
+            ) from exc
+        if kind == "profile":
+            slug = validate_slug(
+                str(data.get("name") or ""), "profile name"
+            )
+            dest = self.profiles_dir / slug
+            if (dest / "profile.json").exists():
+                raise StellaError(
+                    f"a profile named {slug!r} already exists. "
+                    "Delete or rename it first, then restore."
+                )
+            self.profiles_dir.mkdir(parents=True, exist_ok=True)
+            target.rename(dest)
+            return {"kind": "profile", "profile": slug, "project": ""}
+        profile = validate_slug(
+            str(data.get("profile") or ""), "profile name"
+        )
+        slug = validate_slug(
+            str(data.get("name") or ""), "project name"
+        )
+        if not (self.profile_dir(profile) / "profile.json").exists():
+            raise StellaError(
+                f"cannot restore project {slug!r}: its profile "
+                f"{profile!r} is gone. Restore the profile first."
+            )
+        dest = self.profile_dir(profile) / "projects" / slug
+        if (dest / "project.json").exists():
+            raise StellaError(
+                f"a project named {slug!r} already exists in profile "
+                f"{profile!r}. Delete or rename it first, then restore."
+            )
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        target.rename(dest)
+        return {"kind": "project", "profile": profile, "project": slug}
 
     def empty_trash(self) -> int:
         """Delete everything in the trash forever. Returns how many
@@ -1181,7 +1266,16 @@ class Store:
         notes = pdir / "notes.md"
         if not notes.is_file():
             return ""
-        return notes.read_text(encoding="utf-8")
+        try:
+            return notes.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            # R7: bad bytes in one project's notes are a plain
+            # error naming the file, not a raw traceback — and
+            # never a reason for the whole list to fail.
+            raise StellaError(
+                f"the notes for project {project!r} have characters "
+                f"Stella cannot read: {exc}"
+            ) from exc
 
     def write_notes(self, profile: str, project: str, text: str) -> None:
         pdir = self.project_dir(profile, project)
@@ -1208,7 +1302,14 @@ class Store:
         notes = pdir / "notes.md"
         if not notes.is_file():
             return ""
-        return notes.read_text(encoding="utf-8")
+        try:
+            return notes.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            # R7: the same bad-bytes guard as read_notes.
+            raise StellaError(
+                f"the notes for profile {profile!r} have characters "
+                f"Stella cannot read: {exc}"
+            ) from exc
 
     def write_profile_notes(self, profile: str, text: str) -> None:
         pdir = self.profile_dir(profile)
@@ -1249,7 +1350,9 @@ class Store:
             fh.write(json.dumps(record) + "\n")
         try:
             lines = log.read_text(encoding="utf-8").splitlines()
-        except OSError:
+        except (OSError, UnicodeDecodeError):
+            # R7: a bad byte in the history file is not a reason
+            # to fail the record — the new entry is already written.
             return
         if len(lines) > self.HISTORY_TRIM_AT:
             log.write_text(
@@ -1265,7 +1368,9 @@ class Store:
         out = []
         try:
             lines = log.read_text(encoding="utf-8").splitlines()
-        except OSError:
+        except (OSError, UnicodeDecodeError):
+            # R7: a bad byte in the history file reads as no
+            # history, not a crash.
             return []
         for line in lines:
             if not line.strip():

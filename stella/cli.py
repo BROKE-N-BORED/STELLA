@@ -1130,6 +1130,7 @@ def cmd_export_gguf(args) -> int:
         args.dir,
         quant=args.quant,
         from_checkpoint=args.from_checkpoint,
+        from_sleep=args.from_sleep,
         force=args.force,
         on_warning=print,  # T31: the converter warning, before the merge
         on_event=on_event,
@@ -1425,6 +1426,15 @@ def cmd_sleep_status(args) -> int:
                 f"{c['real_rows']} new rows, {c['dreamed_rows']} dreamed, "
                 f"{c['steps']} steps, old-loss delta {delta_text}"
             )
+    # R8: a cycle whose input file is gone cannot be recovered —
+    # say so plainly, with what happens next (its rows sleep again
+    # in a later cycle; its adapter stays on disk).
+    for u in status.get("unhealed_cycles", []):
+        print(
+            f"cycle {u['cycle']} could not be recovered: "
+            f"{u['reason']}. Those rows will sleep again in a "
+            "later cycle."
+        )
     total = status["total_rows"]
     unslept = status["unslept_rows"]
     if total is not None:
@@ -1491,7 +1501,16 @@ def cmd_chat(args) -> int:
             print(f"No model called {picked!r}.")
             return 1
         model = picked
-    agent = ChatAgent(store, model, provider=provider)
+    # R14: the CLI chat used to go silent for the whole run — the
+    # agent's narration and progress callbacks were never wired,
+    # so an hours-long training run showed nothing until it ended.
+    # The GUI shows these as chat lines; here they print as they
+    # come, flushed, ahead of the final "Stella:" reply.
+    agent = ChatAgent(
+        store, model, provider=provider,
+        on_narration=lambda text: print(text, flush=True),
+        on_progress=lambda text: print(text, flush=True),
+    )
     print(
         "Hi. Tell me what you want to train, and I will set it up "
         "and run it for you. Type /quit to exit."
@@ -2145,6 +2164,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--from-checkpoint", type=int, default=None,
                    help="export from checkpoints/step-N instead of the "
                    "final adapter")
+    p.add_argument("--from-sleep", type=int, default=None,
+                   help="export from a sleep cycle's adapter "
+                   "(sleep/cycle-N/adapter) instead of the final "
+                   "adapter")
     p.add_argument("--force", action="store_true",
                    help="overwrite an existing GGUF at the output path")
     p.add_argument("--create", action="store_true",
