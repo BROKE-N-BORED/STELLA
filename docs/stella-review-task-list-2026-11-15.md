@@ -2,7 +2,7 @@
 
 **From:** the full-product review of STELLA v0.24.0, 2026-11-15
 (see `docs/review-2026-11-15.md` for the report).
-**Status:** 129 tasks: 18 done, 105 to do, 6 hard-gated. 0 P0. 23 P1, 52 P2, 54 P3.
+**Status:** 129 tasks: 46 done, 77 to do, 6 hard-gated. 0 P0. 23 P1, 52 P2, 54 P3.
 **How to read it:** each task has an ID (R1–R129), a priority, the area,
 the source finding(s) from the nine audits, the evidence (file:line or
 a measured probe), a one-line plain-words description, and what "done"
@@ -381,7 +381,7 @@ only proof of a claim the product already makes.
 ## P2 — correctness / polish (R24–R75)
 
 ### R24 — The dry-run "fits" answer ignores the dataset's RAM
-- **Priority:** P2 · **Area:** Training · **Sources:** A1-F2 · **Status:** not started
+- **Priority:** P2 · **Area:** Training · **Sources:** A1-F2 · **Status:** DONE in 0.26.0
 - **Evidence:** proven live: `estimate_run` said fits=True while
   `check_dataset_fit` refused — a 5,000-row dataset with 4.54 GB free
   (`stella/train.py:1228` vs `:2653`).
@@ -393,7 +393,7 @@ only proof of a claim the product already makes.
   dataset and free RAM.
 
 ### R25 — Offline, a single-file model link is refused even though the weights are already cached
-- **Priority:** P2 · **Area:** Training · **Sources:** A1-F3 · **Status:** not started
+- **Priority:** P2 · **Area:** Training · **Sources:** A1-F3 · **Status:** DONE in 0.26.0
 - **Evidence:** proven live: offline + single-file Hub ref refused
   despite cached weights (`stella/train.py:947-1011`); the error at
   `:997` names no next step. Cache helpers exist
@@ -407,7 +407,7 @@ only proof of a claim the product already makes.
   gets a message with a next step.
 
 ### R26 — Resuming after editing the dataset silently trains the wrong rows
-- **Priority:** P2 · **Area:** Training · **Sources:** A1-F4 · **Status:** not started
+- **Priority:** P2 · **Area:** Training · **Sources:** A1-F4 · **Status:** DONE in 0.26.0
 - **Evidence:** proven live: no dataset fingerprint in checkpoint state
   (`stella/train.py:2314-2321`); a probe showed 3/5 skip overlap after
   adding 2 rows and deleting 1.
@@ -419,7 +419,7 @@ only proof of a claim the product already makes.
   about, never silent.
 
 ### R27 — A hard crash leaves a run showing as "training" forever
-- **Priority:** P2 · **Area:** Training · **Sources:** A1-F5 · **Status:** not started
+- **Priority:** P2 · **Area:** Training · **Sources:** A1-F5 · **Status:** DONE in 0.26.0
 - **Evidence:** proven live: status `"training"` is set at
   `stella/train.py:2831` and only cleared on a propagated exception
   (`:2865`); there is no reconciliation anywhere. The project list
@@ -434,7 +434,7 @@ only proof of a claim the product already makes.
   resume offer when it can be resumed.
 
 ### R28 — `method: full` can still be set from the command line, and silently trains LoRA instead
-- **Priority:** P2 · **Area:** Training / CLI · **Sources:** A1-F6, A6-W3 · **Status:** not started
+- **Priority:** P2 · **Area:** Training / CLI · **Sources:** A1-F6, A6-W3 · **Status:** DONE in 0.26.0
 - **Evidence:** `--method` still offers `full`
   (`stella/cli.py:805, 2002, 2092`); `validate_settings` accepts it;
   zero readers — the run silently trains LoRA. `show-project` displays
@@ -448,7 +448,7 @@ only proof of a claim the product already makes.
   LoRA.
 
 ### R29 — The GGUF parser picks the quant by tensor count, and a near-tie could pick the wrong one
-- **Priority:** P2 · **Area:** GGUF · **Sources:** A2-F3 · **Status:** not started
+- **Priority:** P2 · **Area:** GGUF · **Sources:** A2-F3 · **Status:** DONE in 0.26.0
 - **Evidence:** the real file is 136 Q5_K tensors vs 133 F32 — a
   near-tie. If F32 won, the double-quant warning would not fire and
   the disk estimate would collapse.
@@ -459,7 +459,7 @@ only proof of a claim the product already makes.
   count, on the real lfm3 blob and on a tied file.
 
 ### R30 — A distill timeout or failure aborts the whole run, and the message misleads
-- **Priority:** P2 · **Area:** Distill · **Sources:** A2-F4 · **Status:** not started
+- **Priority:** P2 · **Area:** Distill · **Sources:** A2-F4 · **Status:** DONE in 0.26.0
 - **Evidence:** probed with a fake teacher: a timeout/failure aborts
   the whole run — no retry, skip, or report. Answers ARE saved and
   re-runs resume, but the abort message does not say so (unlike
@@ -473,7 +473,7 @@ only proof of a claim the product already makes.
   message names the real cause and the resume behaviour.
 
 ### R31 — Export has no disk guard at all, and its estimate leaves out the F16 intermediate
-- **Priority:** P2 · **Area:** GGUF · **Sources:** A2-F5 · **Status:** not started
+- **Priority:** P2 · **Area:** GGUF · **Sources:** A2-F5 · **Status:** DONE in 0.26.0
 - **Evidence:** export has NO disk guard; its estimate omits the F16
   intermediate (peak ~7.9 GB vs ~4.5 GB stated for LFM3).
 - **Problem:** an export can run out of disk halfway, and the estimate
@@ -485,7 +485,7 @@ only proof of a claim the product already makes.
   peak.
 
 ### R32 — The requant disk estimate leaves out Ollama's blob copy
-- **Priority:** P2 · **Area:** Requant · **Sources:** A2-F6 · **Status:** not started
+- **Priority:** P2 · **Area:** Requant · **Sources:** A2-F6 · **Status:** DONE in 0.26.0
 - **Evidence:** the requant disk estimate omits Ollama's blob copy
   (peak ≈ 2× the output).
 - **Problem:** the estimate understates the peak by about half.
@@ -494,7 +494,7 @@ only proof of a claim the product already makes.
   use.
 
 ### R33 — Cleanup only runs on Stella's own errors; Ctrl+C or a disk error leaves partial files behind
-- **Priority:** P2 · **Area:** GGUF / requant · **Sources:** A2-F7 · **Status:** not started
+- **Priority:** P2 · **Area:** GGUF / requant · **Sources:** A2-F7 · **Status:** DONE in 0.26.0
 - **Evidence:** code-verified: cleanup only on `StellaError` — Ctrl+C
   / `OSError` leave a partial GGUF, F16, or merged dir behind. T26's
   DONE claim covers `StellaError` only. (A live probe was blocked by
@@ -506,7 +506,7 @@ only proof of a claim the product already makes.
   files behind.
 
 ### R34 — The requant subprocess has no timeout
-- **Priority:** P2 · **Area:** Requant · **Sources:** A2-F8 · **Status:** not started
+- **Priority:** P2 · **Area:** Requant · **Sources:** A2-F8 · **Status:** DONE in 0.26.0
 - **Evidence:** requant's subprocess has no timeout; export has 30
   minutes.
 - **Problem:** a hung requant runs forever with no way out.
@@ -515,7 +515,7 @@ only proof of a claim the product already makes.
 - **Done when:** a hung requant stops on a timeout and says so.
 
 ### R35 — Teacher answers are silently cut off at 1024 tokens
-- **Priority:** P2 · **Area:** Distill · **Sources:** A2-F9 · **Status:** not started
+- **Priority:** P2 · **Area:** Distill · **Sources:** A2-F9 · **Status:** DONE in 0.26.0
 - **Evidence:** teacher answers are silently truncated at 1024 tokens;
   no `done_reason` check.
 - **Problem:** the student learns from answers that were cut off
@@ -526,7 +526,7 @@ only proof of a claim the product already makes.
   a full answer.
 
 ### R36 — Importing a recipe from a finished project warns misleadingly and demotes the project
-- **Priority:** P2 · **Area:** Profiles · **Sources:** A3-F3 · **Status:** not started
+- **Priority:** P2 · **Area:** Profiles · **Sources:** A3-F3 · **Status:** DONE in 0.26.0
 - **Evidence:** confirmed live (probe P10): recipe import from a
   finished project warns "Train it first, then export again" and
   demotes the status; recipes never carry weights by design
@@ -539,7 +539,7 @@ only proof of a claim the product already makes.
   truthfully and keeps the project's status.
 
 ### R37 — The model layer does not type-check what it is given, so bad values land in the store
-- **Priority:** P2 · **Area:** Profiles · **Sources:** A3-F4 · **Status:** not started
+- **Priority:** P2 · **Area:** Profiles · **Sources:** A3-F4 · **Status:** DONE in 0.26.0
 - **Evidence:** confirmed live (probe P12): `create_profile(config="abc")`
   raises a raw `ValueError`; `dependencies="torch"` shreds to
   `['t','o','r','c','h']`; `update_profile(config=str)` stores the
@@ -553,7 +553,7 @@ only proof of a claim the product already makes.
   the model layer, not stored or crashed on.
 
 ### R38 — Export does not check what it writes, so Stella exports packages its own verify refuses
-- **Priority:** P2 · **Area:** Profiles · **Sources:** A3-F5 · **Status:** not started
+- **Priority:** P2 · **Area:** Profiles · **Sources:** A3-F5 · **Status:** DONE in 0.26.0
 - **Evidence:** confirmed live (probe P11): export of a project with a
   hand-edited status `"banana"` SUCCEEDED, while Stella's own verify
   refuses it with "export has unknown project status: 'banana'"
@@ -564,7 +564,7 @@ only proof of a claim the product already makes.
 - **Done when:** export refuses a package its own verify would refuse.
 
 ### R39 — Import has no size or disk guard: no zip-bomb cap, no free-space check
-- **Priority:** P2 · **Area:** Profiles · **Sources:** A3-F7 · **Status:** not started
+- **Priority:** P2 · **Area:** Profiles · **Sources:** A3-F7 · **Status:** DONE in 0.26.0
 - **Evidence:** confirmed live (probe P3): a 66,372-byte zip extracted
   to 67,108,864 bytes with no cap hit. No free-space pre-check
   (export has one). `stella/export.py:247`.
@@ -575,7 +575,7 @@ only proof of a claim the product already makes.
   and import checks free space first.
 
 ### R40 — Cloning a profile silently drops its damaged projects, then reports success
-- **Priority:** P2 · **Area:** Profiles · **Sources:** A3-F8 · **Status:** not started
+- **Priority:** P2 · **Area:** Profiles · **Sources:** A3-F8 · **Status:** DONE in 0.26.0
 - **Evidence:** code read: profile clone with projects silently drops
   damaged projects, then reports success (`stella/model.py:780`).
 - **Problem:** the clone looks complete but is missing projects, with
@@ -586,7 +586,7 @@ only proof of a claim the product already makes.
   instead of silently dropping it.
 
 ### R41 — The status bar says "Pick a profile to begin." while a session is live
-- **Priority:** P2 · **Area:** GUI · **Sources:** A4-F2 · **Status:** not started
+- **Priority:** P2 · **Area:** GUI · **Sources:** A4-F2 · **Status:** DONE in 0.26.0
 - **Evidence:** every seeded screenshot shows the status bar reading
   "Pick a profile to begin." Cause: T191 removed the session repeat
   ("The status bar keeps whatever the last action said",
@@ -603,7 +603,7 @@ only proof of a claim the product already makes.
   "Pick a profile to begin."
 
 ### R42 — The Settings Ollama status text overlaps the Refresh button when the window opens
-- **Priority:** P2 · **Area:** GUI · **Sources:** A4-F3 · **Status:** not started
+- **Priority:** P2 · **Area:** GUI · **Sources:** A4-F3 · **Status:** DONE in 0.26.0
 - **Evidence:** with Ollama up and several models, the status label's
   second line is struck through by the "Refresh Ollama status" button
   at open (screenshots `a4-settings-window.png`,
@@ -618,7 +618,7 @@ only proof of a claim the product already makes.
   no overlap at any moment.
 
 ### R43 — The fit verdict calls every model "Too big for this PC", including the recommended starter
-- **Priority:** P2 · **Area:** GUI · **Sources:** A4-F5 · **Status:** not started
+- **Priority:** P2 · **Area:** GUI · **Sources:** A4-F5 · **Status:** DONE in 0.26.0
 - **Evidence:** in the New Profile dialog every row reads "Too big for
   this PC.", including `lfm3:1.7b`, whose own description in the same
   row says "A good first pick." The details line gives the reason:
@@ -641,7 +641,7 @@ only proof of a claim the product already makes.
   worded.
 
 ### R44 — The run-button row is clipped at the bottom edge at 1366x768
-- **Priority:** P2 · **Area:** GUI · **Sources:** A4-F7 · **Status:** not started
+- **Priority:** P2 · **Area:** GUI · **Sources:** A4-F7 · **Status:** DONE in 0.26.0
 - **Evidence:** at 1366x768 the Pause / Resume / Proof run / Estimate
   row sits at y=646 with height 31 against a session viewport of
   666 px: the bottom 11 px are below the fold (probe6.out; visible
@@ -656,7 +656,7 @@ only proof of a claim the product already makes.
   no scroll.
 
 ### R45 — A typed cloud-model pick is dropped when Ollama is down
-- **Priority:** P2 · **Area:** Chat · **Sources:** A5-F4 · **Status:** not started
+- **Priority:** P2 · **Area:** Chat · **Sources:** A5-F4 · **Status:** DONE in 0.26.0
 - **Evidence:** proven live with a Qt probe: when Ollama is down, the
   no-models branch never sets `_awaiting_model`
   (`stella/gui.py:3246-3252, 3357-3360`), so typed messages are
@@ -670,7 +670,7 @@ only proof of a claim the product already makes.
   pick.
 
 ### R46 — Chat history is never shortened: the full history is re-sent (and re-paid for) every turn
-- **Priority:** P2 · **Area:** Chat · **Sources:** A5-F5 · **Status:** not started
+- **Priority:** P2 · **Area:** Chat · **Sources:** A5-F5 · **Status:** DONE in 0.26.0
 - **Evidence:** history is never truncated
   (`stella/chat_agent.py:360, 428-434`): the full history is resent
   every turn; 10 entries after 5 turns. On cloud models that is paid
@@ -682,7 +682,7 @@ only proof of a claim the product already makes.
 - **Done when:** a long chat sends a bounded history to the model.
 
 ### R47 — A second tool block's raw JSON leaks into the chat, and the call never runs
-- **Priority:** P2 · **Area:** Chat · **Sources:** A5-F6 · **Status:** not started
+- **Priority:** P2 · **Area:** Chat · **Sources:** A5-F6 · **Status:** DONE in 0.26.0
 - **Evidence:** the second ```tool block's raw JSON leaks into the chat
   (`stella/chat_agent.py:233-258`); the second call is silently never
   executed.
@@ -694,7 +694,7 @@ only proof of a claim the product already makes.
   it cannot) and shows no raw JSON.
 
 ### R48 — Tool JSON in a ```json fence, or unclosed, is shown as raw text and never runs
-- **Priority:** P2 · **Area:** Chat · **Sources:** A5-F7 · **Status:** not started
+- **Priority:** P2 · **Area:** Chat · **Sources:** A5-F7 · **Status:** DONE in 0.26.0
 - **Evidence:** ```json-fenced or unclosed tool JSON is shown as raw
   text, never executed (`stella/chat_agent.py:127`).
 - **Problem:** the model asked to do a thing, the user sees code, and
@@ -705,7 +705,7 @@ only proof of a claim the product already makes.
   with complete JSON runs or gets a plain-words note.
 
 ### R49 — The template walk is prompt-only: the agent never tracks which step it is on
-- **Priority:** P2 · **Area:** Chat · **Sources:** A5-F8 · **Status:** not started
+- **Priority:** P2 · **Area:** Chat · **Sources:** A5-F8 · **Status:** DONE in 0.26.0
 - **Evidence:** the template walk is prompt-only, with no agent-side
   step tracking (`stella/chat_agent.py:106-124`).
 - **Problem:** the agent can lose its place in a multi-step template
@@ -715,7 +715,7 @@ only proof of a claim the product already makes.
   on.
 
 ### R50 — Every model call re-fetches the Ollama model list, up to 12 tag fetches per loop
-- **Priority:** P2 · **Area:** Chat · **Sources:** A5-F9 · **Status:** not started
+- **Priority:** P2 · **Area:** Chat · **Sources:** A5-F9 · **Status:** DONE in 0.26.0
 - **Evidence:** every model call re-fetches the Ollama model list
   (`stella/chat_agent.py:428-434`); up to 12 tag fetches per capped
   loop.
@@ -726,7 +726,7 @@ only proof of a claim the product already makes.
 - **Done when:** one agent loop makes one model-list fetch.
 
 ### R51 — The curated model lists have no freshness mechanism: they rotted silently
-- **Priority:** P2 · **Area:** Providers · **Sources:** M8-FRESHNESS · **Status:** not started
+- **Priority:** P2 · **Area:** Providers · **Sources:** M8-FRESHNESS · **Status:** DONE in 0.26.0
 - **Evidence:** the Groq and Gemini lists (R11, R12) went stale with
   nothing to notice: no freshness check, no expiry, no warning. The
   lists are curated in code (`stella/providers.py`) and only a human

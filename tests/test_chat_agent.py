@@ -929,3 +929,400 @@ def test_streamed_narration_is_not_doubled(store):
     # Streamed words are not narrated again: the window shows them
     # once, as they arrive.
     assert narrated == []
+
+
+# -- v0.26.0: R46–R50 ------------------------------------------------
+
+
+def json_block(name, args=None):
+    """A tool call in a ```json fence (R48): the fence small models
+    most commonly produce."""
+    return (
+        "```json\n"
+        + json.dumps({"tool": name, "args": args or {}})
+        + "\n```"
+    )
+
+
+def test_parse_two_tool_blocks_returns_both_and_strips_json():
+    """R47: a reply with two tool blocks yields both calls, and the
+    plain text holds no raw JSON from either."""
+    from stella.chat_agent import parse_tool_calls
+
+    text = (
+        "Doing both.\n"
+        + tool_block("list_profiles")
+        + "\n"
+        + tool_block("list_projects", {"profile": "lfm3-tool"})
+    )
+    plain, calls = parse_tool_calls(text)
+    assert [name for name, _args in calls] == [
+        "list_profiles",
+        "list_projects",
+    ]
+    assert plain == "Doing both."
+    assert "{" not in plain
+    assert "tool" not in plain
+
+
+def test_parse_tool_call_strips_the_second_block_too():
+    """R47: the single-call wrapper still strips every block, so a
+    second block never leaks through this path either."""
+    text = tool_block("list_profiles") + "\n" + tool_block("list_projects")
+    plain, name, _args = parse_tool_call(text)
+    assert name == "list_profiles"
+    assert plain == ""
+    assert "{" not in plain
+
+
+def test_two_tool_blocks_both_run(agent, store):
+    """R47: one reply, two tool blocks — both calls run."""
+    scripted = ScriptedChat(
+        [
+            tool_block("create_profile", {"model": "LiquidAI/LFM3-1.7B"})
+            + "\n"
+            + tool_block(
+                "create_project",
+                {"profile": "lfm3-1-7b", "name": "two-blocks"},
+            ),
+            "Both done.",
+        ]
+    )
+    agent._chat_fn = scripted
+    assert agent.reply("set me up") == "Both done."
+    assert store.get_profile("lfm3-1-7b")["base_ref"] == "LiquidAI/LFM3-1.7B"
+    assert (
+        store.get_project("lfm3-1-7b", "two-blocks")["name"]
+        == "two-blocks"
+    )
+    # Both tool results reached the second model call.
+    second = scripted.calls[1]
+    assert len([m for m in second if m["role"] == "tool"]) == 2
+
+
+def test_two_tool_blocks_count_as_two_calls(agent, monkeypatch):
+    """R47: each block counts against the cap — with one call left,
+    the second block does not run."""
+    monkeypatch.setattr(chat_mod, "MAX_TOOL_CALLS", 1)
+    narrated = []
+    agent._on_narration = narrated.append
+    scripted = ScriptedChat(
+        [
+            tool_block("list_profiles")
+            + "\n"
+            + tool_block("list_projects"),
+        ]
+    )
+    agent._chat_fn = scripted
+    reply = agent.reply("list everything")
+    assert "stopping here" in reply
+    # Only the first tool's narration ran.
+    assert narrated.count("Looking at your profiles...") == 1
+    assert "Looking at the projects..." not in narrated
+
+
+def test_malformed_second_block_gets_plain_words_recovery(agent):
+    """R47: a malformed second block gets the same garbled-call
+    recovery as the first — never a leak of raw JSON."""
+    scripted = ScriptedChat(
+        [tool_block("list_profiles") + "\n```tool\n{not json\n```"]
+    )
+    agent._chat_fn = scripted
+    reply = agent.reply("list everything")
+    assert "I got mixed up there" in reply
+    assert "{" not in reply
+
+
+def test_parse_json_fenced_tool_call():
+    """R48: a ```json block holding a tool object is a tool call."""
+    plain, name, args = parse_tool_call(json_block("list_profiles"))
+    assert plain == ""
+    assert name == "list_profiles"
+    assert args == {}
+
+
+def test_json_fenced_tool_call_runs(agent, store):
+    """R48: the ```json-fenced call runs, end to end."""
+    scripted = ScriptedChat(
+        [
+            json_block("create_profile", {"model": "LiquidAI/LFM3-1.7B"}),
+            "Your profile is ready.",
+        ]
+    )
+    agent._chat_fn = scripted
+    assert agent.reply("make a profile") == "Your profile is ready."
+    assert store.get_profile("lfm3-1-7b")["base_ref"] == "LiquidAI/LFM3-1.7B"
+
+
+def test_parse_unclosed_tool_fence_runs_when_json_complete():
+    """R48: an unclosed ```tool fence with complete JSON runs."""
+    plain, name, args = parse_tool_call(
+        '```tool\n{"tool": "list_profiles", "args": {}}'
+    )
+    assert plain == ""
+    assert name == "list_profiles"
+    assert args == {}
+
+
+def test_parse_unclosed_json_fence_runs_when_json_complete():
+    """R48: an unclosed ```json fence with complete JSON runs."""
+    plain, name, _args = parse_tool_call(
+        '```json\n{"tool": "list_profiles", "args": {}}'
+    )
+    assert plain == ""
+    assert name == "list_profiles"
+
+
+def test_parse_unclosed_fence_keeps_trailing_words_as_text():
+    """R48: words after the JSON in an unclosed block stay in the
+    plain text — only the JSON itself is consumed."""
+    plain, name, _args = parse_tool_call(
+        'Before.\n```tool\n{"tool": "list_profiles", "args": {}} please'
+    )
+    assert name == "list_profiles"
+    assert "Before." in plain
+    assert "please" in plain
+    assert "{" not in plain
+
+
+def test_parse_unclosed_truncated_json_raises():
+    """R48: an unclosed fence whose JSON is itself incomplete gets
+    the garbled-call recovery, not a leak."""
+    import pytest as _pytest
+
+    with _pytest.raises(ToolParseError):
+        parse_tool_call('```tool\n{"tool": "list_profiles", "args": ')
+
+
+def test_parse_non_tool_json_block_stays_text():
+    """R48: a ```json block without a tool object is ordinary
+    text — a JSON example the user asked about must stay text."""
+    text = '```json\n{"name": "example", "count": 3}\n```'
+    plain, name, _args = parse_tool_call(text)
+    assert name is None
+    assert plain == text
+    plain, name, _args = parse_tool_call('```json\n[1, 2, 3]\n```')
+    assert name is None
+    assert "[1, 2, 3]" in plain
+
+
+def test_parse_json_tool_block_with_bad_args_raises():
+    """R48: a ```json tool object with non-object args is
+    garbled, not text — it was clearly meant as a call."""
+    import pytest as _pytest
+
+    with _pytest.raises(ToolParseError):
+        parse_tool_call(
+            '```json\n{"tool": "list_profiles", "args": []}\n```'
+        )
+
+
+def test_json_fence_is_never_streamed(store):
+    """R48: a ```json tool block is held back from the live
+    stream like a ```tool block — the user never sees JSON."""
+    streamed = []
+    stream = StreamingChat(
+        ['Hello.\n```json\n{"tool": "list_profiles", "args": {}}\n```'],
+        chunk=3,
+    )
+    agent = ChatAgent(
+        store, "lfm3:1.7b", stream_fn=stream, on_token=streamed.append
+    )
+    agent.reply("hi")
+    shown = "".join(streamed)
+    assert shown.startswith("Hello.")
+    assert "{" not in shown
+    assert "list_profiles" not in shown
+
+
+def test_long_chat_sends_bounded_history(agent):
+    """R46: after 15 plain turns (30 history entries), the model
+    is sent at most the last 20 — while the full history is
+    still kept."""
+    from stella.chat_agent import MAX_HISTORY_MESSAGES
+
+    scripted = ScriptedChat([])
+    scripted.fallback = "Okay."
+    agent._chat_fn = scripted
+    for i in range(15):
+        agent.reply(f"message {i}")
+    assert len(agent._history) == 30
+    last = scripted.calls[-1]
+    assert len(last) <= 1 + MAX_HISTORY_MESSAGES
+    # The sent window starts on a user message (a turn boundary),
+    # never mid-turn.
+    assert last[1]["role"] == "user"
+    # And it is the RECENT history, not the first turns.
+    assert "message 14" in last[-1]["content"]
+
+
+def test_messages_cut_keeps_tool_results_with_their_call(agent):
+    """R46: the history cap never orphans a tool result from the
+    assistant message that called it — the cut lands on a user
+    message."""
+    agent._history = []
+    for i in range(10):
+        agent._history.append({"role": "user", "content": f"ask {i}"})
+        agent._history.append(
+            {"role": "assistant", "content": f"```tool call {i}"}
+        )
+        agent._history.append({"role": "tool", "content": f"result {i}"})
+    messages = agent._messages()
+    sent = messages[1:]
+    assert len(sent) <= 20
+    assert sent[0]["role"] == "user"
+    # Every tool result in the window still has its assistant
+    # message before it.
+    for i, entry in enumerate(sent):
+        if entry["role"] == "tool":
+            assert any(
+                m["role"] == "assistant" for m in sent[:i]
+            )
+
+
+def test_one_loop_makes_one_model_list_fetch(agent, monkeypatch):
+    """R50: a 2-call loop makes exactly one /api/tags fetch — the
+    list is fetched once per reply and reused."""
+    fetches = []
+
+    def counting():
+        fetches.append(1)
+        return ["lfm3:1.7b", "qwen3.5:2b"]
+
+    monkeypatch.setattr(chat_mod, "list_models", counting)
+    scripted = ScriptedChat(
+        [
+            tool_block("list_profiles"),
+            tool_block("list_projects"),
+            "Done.",
+        ]
+    )
+    agent._chat_fn = scripted
+    assert agent.reply("list things") == "Done."
+    assert len(fetches) == 1
+    # The cache does not leak across turns: a second reply fetches
+    # again, once.
+    assert agent._turn_models is None
+    agent.reply("hi again")
+    assert len(fetches) == 2
+
+
+def test_create_profile_tool_uses_the_turn_fetch(agent, monkeypatch):
+    """R50: the create_profile tool reads the turn's list too, so
+    a loop that creates a profile still makes one fetch."""
+    fetches = []
+
+    def counting():
+        fetches.append(1)
+        return ["lfm3:1.7b"]
+
+    monkeypatch.setattr(chat_mod, "list_models", counting)
+    scripted = ScriptedChat(
+        [
+            tool_block("create_profile", {"model": "LiquidAI/LFM3-1.7B"}),
+            "Done.",
+        ]
+    )
+    agent._chat_fn = scripted
+    agent.reply("make a profile")
+    assert len(fetches) == 1
+
+
+def test_template_step_from_store_state(store):
+    """R49: the step comes from real store state at every stage."""
+    from stella.chat_agent import template_step_for
+
+    assert template_step_for(store, None, None) == (1, "goal", "Goal")
+    store.create_profile("lfm3-tool", ollama_tag="lfm3:1.7b")
+    assert template_step_for(store, "lfm3-tool", None) == (
+        2, "model", "Base model",
+    )
+    store.create_project("lfm3-tool", "tool-calls")
+    assert template_step_for(store, "lfm3-tool", "tool-calls") == (
+        3, "data", "Data",
+    )
+    store.update_project(
+        "lfm3-tool", "tool-calls", dataset_ref="data.jsonl"
+    )
+    assert template_step_for(store, "lfm3-tool", "tool-calls") == (
+        4, "recipe", "Recipe",
+    )
+    store.update_project("lfm3-tool", "tool-calls", status="training")
+    assert template_step_for(store, "lfm3-tool", "tool-calls") == (
+        5, "train", "Train",
+    )
+    store.update_project("lfm3-tool", "tool-calls", status="paused")
+    assert template_step_for(store, "lfm3-tool", "tool-calls") == (
+        5, "train", "Train",
+    )
+    store.update_project("lfm3-tool", "tool-calls", status="done")
+    assert template_step_for(store, "lfm3-tool", "tool-calls") == (
+        6, "check", "Check",
+    )
+    # A passed probe moves it to Export; a missing probe does not.
+    probe_path = store.project_dir("lfm3-tool", "tool-calls") / (
+        "probe_results.json"
+    )
+    probe_path.write_text(
+        json.dumps({
+            "before": {"rate": 0.1, "total": 10, "empty": 0},
+            "after": {"rate": 0.1, "total": 10, "empty": 0},
+        }),
+        encoding="utf-8",
+    )
+    assert template_step_for(store, "lfm3-tool", "tool-calls") == (
+        7, "export", "Export",
+    )
+    store.update_project("lfm3-tool", "tool-calls", status="exported")
+    assert template_step_for(store, "lfm3-tool", "tool-calls") == (
+        8, "test", "Test and back up",
+    )
+    # A deleted profile or project falls back honestly, never
+    # crashes.
+    assert template_step_for(store, "gone", None) == (1, "goal", "Goal")
+    assert template_step_for(store, "lfm3-tool", "gone") == (
+        2, "model", "Base model",
+    )
+
+
+def test_agent_reports_step_after_creating_profile_and_project(agent, store):
+    """R49: scripted model creates profile + project — the agent
+    reports step 3 (Data), not step 1, and says so in narration."""
+    narrated = []
+    agent._on_narration = narrated.append
+    scripted = ScriptedChat(
+        [
+            tool_block("create_profile", {"model": "LiquidAI/LFM3-1.7B"}),
+            tool_block(
+                "create_project",
+                {"profile": "lfm3-1-7b", "name": "tool-calls"},
+            ),
+            "All set.",
+        ]
+    )
+    agent._chat_fn = scripted
+    agent.reply("set me up")
+    assert agent.current_template_step() == (3, "data", "Data")
+    assert agent.current_step_text() == "Step 3 of 8: Data."
+    assert "Step 3 of 8: Data." in narrated
+    # The system prompt told the model where it was, per call:
+    # step 1 before anything existed, step 2 after the profile.
+    assert "currently on step 1 of 8: Goal" in scripted.calls[0][0]["content"]
+    assert "currently on step 2 of 8: Base model" in (
+        scripted.calls[1][0]["content"]
+    )
+
+
+def test_system_prompt_without_step_has_no_step_line():
+    """R49: build_system_prompt without a step reads as before —
+    the step line is added, not assumed."""
+    prompt = build_system_prompt(
+        profile=None, project=None, installed_models=[]
+    )
+    assert "currently on step" not in prompt
+    prompt = build_system_prompt(
+        profile="lfm3-tool", project="tool-calls",
+        installed_models=["lfm3:1.7b"],
+        current_step=(3, "data", "Data"),
+    )
+    assert "currently on step 3 of 8: Data" in prompt

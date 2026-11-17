@@ -532,3 +532,48 @@ def test_generate_sends_no_keep_alive_key_by_default(monkeypatch):
     generate("lfm3:1.7b", "hi", url="http://127.0.0.1:9")
     assert len(payloads) == 1
     assert "keep_alive" not in payloads[0]
+
+
+# -- v0.26.0: R35 — generate_full reports why the answer ended ------
+
+
+def test_generate_full_returns_done_reason(monkeypatch):
+    """R35: generate_full returns the text plus Ollama's
+    done_reason, so a caller can tell a finished answer from one
+    cut off at the token cap."""
+    import urllib.request
+
+    from stella.ollama import generate, generate_full
+
+    def _fake_urlopen(req, timeout=None):
+        return _FakeGenerateResponse({
+            "response": "half an ans",
+            "done_reason": "length",
+        })
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+    result = generate_full(
+        "lfm3:1.7b", "hi", url="http://127.0.0.1:9",
+    )
+    assert result == {"text": "half an ans", "done_reason": "length"}
+    # generate() still returns just the text for its callers.
+    assert generate("lfm3:1.7b", "hi", url="http://127.0.0.1:9") == (
+        "half an ans"
+    )
+
+
+def test_generate_full_missing_done_reason_is_none(monkeypatch):
+    """R35: a response with no done_reason (older Ollama) reads as
+    None, not a crash — the caller treats it as finished."""
+    import urllib.request
+
+    from stella.ollama import generate_full
+
+    def _fake_urlopen(req, timeout=None):
+        return _FakeGenerateResponse({"response": "hello there"})
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+    result = generate_full(
+        "lfm3:1.7b", "hi", url="http://127.0.0.1:9",
+    )
+    assert result == {"text": "hello there", "done_reason": None}

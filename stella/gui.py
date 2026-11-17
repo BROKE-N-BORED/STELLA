@@ -107,7 +107,7 @@ from PySide6.QtWidgets import (
 from . import export as export_mod
 from . import provision
 from .autoconfig import measure_pc, ram_usage_gb
-from .chat_agent import ChatAgent
+from .chat_agent import ChatAgent, template_step_text
 from .debug_log import DebugLogger, check_ollama
 from .howto import topic_text, topic_titles
 from .model import (
@@ -142,6 +142,7 @@ from .providers import (
     provider_presence,
     remove_key,
     save_key,
+    stale_list_notes,
     test_connection,
 )
 from .train import TrainController
@@ -404,8 +405,12 @@ class NewProfileDialog(QDialog):
         # refills it when it lands.
         self._model_worker: ModelListWorker | None = None
         measurement = measure_pc()
-        ram_free = measurement.get("ram_available_gb")
-        self._ram_free = ram_free
+        # R43: the verdict is judged against TOTAL RAM, a stable
+        # property of the PC — free RAM drops whenever a browser
+        # is open and would call the starter "too big" one minute
+        # and fine the next. Re-measured on every refill (see
+        # _fill_model_list), so Refresh re-measures too.
+        self._ram_total = measurement.get("ram_total_gb")
         # R1: whether the USER picked a row. Qt selects row 0 by
         # itself when the list gains focus after show(), so the
         # current row alone is not a pick — only a click, a tap,
@@ -511,6 +516,10 @@ class NewProfileDialog(QDialog):
         models, sizes, loaded, _up, _at = MODEL_CACHE.snapshot()
         self.installed_models = models
         self._sizes = sizes
+        # R43: re-measure the PC on every refill (a /proc read, so
+        # cheap), so Refresh re-measures the verdict too — the old
+        # code measured free RAM once at construct and never again.
+        self._ram_total = measure_pc().get("ram_total_gb")
         # The row pick survives a refill (the typed text is in its
         # own field and is untouched). Read the row directly: this
         # also runs from __init__, before the type field exists.
@@ -540,7 +549,7 @@ class NewProfileDialog(QDialog):
             self.offline_label.setVisible(False)
             return
         for tag in models:
-            fits = fits_this_pc(tag, self._ram_free)
+            fits = fits_this_pc(tag, self._ram_total)
             if fits is True:
                 verdict = "Fits this PC."
             elif fits is False:
@@ -603,7 +612,7 @@ class NewProfileDialog(QDialog):
         else:
             tag = str(current.data(Qt.UserRole) or "")
             self.details_label.setText(
-                fit_verdict(tag, self._sizes.get(tag), self._ram_free)
+                fit_verdict(tag, self._sizes.get(tag), self._ram_total)
             )
             self.details_label.setVisible(True)
             if self.type_edit.text():
@@ -2738,6 +2747,9 @@ class SettingsWindow(QDialog):
         ollama.addWidget(self.ollama_status)
         refresh_btn = QPushButton("Refresh Ollama status")
         refresh_btn.clicked.connect(self.refresh_ollama_status)
+        # R42: kept, so the overlap test can measure it against the
+        # status label above.
+        self.ollama_refresh_btn = refresh_btn
         ollama.addWidget(refresh_btn)
         ollama.addWidget(
             _help_label(
@@ -2769,6 +2781,17 @@ class SettingsWindow(QDialog):
         self._custom_base = QLineEdit()
         self._custom_model = QLineEdit()
         self._build_provider_rows(providers)
+        # R51: the curated lists' freshness — a dated list the
+        # product warns about, so the next deprecation is noticed
+        # here instead of by a failed chat. Hidden while fresh.
+        self._freshness_label = QLabel("")
+        self._freshness_label.setWordWrap(True)
+        freshness_notes = stale_list_notes()
+        if freshness_notes:
+            self._freshness_label.setText("\n".join(freshness_notes))
+        else:
+            self._freshness_label.setVisible(False)
+        providers.addWidget(self._freshness_label)
         providers.addWidget(
             _help_label(
                 "Your keys stay on this PC in a private file. They only "
@@ -2992,6 +3015,19 @@ class SettingsWindow(QDialog):
         else:
             status = f"not reachable at {ollama_url()}"
         self.ollama_status.setText(f"Status: {status}")
+        # R42: the label wraps to two lines when a multi-model list
+        # lands (word wrap was already set — the missing half was
+        # the relayout). Force every ancestor layout to activate
+        # at once, so the wrapped height is reserved before the
+        # next paint instead of up to 2 s later, with the Refresh
+        # button sitting on the second line meanwhile.
+        self.ollama_status.updateGeometry()
+        widget = self.ollama_status.parentWidget()
+        while widget is not None:
+            layout = widget.layout()
+            if layout is not None:
+                layout.activate()
+            widget = widget.parentWidget()
         self._load_chat_models()
 
     def _load_chat_models(self):
@@ -3196,6 +3232,12 @@ class ChatWindow(QDialog):
         self._agent = None
         self._worker: ChatWorker | None = None
         self._awaiting_model = False
+        # R45: whether the chat is waiting on the FIRST refresh to
+        # land (the "Looking for the models" state). Only that
+        # state re-asks when a refresh lands — the no-models state
+        # is awaiting a typed pick, not a refresh, and re-asking
+        # on every refresh would repeat its message.
+        self._waiting_for_models = False
         self._streaming = False
         self.setWindowTitle("Chat with Stella")
         # T194: 700x560, not 700x520 — at 520 the help line at the
@@ -3211,6 +3253,13 @@ class ChatWindow(QDialog):
         self.activity_text = QLabel("Idle")
         activity.addWidget(self.activity_text, 1)
         layout.addLayout(activity)
+
+        # R49: where the chat is in the training template, from
+        # real store state — so the user can see the step without
+        # trusting the model to say it.
+        self.step_label = QLabel("")
+        self.step_label.setWordWrap(True)
+        layout.addWidget(self.step_label)
 
         self.messages = QTextBrowser()
         self.messages.setReadOnly(True)
@@ -3282,6 +3331,19 @@ class ChatWindow(QDialog):
         )
         if not self._main.chat_model:
             self._ask_for_model()
+        self._refresh_step_label()
+
+    def _refresh_step_label(self):
+        """The template step line (R49), from the main window's
+        session — the same store state the agent derives it from,
+        so the label and the agent can never disagree."""
+        self.step_label.setText(
+            template_step_text(
+                self._main.store,
+                self._main._current_profile,
+                self._main._current_project,
+            )
+        )
 
     # -- messages ---------------------------------------------------
     def _append(self, who: str, text: str):
@@ -3322,12 +3384,20 @@ class ChatWindow(QDialog):
             # The first refresh is still in flight: say so, and the
             # buttons arrive when it lands (T43/T146).
             self._awaiting_model = True
+            self._waiting_for_models = True
             self._append(
                 "Stella", "Looking for the models on this PC..."
             )
             self._main.refresh_model_list()
             return
         if not models:
+            # R45: Ollama is down, but a typed cloud pick does not
+            # need Ollama — so this branch awaits a typed pick too.
+            # (It used to return without setting _awaiting_model,
+            # so _on_send discarded the typed name and chat_model
+            # stayed empty.)
+            self._awaiting_model = True
+            self._waiting_for_models = False
             self._append(
                 "Stella",
                 "Ollama is not answering, so I cannot see which models "
@@ -3337,6 +3407,7 @@ class ChatWindow(QDialog):
             )
             return
         self._awaiting_model = True
+        self._waiting_for_models = False
         self._append(
             "Stella",
             "Which model should I chat with? Pick one below.\n\n"
@@ -3349,8 +3420,9 @@ class ChatWindow(QDialog):
         """A background model-list refresh landed (T43): if the chat
         was still looking for models, show them now (or say Ollama
         is not answering). A refresh landing after the buttons are
-        already up changes nothing."""
-        if self._awaiting_model and not self.model_buttons:
+        already up changes nothing — and a refresh landing while
+        the no-models message is up does not repeat it (R45)."""
+        if self._waiting_for_models:
             self._ask_for_model()
 
     def _show_model_buttons(self, models):
@@ -3444,11 +3516,19 @@ class ChatWindow(QDialog):
                 return
             match = self._match_model(text)
             if match is None:
-                self._append(
-                    "Stella",
-                    "I did not find that model. Pick one of the "
-                    "buttons above, or type one of the names.",
-                )
+                # R45: with Ollama down there are no buttons above,
+                # so the hint must not point at them.
+                if self.model_buttons:
+                    note = (
+                        "I did not find that model. Pick one of the "
+                        "buttons above, or type one of the names."
+                    )
+                else:
+                    note = (
+                        "I did not find that model. Type the full "
+                        "model name, for example openai/gpt-oss-120b."
+                    )
+                self._append("Stella", note)
                 return
             self._awaiting_model = False
             self.model_pick_scroll.setVisible(False)
@@ -3519,6 +3599,8 @@ class ChatWindow(QDialog):
         else:
             self._main.refresh_tree()
             self._main.refresh_session()
+        # R49: the step may have moved — the label follows it.
+        self._refresh_step_label()
 
     def _on_cancel(self):
         if self._worker is not None and self._worker.isRunning():
@@ -4144,6 +4226,20 @@ class MainWindow(QMainWindow):
         # flag too, so a state saved before v0.19.0 would re-enable
         # collapsing the panes. Re-assert it after the restore.
         self.splitter.setChildrenCollapsible(False)
+        # R27: a run that died without writing its ending (an OOM
+        # kill, power loss, the window closed mid-run) keeps
+        # status "training" forever — reconcile before the tree is
+        # built, so the list never shows a dead run as live. The
+        # notice goes out at the end of __init__, after the
+        # session restore, so no later refresh overwrites it. A
+        # failure here never blocks startup: the list just shows
+        # the stored statuses, as before.
+        try:
+            from .train import reconcile_stale_training
+
+            crashed = reconcile_stale_training(self.store)
+        except Exception:
+            crashed = []
         # The one startup fetch (T43): the model list loads in the
         # background before the first refresh_tree, so the health
         # badges read the cache instead of making their own fetch.
@@ -4181,6 +4277,33 @@ class MainWindow(QMainWindow):
         # opening the detail window, so rename lives on F2 and the
         # right-click menu instead.
         QShortcut(QKeySequence("F2"), self, self._rename_current_row)
+        # R27: the crash notice, last — a crashed run is named, and
+        # a resumable one is offered its resume (the Train panel's
+        # Resume button picks it up from the paused state).
+        if crashed:
+            first = crashed[0]
+            if first["resumable"]:
+                notice = (
+                    f"The run on {first['profile']}/{first['project']} "
+                    "stopped unexpectedly. It is paused and can be "
+                    "resumed from the Train panel."
+                )
+            else:
+                notice = (
+                    f"The run on {first['profile']}/{first['project']} "
+                    "stopped unexpectedly and left no checkpoint, so "
+                    "it cannot be resumed."
+                )
+            if len(crashed) > 1:
+                notice += f" ({len(crashed) - 1} more run(s) too.)"
+            self.debug_log.action(
+                "crashed run(s) reconciled: "
+                + ", ".join(
+                    f"{c['profile']}/{c['project']} -> {c['status']}"
+                    for c in crashed
+                )
+            )
+            self._say(notice)
 
     # -- layout -----------------------------------------------------
     def _build_ui(self):
@@ -4633,16 +4756,11 @@ class MainWindow(QMainWindow):
         self.train_pin_label.setWordWrap(True)
         self.train_pin_label.setVisible(False)
         card_layout.addWidget(self.train_pin_label)
-        card_layout.addWidget(self.train_progress)
-        self.train_loss = QLabel("Not started.")
-        card_layout.addWidget(self.train_loss)
-        # The pre-train estimate (T84): fit + time for the
-        # auto-config recipe — no settings on screen (T16). It
-        # updates when the model, dataset, or job selection
-        # changes, via refresh_session.
-        self.train_estimate_label = QLabel("")
-        self.train_estimate_label.setWordWrap(True)
-        card_layout.addWidget(self.train_estimate_label)
+        # R44: the run-button row sits ABOVE the progress bar, not
+        # below the progress bar, the loss line, and the estimate
+        # line — at 1366x768 the row used to sit 11 px below the
+        # fold, so Pause needed a scroll mid-run. Up here the whole
+        # row is in view with room to spare, taskbar included.
         run_btns = QHBoxLayout()
         self.train_pause_btn = QPushButton("Pause")
         self.train_pause_btn.clicked.connect(self.pause_training)
@@ -4675,6 +4793,16 @@ class MainWindow(QMainWindow):
         run_btns.addWidget(self.train_estimate_btn)
         run_btns.addStretch(1)
         card_layout.addLayout(run_btns)
+        card_layout.addWidget(self.train_progress)
+        self.train_loss = QLabel("Not started.")
+        card_layout.addWidget(self.train_loss)
+        # The pre-train estimate (T84): fit + time for the
+        # auto-config recipe — no settings on screen (T16). It
+        # updates when the model, dataset, or job selection
+        # changes, via refresh_session.
+        self.train_estimate_label = QLabel("")
+        self.train_estimate_label.setWordWrap(True)
+        card_layout.addWidget(self.train_estimate_label)
         # The step cap (T161): Go stops the run after this many
         # steps — a proof run with a number the user picks, instead
         # of the fixed 5-step Proof run button. 0 means the full
@@ -5651,6 +5779,17 @@ class MainWindow(QMainWindow):
             # in slug form — the session title above carries it,
             # in display names. The status bar keeps whatever the
             # last action said.
+            # R41: except the stale no-session line — with a live
+            # session "Pick a profile to begin." is false, and it
+            # used to survive the session being set because nothing
+            # here ever said anything. Only the stale line is
+            # replaced, so a fresher action message is never
+            # clobbered by a refresh.
+            if (
+                self.statusBar().currentMessage()
+                == "Pick a profile to begin."
+            ):
+                self._say("Ready.")
         elif has_profile:
             try:
                 prof = self.store.get_profile(self._current_profile)
@@ -5668,6 +5807,13 @@ class MainWindow(QMainWindow):
             )
             # T191: no slug repeat here either — the session title
             # carries the profile name, in display form.
+            # R41: a profile is picked, so the no-session line is
+            # stale here too — same replacement, same guard.
+            if (
+                self.statusBar().currentMessage()
+                == "Pick a profile to begin."
+            ):
+                self._say("Ready.")
         else:
             self.session_title.setText("No training session yet.")
             self.session_summary.setText("Pick a model to begin.")
@@ -6140,17 +6286,32 @@ class MainWindow(QMainWindow):
                         f"Asking the teacher: prompt {event['index']} "
                         f"of {event['total']}."
                     )
+                elif event.get("type") == "warning":
+                    # R30/R35: a failed or cut-off prompt says so
+                    # in the job log as it happens.
+                    ctx.log(event.get("message", ""))
 
             report = distill_dataset(
                 self.store, profile, project, teacher, prompts,
                 timeout=timeout,
                 on_event=on_event, should_stop=ctx.is_cancelled,
             )
-            return (
+            result = (
                 f"Distilled {report['rows']} examples from {teacher} "
                 f"into this project's dataset. Look at the dataset, "
                 "then train when ready."
             )
+            if report.get("failed"):
+                result += (
+                    f" {report['failed']} prompt(s) got no answer; "
+                    "run it again to pick up where it stopped."
+                )
+            if report.get("skipped_truncated"):
+                result += (
+                    f" {report['skipped_truncated']} answer(s) were "
+                    "cut off mid-sentence and were not saved."
+                )
+            return result
 
         self._start_job_worker(job, "Teaching a small model", True,
                                from_job="distill")
@@ -6783,6 +6944,17 @@ class MainWindow(QMainWindow):
         )
         self.set_session(data["name"], None)
         self._say(f"Cloned {slug} as {data['name']}.")
+        # R40: a clone that skipped damaged projects says so — the
+        # copy is incomplete, and "Cloned" alone would be a lie.
+        skipped = data.get("skipped_damaged_projects") or []
+        if skipped:
+            names = ", ".join(s["name"] for s in skipped)
+            self._warn(
+                f"Cloned {slug} as {data['name']}, but "
+                f"{len(skipped)} project(s) could not be copied "
+                "because their records are damaged "
+                f"({names}). The originals are untouched."
+            )
 
     def _delete_confirm_with_export(self, title, text, export_label):
         """A destructive confirmation that defaults to No, and where

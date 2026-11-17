@@ -3152,3 +3152,289 @@ def test_training_stamps_last_used(need_torch, tmp_path):
     with pytest.raises(StellaError):
         train_project(store2, "tiny", "proof")
     assert store2.get_profile("tiny")["last_used"] == ""
+
+
+# -- v0.26.0: R24 — the dry-run fit counts dataset RAM --------------
+
+
+def test_estimate_fit_agrees_with_dataset_check(tmp_path, monkeypatch):
+    """R24: the estimate and check_dataset_fit agree on the same
+    dataset and free RAM — the audit's divergence (estimate says
+    fits, the dataset check refuses) is closed. The boundary is
+    probed exactly: free RAM one byte under training + dataset
+    refuses on both, exactly at it fits on both."""
+    import stella.train as train_mod
+    from stella.model import Store
+    from stella.train import check_dataset_fit
+
+    _plenty_of_ram(monkeypatch)
+    store = _estimable_project(Store(tmp_path / "home"), tmp_path)
+    estimate = estimate_run(store, "p1", "proj")
+    train_bytes = estimate["estimate_bytes"]
+    data_bytes = estimate["dataset_bytes"]
+    assert data_bytes > 0
+    assert estimate["total_bytes"] == train_bytes + data_bytes
+
+    # One byte under the total: both refuse.
+    monkeypatch.setattr(
+        train_mod, "available_ram_bytes",
+        lambda: train_bytes + data_bytes - 1,
+    )
+    assert estimate_run(store, "p1", "proj")["fits"] is False
+    with pytest.raises(StellaError, match="would not fit"):
+        check_dataset_fit(
+            data_bytes, train_bytes,
+            available_bytes=train_bytes + data_bytes - 1,
+        )
+    # Exactly at the total: both fit.
+    monkeypatch.setattr(
+        train_mod, "available_ram_bytes",
+        lambda: train_bytes + data_bytes,
+    )
+    assert estimate_run(store, "p1", "proj")["fits"] is True
+    check_dataset_fit(
+        data_bytes, train_bytes,
+        available_bytes=train_bytes + data_bytes,
+    )
+
+
+def test_format_estimate_names_dataset_ram(tmp_path, monkeypatch):
+    """R24: the dry-run report names the dataset's RAM, so the
+    number and the verdict agree."""
+    from stella.model import Store
+
+    _plenty_of_ram(monkeypatch)
+    store = _estimable_project(Store(tmp_path / "home"), tmp_path)
+    report = format_estimate(estimate_run(store, "p1", "proj"))
+    assert "for the dataset" in report
+    short = format_estimate_short(estimate_run(store, "p1", "proj"))
+    assert "dataset included" in short
+
+
+# -- v0.26.0: R25 — a cached model works offline ---------------------
+
+
+def _fake_hf_cache(tmp_path, repo="org/model", total_size=100_000_000):
+    """A Hub cache dir holding one snapshot: config + one sparse
+    weight file (logical size, no disk use). Returns the cache
+    dir (the caller points HF_HUB_CACHE at it)."""
+    cache = tmp_path / "hf-cache"
+    snap = cache / "models--org--model" / "snapshots" / "abc123"
+    snap.mkdir(parents=True)
+    (snap / "config.json").write_text(json.dumps({
+        "hidden_size": 2048, "num_hidden_layers": 24,
+        "intermediate_size": 8192, "torch_dtype": "bfloat16",
+    }))
+    weight = snap / "model.safetensors"
+    with open(weight, "wb") as handle:
+        handle.truncate(total_size)
+    return cache
+
+
+def test_cached_single_file_model_works_offline(tmp_path, monkeypatch):
+    """R25: a cached model resolves with no network at all — the
+    network fetch is rigged to fail, and the metadata still comes
+    back from the cache."""
+    import stella.train as train_mod
+    from stella.train import load_model_metadata
+
+    _fake_hf_cache(tmp_path)
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "hf-cache"))
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("the cached read touched the network")
+
+    monkeypatch.setattr(train_mod, "_fetch_hf_file", _boom)
+    meta = load_model_metadata("org/model")
+    assert meta["base_bytes"] == 100_000_000
+    assert meta["hidden_size"] == 2048
+    assert meta["num_layers"] == 24
+
+
+def test_uncached_model_refusal_names_next_step(tmp_path, monkeypatch):
+    """R25: a model that is genuinely unresolvable gets a message
+    with a next step, not just 'could not be read'."""
+    import stella.train as train_mod
+    from stella.train import _remote_model_metadata
+
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "empty-cache"))
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({
+        "hidden_size": 2048, "num_hidden_layers": 24,
+        "intermediate_size": 8192, "torch_dtype": "bfloat16",
+    }))
+
+    def _fetch(repo, filename):
+        if filename == "config.json":
+            return config_path
+        raise OSError("no index for a single-file model")
+
+    monkeypatch.setattr(train_mod, "_fetch_hf_file", _fetch)
+    with pytest.raises(
+        StellaError, match="Download the weights first"
+    ):
+        _remote_model_metadata("org/model")
+
+
+# -- v0.26.0: R26 — resume refuses a changed dataset -----------------
+
+
+def _checkpoint_with_fingerprint(store, profile, project, fingerprint,
+                                 step=5):
+    """A hand-made checkpoint carrying a dataset fingerprint."""
+    ckpt = (
+        store.project_dir(profile, project)
+        / "checkpoints" / f"step-{step}"
+    )
+    ckpt.mkdir(parents=True)
+    (ckpt / "training_state.json").write_text(json.dumps({
+        "step": step, "epoch": 1, "loss": 1.5,
+        "examples_seen_in_epoch": 3,
+        "dataset_fingerprint": fingerprint,
+    }))
+    return ckpt
+
+
+def test_resume_refuses_changed_dataset(tmp_path):
+    """R26: resuming after a dataset edit is refused, never silent
+    — the audit's probe shape (rows added and deleted between
+    pause and resume). The refusal fires before the deps gate, so
+    no training stack is needed to prove it."""
+    from stella.model import Store
+    from stella.train import dataset_fingerprint
+
+    store = Store(tmp_path / "home")
+    model_dir = _fake_model_dir(tmp_path / "model")
+    data = write_dataset(tmp_path / "data.jsonl", prompt_rows(20))
+    store.create_profile("p1", base_ref=str(model_dir))
+    store.create_project("p1", "proj", dataset_ref=str(data))
+    _checkpoint_with_fingerprint(
+        store, "p1", "proj", dataset_fingerprint(data, 20)
+    )
+    # The edit: add 2 rows, delete 1 — the audit's probe shape.
+    rows = prompt_rows(20)
+    rows.append({"prompt": "New 1?", "completion": "New 1."})
+    rows.append({"prompt": "New 2?", "completion": "New 2."})
+    del rows[0]
+    write_dataset(data, rows)
+    with pytest.raises(StellaError, match="dataset changed"):
+        train_project(store, "p1", "proj", resume=True)
+
+
+def test_resume_passes_unchanged_dataset(tmp_path, monkeypatch):
+    """R26: an unchanged dataset passes the fingerprint check — the
+    run reaches the deps gate instead of the dataset refusal."""
+    import stella.train as train_mod
+    from stella.model import Store
+    from stella.train import dataset_fingerprint
+
+    store = Store(tmp_path / "home")
+    model_dir = _fake_model_dir(tmp_path / "model")
+    data = write_dataset(tmp_path / "data.jsonl", prompt_rows(20))
+    store.create_profile("p1", base_ref=str(model_dir))
+    store.create_project("p1", "proj", dataset_ref=str(data))
+    _checkpoint_with_fingerprint(
+        store, "p1", "proj", dataset_fingerprint(data, 20)
+    )
+
+    def _gate():
+        raise StellaError("STOP_AT_GATE")
+
+    monkeypatch.setattr(train_mod, "require_training_deps", _gate)
+    with pytest.raises(StellaError, match="STOP_AT_GATE"):
+        train_project(store, "p1", "proj", resume=True)
+
+
+def test_dataset_fingerprint_changes_with_content(tmp_path):
+    """R26: the fingerprint is a content hash — same bytes, same
+    fingerprint; any edit, a different one."""
+    from stella.train import dataset_fingerprint
+
+    data = write_dataset(tmp_path / "d.jsonl", prompt_rows(5))
+    first = dataset_fingerprint(data, 5)
+    assert dataset_fingerprint(data, 5) == first
+    write_dataset(data, prompt_rows(6))
+    assert dataset_fingerprint(data, 6) != first
+
+
+# -- v0.26.0: R27 — a crashed run shows as crashed -------------------
+
+
+def test_reconcile_marks_crashed_run_paused_when_resumable(tmp_path):
+    """R27: a 'training' project with checkpoints and no live job
+    becomes 'paused' (resumable), with the crash recorded."""
+    from stella.model import Store
+    from stella.train import dataset_fingerprint, reconcile_stale_training
+
+    store = Store(tmp_path / "home")
+    model_dir = _fake_model_dir(tmp_path / "model")
+    data = write_dataset(tmp_path / "data.jsonl", prompt_rows(20))
+    store.create_profile("p1", base_ref=str(model_dir))
+    store.create_project("p1", "proj", dataset_ref=str(data))
+    _checkpoint_with_fingerprint(
+        store, "p1", "proj", dataset_fingerprint(data, 20)
+    )
+    store.update_project("p1", "proj", status="training")
+    reconciled = reconcile_stale_training(store)
+    assert reconciled == [{
+        "profile": "p1", "project": "proj",
+        "status": "paused", "resumable": True,
+    }]
+    assert store.get_project("p1", "proj")["status"] == "paused"
+    log = store.project_dir("p1", "proj") / "train_log.jsonl"
+    assert "run_crashed" in log.read_text(encoding="utf-8")
+
+
+def test_reconcile_marks_crashed_run_failed_without_checkpoints(tmp_path):
+    """R27: a 'training' project with no checkpoints becomes
+    'failed' — there is nothing to resume from."""
+    from stella.model import Store
+    from stella.train import reconcile_stale_training
+
+    store = Store(tmp_path / "home")
+    store.create_profile("p1")
+    store.create_project("p1", "proj")
+    store.update_project("p1", "proj", status="training")
+    reconciled = reconcile_stale_training(store)
+    assert reconciled[0]["status"] == "failed"
+    assert reconciled[0]["resumable"] is False
+    assert store.get_project("p1", "proj")["status"] == "failed"
+
+
+def test_reconcile_leaves_live_job_alone(tmp_path):
+    """R27: while a job holds the lock, a 'training' status may be
+    the live run itself — reconcile touches nothing."""
+    from stella.job_lock import job_lock
+    from stella.model import Store
+    from stella.train import reconcile_stale_training
+
+    store = Store(tmp_path / "home")
+    store.create_profile("p1")
+    store.create_project("p1", "proj")
+    store.update_project("p1", "proj", status="training")
+    with job_lock(store.home, "training p1/proj"):
+        assert reconcile_stale_training(store) == []
+    assert store.get_project("p1", "proj")["status"] == "training"
+
+
+# -- v0.26.0: R28 — a stored method of full warns at train time ------
+
+
+def test_train_warns_on_stored_full_method(tmp_path):
+    """R28: a project stored with method 'full' warns at run start
+    that the run trains LoRA — the warning fires before the run
+    refuses on its missing dataset."""
+    from stella.model import Store
+
+    store = Store(tmp_path / "home")
+    store.create_profile("p1", base_ref="org/model")
+    store.create_project(
+        "p1", "proj", settings={"method": "full"},
+    )
+    events = []
+    with pytest.raises(StellaError, match="no dataset set"):
+        train_project(store, "p1", "proj", on_event=events.append)
+    warnings = [e for e in events if e.get("type") == "warning"]
+    assert warnings
+    assert "trains with LoRA" in warnings[0]["message"]

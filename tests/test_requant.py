@@ -900,3 +900,191 @@ def test_run_unknown_error_keeps_raw_tail():
     message = str(excinfo.value)
     assert "The tool failed." in message
     assert "weird boom 12345" in message
+
+
+# -- v0.26.0: R29 — the quant call follows the bytes ------------------
+
+
+def _gguf_with_tensors(specs):
+    """A GGUF header with one tensor per (type id, elements) spec."""
+    out = bytearray()
+    out += b"GGUF"
+    out += struct.pack("<I", 3)  # version
+    out += struct.pack("<Q", len(specs))  # tensor count
+    out += struct.pack("<Q", 0)  # metadata count
+    for index, (tensor_type, elements) in enumerate(specs):
+        name = f"blk.{index}.weight".encode()
+        out += struct.pack("<Q", len(name)) + name
+        out += struct.pack("<I", 1)  # n_dims
+        out += struct.pack("<Q", elements)  # dim 0
+        out += struct.pack("<I", tensor_type)
+        out += struct.pack("<Q", 0)  # offset
+    return bytes(out)
+
+
+def test_read_gguf_source_quant_follows_bytes_not_count(tmp_path):
+    """R29: more F32 tensors, but far more Q5_K bytes — the call is
+    Q5_K. The old count vote picked F32 here (3 tensors vs 2),
+    which would have suppressed the double-quant warning and
+    collapsed the disk estimate."""
+    header = tmp_path / "tied.gguf"
+    # 3 tiny F32 norms (128 elements each) vs 2 big Q5_K weights.
+    header.write_bytes(_gguf_with_tensors(
+        [(0, 128), (0, 128), (0, 128), (12, 100_000), (12, 100_000)]
+    ))
+    assert _read_gguf_source_quant(header) == ("Q5_K", 5.5)
+
+
+def test_read_gguf_source_quant_lfm3_shape(tmp_path):
+    """R29: the real lfm3 shape — 136 Q5_K tensors vs 133 F32, the
+    F32s tiny norms — reads Q5_K by bytes, as it must."""
+    header = tmp_path / "lfm3.gguf"
+    specs = [(12, 1_000_000)] * 136 + [(0, 128)] * 133
+    header.write_bytes(_gguf_with_tensors(specs))
+    assert _read_gguf_source_quant(header) == ("Q5_K", 5.5)
+
+
+def test_read_gguf_source_quant_bytes_win_both_ways(tmp_path):
+    """R29: the byte vote is not a Q5_K bias — when the F32
+    tensors hold the most bytes, the call is F32."""
+    header = tmp_path / "f32.gguf"
+    header.write_bytes(_gguf_with_tensors(
+        [(12, 128), (12, 128), (0, 100_000)]
+    ))
+    assert _read_gguf_source_quant(header) == ("F32", 32.0)
+
+
+# -- v0.26.0: R32 — the requant estimate counts Ollama's blob copy --
+
+
+def test_requant_disk_check_counts_blob_copy(monkeypatch, env_setup,
+                                             tmp_path):
+    """R32: the disk check needs twice the output plus slack — free
+    space that covers one output file but not Ollama's blob copy
+    refuses, naming the copy."""
+    from stella.requant import DISK_SLACK_BYTES, _QUANT_BPW
+
+    usage = namedtuple("usage", "total used free")
+    models, blob = env_setup["models"], env_setup["blob"]
+    source_bytes = blob.stat().st_size
+    # Source is Q8_0 (8.5 bpw), target Q4_K_M (4.85 bpw).
+    estimate = max(
+        int(source_bytes * _QUANT_BPW["Q4_K_M"] / 8.5),
+        source_bytes // 20,
+    )
+    # Free space the old formula (output + slack) would have passed.
+    monkeypatch.setattr(
+        shutil, "disk_usage",
+        lambda path: usage(10**9, 0, estimate + DISK_SLACK_BYTES + 1),
+    )
+    with pytest.raises(
+        StellaError, match="Ollama's own copy"
+    ):
+        requant_model(
+            "qwen3.5:4b",
+            work_dir=tmp_path / "work", _runner=FakeRunner(),
+            _models_dir=models,
+        )
+    # Free space covering both copies passes the check (the run
+    # itself then succeeds with the fake runner).
+    monkeypatch.setattr(
+        shutil, "disk_usage",
+        lambda path: usage(
+            10**9, 0, 2 * estimate + DISK_SLACK_BYTES + 1
+        ),
+    )
+    report = requant_model(
+        "qwen3.5:4b",
+        work_dir=tmp_path / "work", _runner=FakeRunner(),
+        _models_dir=models,
+    )
+    assert report["new_tag"] == "qwen3.5:4b-q4-k-m"
+
+
+# -- v0.26.0: R33 — cleanup runs on interrupts too --------------------
+
+
+def test_requant_interrupt_removes_partial_output(env_setup, tmp_path):
+    """R33: a Ctrl+C during the quantize leaves no partial file —
+    the interrupt is still re-raised, never swallowed."""
+    work = tmp_path / "work"
+
+    def interrupting_runner(cmd):
+        if "llama-quantize" in cmd[0]:
+            pos = [a for a in cmd[1:] if not a.startswith("--")]
+            Path(pos[1]).write_bytes(b"half-written")
+            raise KeyboardInterrupt()
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    with pytest.raises(KeyboardInterrupt):
+        requant_model(
+            "qwen3.5:4b",
+            work_dir=work, _runner=interrupting_runner,
+            _models_dir=env_setup["models"],
+        )
+    assert list(work.glob("*.gguf")) == []
+
+
+def test_requant_disk_error_removes_partial_output(env_setup, tmp_path):
+    """R33: a disk error (OSError) during the quantize leaves no
+    partial file either."""
+    work = tmp_path / "work"
+
+    def failing_runner(cmd):
+        if "llama-quantize" in cmd[0]:
+            pos = [a for a in cmd[1:] if not a.startswith("--")]
+            Path(pos[1]).write_bytes(b"half-written")
+            raise OSError("No space left on device (fake)")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    with pytest.raises(OSError, match="No space left"):
+        requant_model(
+            "qwen3.5:4b",
+            work_dir=work, _runner=failing_runner,
+            _models_dir=env_setup["models"],
+        )
+    assert list(work.glob("*.gguf")) == []
+
+
+def test_requant_interrupt_during_create_cleans_work_files(
+    env_setup, tmp_path
+):
+    """R33: a Ctrl+C during `ollama create` leaves no work files
+    behind (unlike a plain create failure, which keeps the file
+    for a retry)."""
+    work = tmp_path / "work"
+
+    def runner(cmd):
+        if "llama-quantize" in cmd[0]:
+            pos = [a for a in cmd[1:] if not a.startswith("--")]
+            Path(pos[1]).write_bytes(b"GGUF-fake")
+            return
+        if cmd[0] == "ollama" and cmd[1] == "create":
+            raise KeyboardInterrupt()
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    with pytest.raises(KeyboardInterrupt):
+        requant_model(
+            "qwen3.5:4b",
+            work_dir=work, _runner=runner,
+            _models_dir=env_setup["models"],
+        )
+    assert list(work.glob("*.gguf")) == []
+    assert not (work / "Modelfile").is_file()
+
+
+# -- v0.26.0: R34 — the requant subprocess has a timeout --------------
+
+
+def test_run_times_out_on_hung_quantizer():
+    """R34: a hung quantizer stops on the timeout with a
+    plain-words message naming it."""
+    import time
+
+    from stella.requant import SUBPROCESS_TIMEOUT_SECONDS, _run
+
+    assert SUBPROCESS_TIMEOUT_SECONDS == 30 * 60
+    started = time.monotonic()
+    with pytest.raises(StellaError, match="timed out"):
+        _run(["sleep", "30"], what="sleeping", timeout=0.5)
+    assert time.monotonic() - started < 10

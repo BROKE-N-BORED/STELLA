@@ -28,6 +28,7 @@ import json
 import os
 import urllib.error
 import urllib.request
+from datetime import date
 from pathlib import Path
 
 from .model import StellaError, default_home
@@ -62,6 +63,9 @@ PROVIDERS = {
             "openai/gpt-oss-120b",
             "openai/gpt-oss-20b",
         ],
+        # R51: when this list was last checked against Groq's own
+        # models page. See MODEL_LIST_STALE_AFTER_DAYS below.
+        "checked": "2026-11-17",
     },
     "gemini": {
         "display": "Gemini",
@@ -80,6 +84,9 @@ PROVIDERS = {
             "gemini-3.8-flash",
             "gemini-3.5-flash-lite",
         ],
+        # R51: when this list was last checked against Google's
+        # models page. See MODEL_LIST_STALE_AFTER_DAYS below.
+        "checked": "2026-11-17",
     },
     "custom": {
         "display": "Custom",
@@ -92,6 +99,72 @@ PROVIDERS = {
 KEYED_PROVIDERS = tuple(
     pid for pid, info in PROVIDERS.items() if info["needs_key"]
 )
+
+# The providers with a curated list (R51): Ollama is live from
+# the daemon, never curated, and Custom is the user's own model
+# name — neither can rot.
+CURATED_PROVIDERS = ("groq", "gemini")
+
+# How old a curated list may get before Stella says so (R51).
+# 90 days: long enough not to nag about lists that have not
+# changed, short enough that the next deprecation is noticed
+# within a season. The check is local — a date comparison, no
+# network call: the product is offline-first, and any online
+# check against a provider's model endpoint needs his say-so
+# first. Each release re-checks the lists and moves the dates.
+MODEL_LIST_STALE_AFTER_DAYS = 90
+
+
+def list_checked_date(provider_id: str) -> date | None:
+    """When the curated model list was last checked (R51), or None
+    when the provider has no curated list or no check date."""
+    checked = PROVIDERS.get(provider_id, {}).get("checked")
+    if not isinstance(checked, str):
+        return None
+    try:
+        return date.fromisoformat(checked)
+    except ValueError:
+        return None
+
+
+def list_stale(provider_id: str, today: date | None = None) -> bool:
+    """True when a curated list is older than the threshold (R51).
+    Uncurated providers are never stale. A curated list with no
+    check date counts as stale — never checked is worse than
+    checked long ago, and must be noticed, not silent."""
+    if provider_id not in CURATED_PROVIDERS:
+        return False
+    checked = list_checked_date(provider_id)
+    if checked is None:
+        return True
+    day = today or date.today()
+    return (day - checked).days > MODEL_LIST_STALE_AFTER_DAYS
+
+
+def stale_list_notes(today: date | None = None) -> list[str]:
+    """One plain-words note per stale curated list (R51), or [].
+    The note names the check date and the next step — it never
+    sends the user to a terminal."""
+    notes = []
+    for pid in CURATED_PROVIDERS:
+        if not list_stale(pid, today):
+            continue
+        display = PROVIDERS[pid]["display"]
+        checked = list_checked_date(pid)
+        if checked is None:
+            notes.append(
+                f"The list of {display} models has no check date, "
+                "so it may be out of date. If a model fails, try "
+                "another one."
+            )
+        else:
+            notes.append(
+                f"The list of {display} models was last checked on "
+                f"{checked.isoformat()}, over "
+                f"{MODEL_LIST_STALE_AFTER_DAYS} days ago, so a model "
+                "here may have changed. If one fails, try another one."
+            )
+    return notes
 
 
 class ProviderError(Exception):

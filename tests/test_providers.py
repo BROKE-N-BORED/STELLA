@@ -545,3 +545,62 @@ def test_no_em_dash_in_provider_text(home):
     ok, message = providers_mod.test_connection("groq", home=home)
     assert not ok
     assert "—" not in message
+
+
+# -- v0.26.0: R51 — dated lists, staleness warning -------------------
+
+
+def test_curated_lists_carry_check_dates():
+    """R51: every curated list records when it was checked; the
+    live and user-supplied lists carry no date to rot."""
+    from datetime import date
+
+    from stella.providers import list_checked_date
+
+    assert list_checked_date("groq") == date(2026, 11, 17)
+    assert list_checked_date("gemini") == date(2026, 11, 17)
+    assert list_checked_date("ollama") is None
+    assert list_checked_date("custom") is None
+    assert list_checked_date("no-such-provider") is None
+
+
+def test_list_stale_threshold():
+    """R51: fresh within 90 days of the check date, stale after."""
+    from datetime import date
+
+    from stella.providers import list_stale
+
+    assert list_stale("groq", today=date(2026, 11, 17)) is False
+    assert list_stale("groq", today=date(2027, 2, 15)) is False  # day 90
+    assert list_stale("groq", today=date(2027, 2, 16)) is True  # day 91
+    assert list_stale("gemini", today=date(2027, 2, 16)) is True
+    # Uncurated providers are never stale.
+    assert list_stale("ollama", today=date(2027, 2, 16)) is False
+    assert list_stale("custom", today=date(2027, 2, 16)) is False
+
+
+def test_stale_list_notes_fresh_and_stale():
+    """R51: no notes while fresh; one plain-words note per stale
+    list, naming the date — and no em-dash in any of it."""
+    from datetime import date
+
+    from stella.providers import stale_list_notes
+
+    assert stale_list_notes(today=date(2026, 11, 17)) == []
+    notes = stale_list_notes(today=date(2027, 3, 1))
+    assert len(notes) == 2
+    assert any("Groq" in n and "2026-11-17" in n for n in notes)
+    assert any("Gemini" in n and "2026-11-17" in n for n in notes)
+    assert all("—" not in n for n in notes)
+    assert all("try another one" in n for n in notes)
+
+
+def test_missing_check_date_counts_as_stale(monkeypatch):
+    """R51: a curated list with no check date is noticed, not
+    silent — never checked is worse than checked long ago."""
+    from stella.providers import list_stale, stale_list_notes
+
+    monkeypatch.delitem(PROVIDERS["groq"], "checked")
+    assert list_stale("groq") is True
+    notes = stale_list_notes()
+    assert any("Groq" in n and "no check date" in n for n in notes)

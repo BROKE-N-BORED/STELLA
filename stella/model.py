@@ -30,7 +30,7 @@ from pathlib import Path
 
 from .autoconfig import compute_settings, measure_pc
 
-STELLA_VERSION = "0.25.0"
+STELLA_VERSION = "0.26.0"
 
 # Slug: lowercase letters, digits, dash, underscore. Must start alnum.
 # No dots, no slashes — a slug can never climb out of its directory.
@@ -215,6 +215,55 @@ DEFAULT_SETTINGS = {
 
 class StellaError(Exception):
     """User-facing Stella error (bad name, missing profile, bad manifest)."""
+
+
+# -- write-path type checks (R37) -----------------------------------
+# The model layer is the last line: import validates before
+# creating, the GUI validates before saving, but a wrong type
+# handed straight to the model used to either crash with raw
+# Python text (dict("abc") raising ValueError) or land in the
+# store as garbage (list("torch") shredding to single letters).
+# These checks refuse bad types with plain-words StellaErrors.
+# None means "unset" everywhere, the same convention as the
+# import validator — it becomes the empty value, never an error.
+
+
+def _require_text(value, field: str) -> str:
+    """A text field must be text (R37): None means unset."""
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise StellaError(
+            f"{field} must be text, not {type(value).__name__}"
+        )
+    return value
+
+
+def _require_config(value) -> dict:
+    """A profile config must be an object (R37): None means unset."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise StellaError(
+            f"config must be an object, not {type(value).__name__}"
+        )
+    return dict(value)
+
+
+def _require_dependencies(value) -> list:
+    """Profile dependencies must be a list of text (R37): None
+    means unset. A bare string is refused, never shredded into
+    single letters."""
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(
+        isinstance(item, str) for item in value
+    ):
+        raise StellaError(
+            "dependencies must be a list of text, "
+            f"not {value!r}"
+        )
+    return list(value)
 
 
 def default_home() -> Path:
@@ -707,7 +756,25 @@ class Store:
         pdir = self.profile_dir(slug)
         if (pdir / "profile.json").exists():
             raise StellaError(f"profile {slug!r} already exists")
-        seat = (governing_seat or "").strip().lower()
+        # R37: every field is type-checked before it is stored —
+        # a non-text value is refused in plain words, never stored
+        # or crashed on.
+        display_name = _require_text(display_name, "display_name")
+        role = _require_text(role, "role")
+        ollama_tag = _require_text(ollama_tag, "ollama_tag")
+        base_ref = _require_text(base_ref, "base_ref")
+        processor = _require_text(processor, "processor")
+        config = _require_config(config)
+        dependencies = _require_dependencies(dependencies)
+        if governing_seat is None:
+            seat = ""
+        elif isinstance(governing_seat, str):
+            seat = governing_seat.strip().lower()
+        else:
+            raise StellaError(
+                "governing seat must be text, "
+                f"not {type(governing_seat).__name__}"
+            )
         if seat and seat not in GOVERNING_SEATS:
             raise StellaError(
                 f"governing seat must be one of "
@@ -722,8 +789,8 @@ class Store:
             "ollama_tag": ollama_tag or "",
             "base_ref": base_ref or ollama_tag or "",
             "processor": processor or "",
-            "config": dict(config or {}),
-            "dependencies": list(dependencies or []),
+            "config": config,
+            "dependencies": dependencies,
             # T116: the governing seat this profile is bound for,
             # when set ("" means not bound). A bound profile warns
             # before training unless its base is abliterated, and
@@ -770,6 +837,22 @@ class Store:
         for key, value in fields.items():
             if key not in allowed:
                 raise StellaError(f"cannot change {key!r} on a profile")
+            # R37: the write path type-checks, like create — a
+            # wrong type is refused, never stored. The checked
+            # value is written back into `fields`, so the T54
+            # sync below sees the checked value too.
+            if key == "config":
+                value = _require_config(value)
+                fields[key] = value
+            elif key == "dependencies":
+                value = _require_dependencies(value)
+                fields[key] = value
+            elif key in (
+                "display_name", "role", "ollama_tag", "base_ref",
+                "processor",
+            ):
+                value = _require_text(value, key)
+                fields[key] = value
             if key == "governing_seat":
                 # T116: the marker names a governing seat, or ""
                 # for not bound. Anything else is refused, not
@@ -876,7 +959,11 @@ class Store:
         cloned too (T112's clone: same dataset/settings/mode, no
         checkpoints, fresh notes). The original is untouched. A
         name that already exists is refused, like any other
-        create."""
+        create. A damaged project cannot be copied (R40): it is
+        skipped, and the returned record names it under
+        "skipped_damaged_projects" (name + why), so the clone
+        never reports success while silently missing projects.
+        The key is absent when nothing was skipped."""
         slug = validate_slug(slug, "profile name")
         new_slug = validate_slug(new_slug, "new profile name")
         src = self.get_profile(slug)
@@ -896,10 +983,25 @@ class Store:
             processor=src.get("processor", ""),
             dependencies=list(src.get("dependencies") or []),
         )
+        skipped: list[dict] = []
         if copy_projects:
             try:
                 for proj in self.list_projects(slug):
                     if proj.get("_damaged"):
+                        # R40: a damaged project cannot be copied
+                        # — its manifest cannot be read — so it is
+                        # skipped and NAMED, not silently dropped.
+                        # Reporting it must not trip the rollback
+                        # below: a skip is not a failure.
+                        skipped.append(
+                            {
+                                "name": proj["name"],
+                                "error": proj.get(
+                                    "_error",
+                                    "its manifest cannot be read",
+                                ),
+                            }
+                        )
                         continue
                     self.clone_project(
                         slug, proj["name"], proj["name"],
@@ -911,6 +1013,8 @@ class Store:
                 # clone either lands whole or not at all.
                 self._destroy_profile(new_slug)
                 raise
+        if skipped:
+            data["skipped_damaged_projects"] = skipped
         return data
 
     # -- projects ---------------------------------------------------
@@ -998,6 +1102,16 @@ class Store:
         slug = validate_slug(slug, "project name")
         # The profile must exist first.
         self.get_profile(profile)
+        # R37: the text fields and the settings are type-checked
+        # before anything is stored — a non-text display name or a
+        # non-object settings value is refused in plain words.
+        display_name = _require_text(display_name, "display_name")
+        dataset_ref = _require_text(dataset_ref, "dataset_ref")
+        if settings is not None and not isinstance(settings, dict):
+            raise StellaError(
+                "settings must be an object, "
+                f"not {type(settings).__name__}"
+            )
         if metamorph_mode not in METAMORPH_MODES:
             raise StellaError(
                 f"metamorph mode must be one of {', '.join(METAMORPH_MODES)}"
@@ -1074,6 +1188,12 @@ class Store:
         for key, value in fields.items():
             if key not in allowed:
                 raise StellaError(f"cannot change {key!r} on a project")
+            # R37: the plain text fields are type-checked, like the
+            # profile update — the settings/metamorph/status
+            # branches below already validate their own shapes.
+            if key in ("display_name", "dataset_ref"):
+                value = _require_text(value, key)
+                fields[key] = value
             if key == "metamorph":
                 if not isinstance(value, dict):
                     raise StellaError("metamorph must be an object")

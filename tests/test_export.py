@@ -1800,3 +1800,97 @@ def test_last_used_travels_in_export(tmp_path):
     fresh = Store(tmp_path / "fresh-home")
     export_mod.import_export(fresh, out)
     assert fresh.get_profile("p1")["last_used"] == "2026-11-13T10:00:00Z"
+
+
+# -- v0.26.0: R36 — a recipe import keeps the project's status ------
+
+
+def test_recipe_import_from_done_project_keeps_status(tmp_path):
+    """R36: a recipe from a finished project imports with its
+    status kept and a truthful warning — a recipe carries no
+    weights by design, so 'Train it first, then export again'
+    is wrong here and the demotion to draft is gone."""
+    src = Store(tmp_path / "src-home")
+    src.create_profile("p1")
+    src.create_project("p1", "proj")
+    src.update_project("p1", "proj", status="done")
+    out = export_mod.export_recipe(src, "p1", "proj", tmp_path)
+    fresh = Store(tmp_path / "fresh-home")
+    result = export_mod.import_export(fresh, out)
+    assert fresh.get_project("p1", "proj")["status"] == "done"
+    assert not any(
+        "Train it first" in w for w in result["warnings"]
+    )
+    assert any(
+        "carries no trained weights by design" in w
+        for w in result["warnings"]
+    )
+
+
+# -- v0.26.0: R38 — an export never packages what verify refuses ----
+
+
+def test_export_refuses_damaged_project_status(tmp_path):
+    """R38: a project whose status was hand-edited to a value the
+    import validator refuses is refused at export too — and no
+    package is written."""
+    src = Store(tmp_path / "src-home")
+    src.create_profile("p1")
+    src.create_project("p1", "proj")
+    project_file = src.project_dir("p1", "proj") / "project.json"
+    record = json.loads(project_file.read_text())
+    record["status"] = "banana"
+    project_file.write_text(json.dumps(record))
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    with pytest.raises(StellaError):
+        export_mod.export_project(src, "p1", "proj", dest)
+    assert not (dest / "proj-stella-export").exists()
+    with pytest.raises(StellaError):
+        export_mod.export_recipe(src, "p1", "proj", dest)
+    assert not (dest / "proj-stella-recipe-export").exists()
+
+
+# -- v0.26.0: R39 — an import is size- and disk-guarded --------------
+
+
+def test_import_refuses_zip_bomb(tmp_path, monkeypatch):
+    """R39: a zip whose declared contents exceed the cap is
+    refused before anything is extracted — the guard reads the
+    headers' sizes, not the bytes. The cap is lowered for the
+    test (a real 11 GB header needs ZIP64); the real cap is
+    pinned separately below."""
+    import zipfile
+
+    assert export_mod.MAX_PACKAGE_EXTRACT_BYTES == 10 * 1024**3
+    monkeypatch.setattr(export_mod, "MAX_PACKAGE_EXTRACT_BYTES", 100)
+    src = Store(tmp_path / "src-home")
+    src.create_profile("p1")
+    src.create_project("p1", "proj")
+    out = export_mod.export_project(src, "p1", "proj", tmp_path)
+    bomb = tmp_path / "bomb.stella"
+    with zipfile.ZipFile(bomb, "w", zipfile.ZIP_DEFLATED) as zf:
+        for item in sorted(out.rglob("*")):
+            if item.is_file():
+                zf.write(item, item.relative_to(out))
+    fresh = Store(tmp_path / "fresh-home")
+    with pytest.raises(StellaError, match="too big to open"):
+        export_mod.import_export(fresh, bomb)
+    assert not fresh.project_dir("p1", "proj").exists()
+
+
+def test_import_refuses_when_disk_is_short(tmp_path, monkeypatch):
+    """R39: an import that will not fit on the home disk is
+    refused before anything is created."""
+    import shutil
+
+    src = Store(tmp_path / "src-home")
+    src.create_profile("p1")
+    src.create_project("p1", "proj")
+    out = export_mod.export_project(src, "p1", "proj", tmp_path)
+    fake_usage = shutil.disk_usage(tmp_path)._replace(free=10)
+    monkeypatch.setattr(shutil, "disk_usage", lambda path: fake_usage)
+    fresh = Store(tmp_path / "fresh-home")
+    with pytest.raises(StellaError, match="Not enough disk space"):
+        export_mod.import_export(fresh, out)
+    assert not fresh.project_dir("p1", "proj").exists()

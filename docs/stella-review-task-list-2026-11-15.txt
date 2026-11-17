@@ -1,6 +1,6 @@
 STELLA - task list from the full review, 2026-11-15
 
-129 tasks: 18 done, 105 to do, 6 gated. 0 urgent. 23 important, 52 correctness and polish, 54 nice to have.
+129 tasks: 46 done, 77 to do, 6 gated. 0 urgent. 23 important, 52 correctness and polish, 54 nice to have.
 The 5 marked (needs your PC) can only be done on your machine.
 The 1 marked (needs your call) is a design choice for you.
 Full detail for every task - evidence, what to fix, what done looks like -
@@ -34,34 +34,34 @@ R23. Run the real 2 GB training install (needs your PC)
 
 P2 - CORRECTNESS AND POLISH
 
-R24. The dry-run "fits" answer ignores the dataset's RAM
-R25. Offline, a single-file model link is refused even though the weights are already cached
-R26. Resuming after editing the dataset silently trains the wrong rows
-R27. A hard crash leaves a run showing as "training" forever
-R28. method: full can still be set from the command line, and silently trains LoRA instead
-R29. The GGUF parser picks the quant by tensor count, and a near-tie could pick the wrong one
-R30. A distill timeout or failure aborts the whole run, and the message misleads
-R31. Export has no disk guard at all, and its estimate leaves out the F16 intermediate
-R32. The requant disk estimate leaves out Ollama's blob copy
-R33. Cleanup only runs on Stella's own errors; Ctrl+C or a disk error leaves partial files behind
-R34. The requant subprocess has no timeout
-R35. Teacher answers are silently cut off at 1024 tokens
-R36. Importing a recipe from a finished project warns misleadingly and demotes the project
-R37. The model layer does not type-check what it is given, so bad values land in the store
-R38. Export does not check what it writes, so Stella exports packages its own verify refuses
-R39. Import has no size or disk guard: no zip-bomb cap, no free-space check
-R40. Cloning a profile silently drops its damaged projects, then reports success
-R41. The status bar says "Pick a profile to begin." while a session is live
-R42. The Settings Ollama status text overlaps the Refresh button when the window opens
-R43. The fit verdict calls every model "Too big for this PC", including the recommended starter
-R44. The run-button row is clipped at the bottom edge at 1366x768
-R45. A typed cloud-model pick is dropped when Ollama is down
-R46. Chat history is never shortened: the full history is re-sent (and re-paid for) every turn
-R47. A second tool block's raw JSON leaks into the chat, and the call never runs
-R48. Tool JSON in a json fence, or unclosed, is shown as raw text and never runs
-R49. The template walk is prompt-only: the agent never tracks which step it is on
-R50. Every model call re-fetches the Ollama model list, up to 12 tag fetches per loop
-R51. The curated model lists have no freshness mechanism: they rotted silently
+R24. The dry-run "fits" answer ignores the dataset's RAM [DONE]
+R25. Offline, a single-file model link is refused even though the weights are already cached [DONE]
+R26. Resuming after editing the dataset silently trains the wrong rows [DONE]
+R27. A hard crash leaves a run showing as "training" forever [DONE]
+R28. method: full can still be set from the command line, and silently trains LoRA instead [DONE]
+R29. The GGUF parser picks the quant by tensor count, and a near-tie could pick the wrong one [DONE]
+R30. A distill timeout or failure aborts the whole run, and the message misleads [DONE]
+R31. Export has no disk guard at all, and its estimate leaves out the F16 intermediate [DONE]
+R32. The requant disk estimate leaves out Ollama's blob copy [DONE]
+R33. Cleanup only runs on Stella's own errors; Ctrl+C or a disk error leaves partial files behind [DONE]
+R34. The requant subprocess has no timeout [DONE]
+R35. Teacher answers are silently cut off at 1024 tokens [DONE]
+R36. Importing a recipe from a finished project warns misleadingly and demotes the project [DONE]
+R37. The model layer does not type-check what it is given, so bad values land in the store [DONE]
+R38. Export does not check what it writes, so Stella exports packages its own verify refuses [DONE]
+R39. Import has no size or disk guard: no zip-bomb cap, no free-space check [DONE]
+R40. Cloning a profile silently drops its damaged projects, then reports success [DONE]
+R41. The status bar says "Pick a profile to begin." while a session is live [DONE]
+R42. The Settings Ollama status text overlaps the Refresh button when the window opens [DONE]
+R43. The fit verdict calls every model "Too big for this PC", including the recommended starter [DONE]
+R44. The run-button row is clipped at the bottom edge at 1366x768 [DONE]
+R45. A typed cloud-model pick is dropped when Ollama is down [DONE]
+R46. Chat history is never shortened: the full history is re-sent (and re-paid for) every turn [DONE]
+R47. A second tool block's raw JSON leaks into the chat, and the call never runs [DONE]
+R48. Tool JSON in a json fence, or unclosed, is shown as raw text and never runs [DONE]
+R49. The template walk is prompt-only: the agent never tracks which step it is on [DONE]
+R50. Every model call re-fetches the Ollama model list, up to 12 tag fetches per loop [DONE]
+R51. The curated model lists have no freshness mechanism: they rotted silently [DONE]
 R52. --json is silently ignored on about 25 commands
 R53. Export commands print "Package size: about 0 bytes." before failing on a missing profile
 R54. Chat's pre-flight failures print to stdout, and there is no CLI way to save a provider key

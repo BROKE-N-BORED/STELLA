@@ -326,8 +326,8 @@ def test_distill_emits_prompt_events(seeded, teacher_up, tmp_path):
 
 def test_distill_passes_timeout_to_generate(seeded, teacher_up, tmp_path,
                                             monkeypatch):
-    """The timeout reaches ollama.generate: a fake generate records
-    the timeout it was called with."""
+    """The timeout reaches ollama.generate_full: a fake generate
+    records the timeout it was called with."""
     import stella.distill as distill_mod
 
     seen = []
@@ -337,7 +337,7 @@ def test_distill_passes_timeout_to_generate(seeded, teacher_up, tmp_path,
         return f"answer to {prompt}"
 
     monkeypatch.setattr(
-        distill_mod.ollama_client, "generate", fake_generate
+        distill_mod.ollama_client, "generate_full", fake_generate
     )
     prompts = make_prompts(tmp_path, ["a", "b"])
     distill_dataset(
@@ -349,7 +349,7 @@ def test_distill_passes_timeout_to_generate(seeded, teacher_up, tmp_path,
 
 def test_distill_default_timeout_is_300(seeded, teacher_up, tmp_path,
                                         monkeypatch):
-    """No timeout passed: generate gets the 300-second default."""
+    """No timeout passed: generate_full gets the 300-second default."""
     import stella.distill as distill_mod
     from stella.distill import DEFAULT_TIMEOUT_SECONDS
 
@@ -361,7 +361,7 @@ def test_distill_default_timeout_is_300(seeded, teacher_up, tmp_path,
         return f"answer to {prompt}"
 
     monkeypatch.setattr(
-        distill_mod.ollama_client, "generate", fake_generate
+        distill_mod.ollama_client, "generate_full", fake_generate
     )
     prompts = make_prompts(tmp_path, ["a", "b"])
     distill_dataset(
@@ -388,7 +388,7 @@ def test_distill_keeps_teacher_warm(seeded, teacher_up, tmp_path,
         return f"answer to {prompt}"
 
     monkeypatch.setattr(
-        distill_mod.ollama_client, "generate", fake_generate
+        distill_mod.ollama_client, "generate_full", fake_generate
     )
     prompts = make_prompts(tmp_path, ["a", "b"])
     distill_dataset(
@@ -510,3 +510,94 @@ def test_cli_distill_shows_eta_after_two_prompts(home, monkeypatch, capsys):
     assert lines[2] == "prompt 3 of 10, about 4 minutes left"
     # Prompt 5: 4 done in 120s, 6 to go: 3 minutes.
     assert lines[4] == "prompt 5 of 10, about 3 minutes left"
+
+
+# -- v0.26.0: R30 — one failed prompt no longer aborts the run ------
+
+
+def test_distill_failed_prompt_is_skipped_and_reported(
+    seeded, teacher_up, tmp_path
+):
+    """R30: prompt 2 of 4 fails twice (the retry) — the run
+    completes, prompts 3 and 4 are still asked, and the report
+    names the failed prompt."""
+    prompts = make_prompts(tmp_path, ["one", "two", "three", "four"])
+    calls = []
+
+    def _generate(tag, prompt):
+        calls.append(prompt)
+        if prompt == "two":
+            raise StellaError("the teacher had no answer (fake)")
+        return f"answer to {prompt}"
+
+    events = []
+    report = distill_dataset(
+        seeded, "lfm3-tool", "tool-calls", TEACHER, prompts,
+        _generate=_generate, on_event=events.append,
+    )
+    assert report["failed"] == 1
+    assert report["failed_prompts"][0]["prompt"] == "two"
+    assert report["rows"] == 3
+    assert report["asked"] == 3
+    # The failed prompt was retried once, then skipped; the later
+    # prompts were still asked.
+    assert calls.count("two") == 2
+    assert "three" in calls and "four" in calls
+    rows = read_rows(seeded)
+    assert [r["prompt"] for r in rows] == ["one", "three", "four"]
+    warnings = [e for e in events if e.get("type") == "warning"]
+    assert warnings
+    assert any("1 prompt(s) got no answer" in w["message"]
+               for w in warnings)
+
+
+def test_distill_timeout_error_names_slowness_not_outage(
+    seeded, teacher_up, tmp_path
+):
+    """R30: a timeout is reworded — the teacher was slow, not
+    down — so the report never claims Ollama is not running."""
+    prompts = make_prompts(tmp_path, ["one", "two", "three"])
+
+    def _generate(tag, prompt):
+        if prompt == "two":
+            raise StellaError(
+                "Is Ollama running on this PC? (timed out)"
+            )
+        return f"answer to {prompt}"
+
+    report = distill_dataset(
+        seeded, "lfm3-tool", "tool-calls", TEACHER, prompts,
+        _generate=_generate,
+    )
+    assert report["failed"] == 1
+    error = report["failed_prompts"][0]["error"]
+    assert "timed out" in error
+    assert "Is Ollama running" not in error
+
+
+# -- v0.26.0: R35 — a cut-off answer is never saved ------------------
+
+
+def test_distill_skips_truncated_answers(seeded, teacher_up, tmp_path):
+    """R35: an answer cut off at the token cap (done_reason
+    'length') is skipped, never saved as a full example — the
+    other prompts are unaffected."""
+    prompts = make_prompts(tmp_path, ["one", "two", "three"])
+
+    def _generate(tag, prompt):
+        if prompt == "two":
+            return {"text": "half an ans", "done_reason": "length"}
+        return {"text": f"answer to {prompt}", "done_reason": "stop"}
+
+    events = []
+    report = distill_dataset(
+        seeded, "lfm3-tool", "tool-calls", TEACHER, prompts,
+        _generate=_generate, on_event=events.append,
+    )
+    assert report["skipped_truncated"] == 1
+    assert report["rows"] == 2
+    rows = read_rows(seeded)
+    assert [r["prompt"] for r in rows] == ["one", "three"]
+    assert all("half an ans" not in r["completion"] for r in rows)
+    warnings = [e for e in events if e.get("type") == "warning"]
+    assert any("cut off" in w["message"] for w in warnings)

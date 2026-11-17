@@ -1332,3 +1332,89 @@ def test_history_trims_to_newest(store):
     assert len(entries) == 200
     assert entries[0]["profile"] == "p301"
     assert entries[-1]["profile"] == "p500"
+
+
+# -- v0.26.0: R37 — the model layer type-checks its inputs ----------
+
+
+def test_create_profile_refuses_wrong_types(store):
+    """R37: a config that is not an object, or dependencies that
+    are not a list of text, are refused in plain words — and
+    nothing is stored."""
+    with pytest.raises(
+        StellaError, match="config must be an object"
+    ):
+        store.create_profile("bad-config", config="abc")
+    assert "bad-config" not in [p["name"] for p in store.list_profiles()]
+    with pytest.raises(
+        StellaError, match="dependencies must be a list of text"
+    ):
+        store.create_profile("bad-deps", dependencies="torch")
+    assert "bad-deps" not in [p["name"] for p in store.list_profiles()]
+    with pytest.raises(StellaError, match="role must be text"):
+        store.create_profile("bad-role", role=42)
+    assert "bad-role" not in [p["name"] for p in store.list_profiles()]
+
+
+def test_update_profile_refuses_wrong_types(store):
+    """R37: the same checks apply on update — a bad value is
+    refused and the stored record is untouched."""
+    store.create_profile("p1", config={"ctx": 8192})
+    with pytest.raises(
+        StellaError, match="config must be an object"
+    ):
+        store.update_profile("p1", config="x")
+    assert store.get_profile("p1")["config"] == {"ctx": 8192}
+    with pytest.raises(
+        StellaError, match="dependencies must be a list of text"
+    ):
+        store.update_profile("p1", dependencies="torch")
+    assert store.get_profile("p1")["dependencies"] == []
+
+
+def test_create_project_refuses_wrong_types(store):
+    """R37: a project with non-text fields or a settings value
+    that is not an object is refused, and nothing is stored."""
+    store.create_profile("p1")
+    with pytest.raises(
+        StellaError, match="display_name must be text"
+    ):
+        store.create_project("p1", "bad-display", display_name=7)
+    assert "bad-display" not in [p["name"] for p in store.list_projects("p1")]
+    with pytest.raises(
+        StellaError, match="settings must be an object"
+    ):
+        store.create_project("p1", "bad-settings", settings="lora")
+    assert "bad-settings" not in [p["name"] for p in store.list_projects("p1")]
+
+
+# -- v0.26.0: R40 — a clone names the projects it could not copy ----
+
+
+def test_clone_profile_names_skipped_damaged_projects(store):
+    """R40: cloning a profile with one damaged project copies the
+    healthy one and NAMES the damaged one in the returned record
+    — the clone never reports success while silently missing a
+    project."""
+    store.create_profile("p1")
+    store.create_project("p1", "good")
+    store.create_project("p1", "broken")
+    (store.project_dir("p1", "broken") / "project.json").write_text(
+        "{this is not json"
+    )
+    clone = store.clone_profile("p1", "p2", copy_projects=True)
+    assert store.get_project("p2", "good") is not None
+    assert "broken" not in [p["name"] for p in store.list_projects("p2")]
+    skipped = clone.get("skipped_damaged_projects")
+    assert skipped is not None
+    assert [entry["name"] for entry in skipped] == ["broken"]
+    assert skipped[0]["error"]
+
+
+def test_clone_profile_omits_skip_key_when_nothing_skipped(store):
+    """R40: the skipped-projects key is absent when every project
+    copied — its presence always means something was dropped."""
+    store.create_profile("p1")
+    store.create_project("p1", "good")
+    clone = store.clone_profile("p1", "p2", copy_projects=True)
+    assert "skipped_damaged_projects" not in clone

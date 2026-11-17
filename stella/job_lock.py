@@ -60,6 +60,34 @@ def _read_holder(path: Path) -> str:
         time.sleep(0.02)
 
 
+def job_lock_held(home: str | Path) -> bool:
+    """True when another process holds the home's job lock right
+    now (R27): a live job is running somewhere. The lock file is
+    never created by this check — a missing file means no holder.
+    The kernel releases the lock when the holder dies, so a
+    crashed job reads as not-held, which is exactly what the
+    stale-run reconciliation needs."""
+    path = Path(home) / LOCK_NAME
+    if not path.is_file():
+        return False
+    try:
+        fd = os.open(path, os.O_RDWR)
+    except OSError:
+        return False
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return True
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        return False
+    finally:
+        os.close(fd)
+
+
 @contextmanager
 def job_lock(home: str | Path, job_name: str, *, skip: bool = False):
     """Hold the home's job lock for one model-loading job.

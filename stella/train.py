@@ -1031,9 +1031,59 @@ def _fetch_hf_file_size(repo: str, filename: str) -> int | None:
     return _hf_file_size_via_head(url) or _hf_file_size_via_range(url)
 
 
+def _cached_model_metadata(base_ref: str) -> dict | None:
+    """Metadata of a Hub repo from the local cache alone (R25):
+    no network, no huggingface_hub import. A snapshot holding a
+    config.json plus weight files is enough — the snapshot files
+    are links into the blobs dir, so stat follows them to the
+    real sizes. None when nothing usable is cached: the caller
+    falls back to the network path. This is what makes a cached
+    single-file model work offline: the network path sizes its
+    weights over the Hub API, which refuses with no network even
+    when the weights are already on the disk."""
+    from .provision import repo_cache_dir
+
+    snaps = repo_cache_dir(base_ref) / "snapshots"
+    if not snaps.is_dir():
+        return None
+    for snap in sorted(snaps.iterdir()):
+        if not snap.is_dir():
+            continue
+        config_path = snap / "config.json"
+        if not config_path.is_file():
+            continue
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+            continue
+        if not isinstance(config, dict):
+            continue
+        total = 0
+        try:
+            members = list(snap.iterdir())
+        except OSError:
+            continue
+        for item in members:
+            if item.name.endswith((".safetensors", ".bin")):
+                try:
+                    if item.is_file():
+                        total += item.stat().st_size
+                except OSError:
+                    continue
+        if total > 0:
+            return _metadata_from_config(config, total)
+    return None
+
+
 def _remote_model_metadata(base_ref: str) -> dict:
     """Metadata of a Hub repo, from its config + weight sizes —
     two small downloads, never the weights."""
+    # R25: the cache first. A cached model answers offline, with
+    # no network call at all — the network path below is only for
+    # a model that is not on the disk yet.
+    cached = _cached_model_metadata(base_ref)
+    if cached is not None:
+        return cached
     try:
         config_path = _fetch_hf_file(base_ref, "config.json")
         config = json.loads(config_path.read_text(encoding="utf-8"))
@@ -1079,9 +1129,14 @@ def _remote_model_metadata(base_ref: str) -> dict:
         except Exception:
             total_size = None
     if not total_size:
+        # R25: a genuine refusal names the next step, mirroring
+        # the config-failure message above — the old text named
+        # no next step at all.
         raise StellaError(
             f"could not check whether {base_ref!r} fits this PC: the "
-            "size of its weights could not be read."
+            "size of its weights could not be read (no network, or "
+            "the model is not cached locally). Download the weights "
+            "first, or point base_ref at a local folder."
         )
     return _metadata_from_config(config, int(total_size))
 
@@ -1311,9 +1366,18 @@ def estimate_run(
     total_chars = (
         info["avg_prompt_chars"] + info["avg_completion_chars"]
     ) * len(examples)
+    # R24: the fit answer counts the dataset too — the run-time
+    # check (check_dataset_fit) always did, so an estimate that
+    # ignored it said "fits" for runs the guard then refused.
+    dataset_bytes = estimate_dataset_bytes(
+        info.get("bytes", 0), total_chars // CHARS_PER_TOKEN
+    )
+    total_bytes = estimate_bytes + dataset_bytes
     return {
-        "fits": estimate_bytes <= limit_bytes,
+        "fits": total_bytes <= limit_bytes,
         "estimate_bytes": estimate_bytes,
+        "dataset_bytes": dataset_bytes,
+        "total_bytes": total_bytes,
         "limit_bytes": limit_bytes,
         "ram_available_bytes": ram_available,
         "ram_gb": round(estimate_bytes / 1024**3, 2),
@@ -1323,9 +1387,6 @@ def estimate_run(
         "dataset_count": len(examples),
         "dataset_format": info["format"],
         "est_tokens": total_chars // CHARS_PER_TOKEN,
-        "dataset_bytes": estimate_dataset_bytes(
-            info.get("bytes", 0), total_chars // CHARS_PER_TOKEN
-        ),
         "train_examples": len(train_examples),
         "val_examples": len(val_examples),
         "trainable_params": trainable,
@@ -1347,17 +1408,26 @@ def format_estimate(estimate: dict) -> str:
     Train panel's Estimate button."""
     available = estimate.get("ram_available_bytes")
     limit = estimate.get("limit_bytes", RAM_LIMIT_BYTES)
+    dataset_bytes = estimate.get(
+        "dataset_bytes",
+        estimate.get("total_bytes", estimate["estimate_bytes"])
+        - estimate["estimate_bytes"],
+    )
+    total_bytes = estimate.get(
+        "total_bytes", estimate["estimate_bytes"] + dataset_bytes
+    )
     if estimate["fits"]:
         fit = f"fits in {_gb(limit)}"
     elif available is not None and available < RAM_LIMIT_BYTES:
         fit = (
             f"will not fit: only {_gb(available)} free right now, "
-            f"and the run needs {_gb(estimate['estimate_bytes'])}"
+            f"and the run needs {_gb(total_bytes)}"
         )
     else:
         fit = f"will not fit in {_gb(limit)}"
     lines = [
-        f"RAM: about {_gb(estimate['estimate_bytes'])} ({fit}).",
+        f"RAM: about {_gb(estimate['estimate_bytes'])} for training "
+        f"plus {_gb(dataset_bytes)} for the dataset ({fit}).",
         f"Steps: {estimate['steps']} "
         f"({estimate['train_examples']} training examples, "
         f"{estimate['val_examples']} held out to validate).",
@@ -1369,12 +1439,14 @@ def format_estimate(estimate: dict) -> str:
         if available is not None and available < RAM_LIMIT_BYTES:
             lines.append(
                 "This run will not fit right now. Close other "
-                "programs and try again, or pick a smaller base model."
+                "programs and try again, train on a smaller "
+                "dataset, or pick a smaller base model."
             )
         else:
             lines.append(
-                "This run will not fit this PC. Pick a smaller base "
-                "model, or train it elsewhere."
+                "This run will not fit this PC. Train on a smaller "
+                "dataset, pick a smaller base model, or train it "
+                "elsewhere."
             )
     return "\n".join(lines)
 
@@ -1384,27 +1456,37 @@ def format_estimate_short(estimate: dict) -> str:
     and time, no settings (T16 — the user never sees the knobs)."""
     available = estimate.get("ram_available_bytes")
     limit = estimate.get("limit_bytes", RAM_LIMIT_BYTES)
+    # R24: the one-liner quotes the total the fit was judged on
+    # (training plus dataset), so the number and the verdict agree.
+    total_bytes = estimate.get(
+        "total_bytes",
+        estimate["estimate_bytes"]
+        + estimate.get("dataset_bytes", 0),
+    )
+    total_gb = round(total_bytes / 1024**3, 2)
     if estimate["fits"]:
         if limit >= RAM_LIMIT_BYTES:
             return (
-                f"Fits in 8 GB (about {estimate['ram_gb']} GB). "
+                f"Fits in 8 GB (about {total_gb} GB, dataset "
+                f"included). "
                 f"{estimate['steps']} steps, {estimate['time_note']}."
             )
         free = _gb(available) if available is not None else _gb(limit)
         return (
-            f"Fits (about {estimate['ram_gb']} GB, "
+            f"Fits (about {total_gb} GB, "
             f"{free} free). "
             f"{estimate['steps']} steps, {estimate['time_note']}."
         )
     if available is not None and available < RAM_LIMIT_BYTES:
         return (
-            f"Will not fit right now (about {estimate['ram_gb']} GB, "
+            f"Will not fit right now (about {total_gb} GB, "
             f"only {_gb(available)} free). Close other programs, "
-            "or pick a smaller model."
+            "train on a smaller dataset, or pick a smaller model."
         )
     return (
-        f"Will not fit in 8 GB (about {estimate['ram_gb']} GB). "
-        "Pick a smaller model, or train it elsewhere."
+        f"Will not fit in 8 GB (about {total_gb} GB). "
+        "Train on a smaller dataset, pick a smaller model, or "
+        "train it elsewhere."
     )
 
 
@@ -2172,6 +2254,23 @@ class TrainController:
         return self._stop
 
 
+def dataset_fingerprint(path: str | Path, row_count: int) -> dict:
+    """A dataset's fingerprint (R26): the SHA-256 of the file
+    bytes plus the row count. Stored in every checkpoint's state;
+    on resume the stored fingerprint is compared with the current
+    dataset, so an edit between pause and resume is refused
+    instead of silently training the wrong rows. The hash is
+    streamed (1 MB chunks), so fingerprinting never holds the
+    file in memory."""
+    import hashlib
+
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return {"sha256": digest.hexdigest(), "rows": int(row_count)}
+
+
 def _lr_multiplier(step: int, warmup: int, total: int) -> float:
     if total <= 0:
         return 1.0
@@ -2197,6 +2296,7 @@ def run_training_loop(
     max_steps: int | None = None,
     extending: bool = False,
     mode: str | None = None,
+    dataset_fingerprint: dict | None = None,
 ) -> dict:
     """The loop itself, separated from model loading so tests can pass
     a tiny random model. Returns a summary dict (steps, total_steps,
@@ -2208,7 +2308,11 @@ def run_training_loop(
     announces the extension and the new total before starting.
     `mode` (T143) is the project's stored metamorph mode string,
     recorded in the training summary and the adapter config at
-    train time; None records nothing."""
+    train time; None records nothing. `dataset_fingerprint` (R26)
+    is the dataset's fingerprint dict, stored in every checkpoint
+    state so a resume can tell whether the dataset changed since
+    the pause; None (a caller that has no dataset file) stores
+    nothing."""
     # Validate first, before the torch import: a bad value is
     # refused with a plain message naming the setting, never a raw
     # ValueError/ZeroDivisionError from a bare int()/float() (T6).
@@ -2406,6 +2510,11 @@ def run_training_loop(
                     "stella_version": STELLA_VERSION,
                     "settings": snapshot_settings,
                 }
+                # R26: the dataset fingerprint rides in every
+                # checkpoint, so a resume can tell whether the
+                # dataset changed since the pause.
+                if dataset_fingerprint is not None:
+                    state["dataset_fingerprint"] = dict(dataset_fingerprint)
                 ckpt = project_dir / "checkpoints" / f"step-{step}"
                 _save_checkpoint(model, optimizer, ckpt, state)
                 last_saved_step = step
@@ -2454,6 +2563,9 @@ def run_training_loop(
             "stella_version": STELLA_VERSION,
             "settings": snapshot_settings,
         }
+        # R26: the final checkpoint carries the fingerprint too.
+        if dataset_fingerprint is not None:
+            state["dataset_fingerprint"] = dict(dataset_fingerprint)
         _save_checkpoint(model, optimizer, ckpt, state)
         emit({"type": "checkpoint", "step": step, "path": str(ckpt)})
 
@@ -2509,6 +2621,76 @@ def run_training_loop(
         "stopped": stopped,
         "checkpoint": str(ckpt),
     }
+
+
+# -- crashed-run reconciliation (R27) ------------------------------
+# A hard crash (an OOM kill, power loss, the window closed
+# mid-run) writes nothing: the project keeps status "training"
+# forever and the list shows a dead run as live. The fix is a
+# reconciliation at start-up: a "training" project with no live
+# job behind it is a crashed run. It becomes "paused" when
+# checkpoints exist (it can be resumed) and "failed" when none
+# do, and the run log gains a run_crashed record so the history
+# shows the crash. The job lock is the liveness signal — the
+# kernel releases it when the holder dies — so a run on another
+# process is never misread as dead.
+
+
+def reconcile_stale_training(store: Store) -> list[dict]:
+    """Mark crashed runs as crashed (R27).
+
+    Every project whose status is "training" while no job holds
+    the home's lock is a run that died without writing its
+    ending: it becomes "paused" when checkpoints exist (the run
+    can be resumed) and "failed" otherwise. Returns one entry
+    per reconciled run: profile, project, status ("paused" or
+    "failed"), and resumable (True when checkpoints exist, so
+    the caller can offer resume). Returns [] when a job is live
+    — a "training" status then may be the live run itself.
+    Never raises on a damaged row: a project that cannot be read
+    is skipped, not reconciled."""
+    from .job_lock import job_lock_held
+
+    reconciled: list[dict] = []
+    if job_lock_held(store.home):
+        return reconciled
+    for prof in store.list_profiles():
+        if prof.get("_damaged"):
+            continue
+        profile = prof["name"]
+        for proj in store.list_projects(profile):
+            if proj.get("_damaged"):
+                continue
+            if proj.get("status") != "training":
+                continue
+            project = proj["name"]
+            try:
+                checkpoints = list_checkpoints(store, profile, project)
+            except StellaError:
+                continue
+            resumable = bool(checkpoints)
+            new_status = "paused" if resumable else "failed"
+            try:
+                store.update_project(profile, project, status=new_status)
+            except StellaError:
+                continue
+            _append_log(
+                store.project_dir(profile, project),
+                {
+                    "event": "run_crashed",
+                    "status": new_status,
+                    "resumable": resumable,
+                },
+            )
+            reconciled.append(
+                {
+                    "profile": profile,
+                    "project": project,
+                    "status": new_status,
+                    "resumable": resumable,
+                }
+            )
+    return reconciled
 
 
 # -- project-level entry point --------------------------------------
@@ -2605,6 +2787,16 @@ def train_project(
     # Engine-side range check on the effective settings, before
     # anything loads (T6, D6).
     settings.update(validate_run_settings(settings))
+    # R28: a project stored with method "full" (set before v0.26.0
+    # closed the CLI path) still trains LoRA — there is no full
+    # path in the engine. Say so at run start, never silently.
+    if settings.get("method") == "full":
+        _emit_warning(
+            on_event,
+            "this project says method full, but Stella always "
+            "trains with LoRA on this PC, so this run trains LoRA. "
+            "Full fine-tuning needs far more RAM than this PC has.",
+        )
 
     # A finished project is not re-trained by accident (T25): a
     # fresh run on one refuses unless --force makes the intent
@@ -2653,6 +2845,9 @@ def train_project(
         float(settings.get("val_fraction", 0.1)),
         int(settings.get("seed", 42)),
     )
+    # R26: the dataset's fingerprint — stored in every checkpoint
+    # this run writes, and compared with the stored one on resume.
+    fingerprint = dataset_fingerprint(data_path, len(examples))
     # The dataset-size warning (T158): a big dataset is said out
     # loud before tokenization, with its size — the run still
     # starts, but the user knows it will be heavy. The refusal
@@ -2684,6 +2879,11 @@ def train_project(
     # is reused inside the lock for the actual resume.
     resume_checkpoints = None
     resume_step = None
+    # R26: True when the chosen checkpoint carries no dataset
+    # fingerprint (saved before v0.26.0) — the resume goes ahead,
+    # but the run warns that it cannot tell whether the dataset
+    # changed since the pause.
+    resume_fingerprint_unknown = False
     if resume:
         resume_checkpoints = list_checkpoints(
             store, profile, project, ckpt_dir=work_dir / "checkpoints"
@@ -2705,6 +2905,44 @@ def train_project(
                     f"project {project!r}. This project has: {have}"
                 )
             resume_step = from_checkpoint
+        # R26: the dataset check runs here, before the lock, the
+        # deps gate, and the model load — a changed dataset
+        # refuses cheaply. The chosen checkpoint's stored
+        # fingerprint is compared with the current dataset's; a
+        # mismatch refuses (resuming would train the wrong rows),
+        # and a missing fingerprint (an old checkpoint) is noted
+        # for the warning in the resume block below.
+        chosen_step = (
+            resume_step
+            if resume_step is not None
+            else resume_checkpoints[-1]["step"]
+        )
+        chosen = next(
+            c for c in resume_checkpoints if c["step"] == chosen_step
+        )
+        state_file = Path(chosen["path"]) / "training_state.json"
+        try:
+            stored_state = json.loads(
+                state_file.read_text(encoding="utf-8")
+            )
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+            stored_state = {}
+        stored_fp = (
+            stored_state.get("dataset_fingerprint")
+            if isinstance(stored_state, dict)
+            else None
+        )
+        if isinstance(stored_fp, dict):
+            if stored_fp != fingerprint:
+                raise StellaError(
+                    "the dataset changed since the pause, so "
+                    "resuming would train the wrong rows. Start a "
+                    "fresh run instead (the old checkpoints stay "
+                    "on disk), or put the dataset back the way it "
+                    "was and resume again."
+                )
+        else:
+            resume_fingerprint_unknown = True
 
     # One job at a time (T29): the engine lock. The cheap checks
     # above ran without it, so a bad profile or dataset is still
@@ -2836,6 +3074,24 @@ def train_project(
                     _append_log(
                         work_dir, {"event": "warning", "message": message}
                     )
+            # R26: an old checkpoint carries no dataset
+            # fingerprint, so the run cannot tell whether the
+            # dataset changed since the pause — it says so
+            # (event + log) instead of resuming silently. A
+            # checkpoint WITH a fingerprint was already compared
+            # before the lock, so this only fires for old ones.
+            if resume_fingerprint_unknown:
+                message = (
+                    "this checkpoint was saved before Stella "
+                    "recorded which dataset it trained on, so it "
+                    "cannot tell whether the dataset changed "
+                    "since the pause. Resuming anyway."
+                )
+                if on_event is not None:
+                    on_event({"type": "warning", "message": message})
+                _append_log(
+                    work_dir, {"event": "warning", "message": message}
+                )
             trainable = [p for p in model.parameters() if p.requires_grad]
             optimizer = torch.optim.AdamW(
                 trainable, lr=float(settings.get("learning_rate", 0.0002)),
@@ -2941,6 +3197,9 @@ def train_project(
                 # in the summary and the adapter config at train
                 # time — as stored, no reading picked.
                 mode=metamorph_mode(proj),
+                # R26: the dataset fingerprint, stored in every
+                # checkpoint this run writes.
+                dataset_fingerprint=fingerprint,
             )
         except Exception:
             # A crash is not a pause (T53): a run that errors is

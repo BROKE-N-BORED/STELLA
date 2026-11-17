@@ -12,16 +12,21 @@ so the picker and the tests can use it with no GUI import.
   size suffix in the tag (``:2b``, ``-1.7b``, ``:8b``). None when the
   tag carries no size.
 - ``estimate_training_ram_gb(params_b)`` — the picker RAM rule,
-  grounded in the training estimator (train.estimate_training_bytes):
-  base weights at 2 bytes per param, plus about 3 GB for activations,
-  the optimizer, and headroom. LFM3 1.7B comes out at about 6.4 GB,
-  matching the real estimate; a 3B model comes out over 8 GB, which
-  is why the guide says 1.5 to 2 billion parameters fit and 8
-  billion does not.
-- ``fit_verdict(tag, size_bytes, ram_available_gb)`` — the picker's
-  verdict line. Fits, too big, or honestly unknown when the size
-  cannot be parsed (Stella checks for real at train time — the RAM
-  guard in train.py refuses a run that will not fit).
+  reconciled with the training estimator
+  (train.estimate_training_bytes, R43): resident base weights at
+  1 byte per param (2 bytes per param times the 0.5 resident
+  share, train.RESIDENT_WEIGHTS_FRACTION), plus about 2.7 GB for
+  activations at the default recipe, the LoRA optimizer state,
+  and headroom. LFM3 1.7B comes out at about 4.4 GB, matching the
+  recalibrated training estimate (4.34 GB); an 8B model comes out
+  over 10 GB, which is why the guide says 1.5 to 2 billion
+  parameters fit and 8 billion does not.
+- ``fit_verdict(tag, size_bytes, ram_total_gb)`` — the picker's
+  verdict line, judged against TOTAL RAM (R43): free RAM is a
+  transient number — it drops whenever a browser is open — so a
+  verdict against it calls the recommended starter "too big" one
+  minute and fine the next. Total RAM is stable; the RAM guard in
+  train.py still checks the free RAM for real at train time.
 """
 
 from __future__ import annotations
@@ -53,11 +58,23 @@ KNOWN_MODELS: tuple[tuple[str, str], ...] = (
 
 GENERIC_DESCRIPTION = "A general chat model."
 
-# Training RAM, in GB per billion parameters (bf16 weights), plus a
-# flat allowance for activations, the optimizer, and headroom — see
-# the module docstring for the grounding.
-_GB_PER_PARAM_B = 2.0
-_FIXED_OVERHEAD_GB = 3.0
+# Training RAM, in GB per billion parameters (resident base
+# weights), plus a flat allowance — reconciled with
+# train.estimate_training_bytes (R43), so the picker and the
+# training estimate can never disagree again:
+# - weights: 2 bytes per param x the 0.5 resident share
+#   (train.RESIDENT_WEIGHTS_FRACTION: safetensors weights are
+#   mmap'd and stream from disk) = 1 byte per param.
+# - fixed: activations at the default recipe (batch 1, seq 1024,
+#   hidden 2048, 24 layers) about 1.6 GB, plus 1 GB headroom
+#   (train.RAM_HEADROOM_BYTES), plus about 0.1 GB of LoRA
+#   optimizer/master state at rank 8 — about 2.7 GB.
+# LFM3 1.7B: 1.7 + 2.7 = 4.4 GB, against the recalibrated
+# training estimate of 4.34 GB. The cross-check lives in
+# tests/test_model_info.py: if the estimator changes, the test
+# fails and the constants move with it.
+_GB_PER_PARAM_B = 1.0
+_FIXED_OVERHEAD_GB = 2.7
 
 # "2b", "1.7b", "8b" at the end of a tag or a tag segment: the
 # parameter count the tag itself carries.
@@ -93,15 +110,18 @@ def estimate_training_ram_gb(params_b: float) -> float:
     return round(params_b * _GB_PER_PARAM_B + _FIXED_OVERHEAD_GB, 1)
 
 
-def fits_this_pc(tag: str, ram_available_gb: float | None) -> bool | None:
-    """True when training this model fits this PC's free RAM, False
+def fits_this_pc(tag: str, ram_total_gb: float | None) -> bool | None:
+    """True when training this model fits this PC's TOTAL RAM, False
     when it does not, None when the tag carries no size to judge by
     (or the RAM could not be measured). The picker's short verdict;
-    fit_verdict is the full line."""
+    fit_verdict is the full line. Judged against total RAM, not
+    free RAM (R43): free RAM is transient, total RAM is the stable
+    property of the PC — and the RAM guard checks free RAM for
+    real at train time."""
     params_b = params_from_tag(tag)
-    if params_b is None or ram_available_gb is None:
+    if params_b is None or ram_total_gb is None:
         return None
-    return estimate_training_ram_gb(params_b) <= ram_available_gb
+    return estimate_training_ram_gb(params_b) <= ram_total_gb
 
 
 def _format_gb(gb: float) -> str:
@@ -111,11 +131,14 @@ def _format_gb(gb: float) -> str:
 def fit_verdict(
     tag: str,
     size_bytes: int | None,
-    ram_available_gb: float | None,
+    ram_total_gb: float | None,
 ) -> str:
     """The picker's fit line for one model: what it does is the
     caller's job (describe_model); this is size plus RAM, in plain
-    words. Fits, too big, or honestly unknown."""
+    words. Fits, too big, or honestly unknown. Judged against total
+    RAM (R43); the too-big line says Stella checks the free RAM
+    again at train time, so a verdict is never stated as more
+    final than it is."""
     from .provision import format_size
 
     params_b = params_from_tag(tag)
@@ -132,12 +155,12 @@ def fit_verdict(
             )
         return "Size unknown. Stella will check it fits when you train."
     needs_gb = estimate_training_ram_gb(params_b)
-    if ram_available_gb is None:
+    if ram_total_gb is None:
         line = f"Needs about {_format_gb(needs_gb)} of RAM to train."
         if size_text:
             line = f"{size_text}. {line}"
-        return line + " This PC's free RAM could not be measured."
-    if needs_gb <= ram_available_gb:
+        return line + " This PC's total RAM could not be measured."
+    if needs_gb <= ram_total_gb:
         line = (
             f"Fits this PC. Needs about {_format_gb(needs_gb)} of RAM "
             "to train."
@@ -148,5 +171,6 @@ def fit_verdict(
     return (
         f"Too big for this PC. Needs about {_format_gb(needs_gb)} of "
         f"RAM to train, and this PC has "
-        f"{_format_gb(ram_available_gb)} free."
+        f"{_format_gb(ram_total_gb)} in total. Stella checks the "
+        "free RAM again when you train."
     )

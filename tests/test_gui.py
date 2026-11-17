@@ -2753,7 +2753,8 @@ def _patched_dialog(window, monkeypatch, seed_models):
         {"lfm3:1.7b": 2_000_000_000, "qwen3.5:8b": 5_000_000_000},
     )
     monkeypatch.setattr(
-        gui_mod, "measure_pc", lambda: {"ram_available_gb": 8.0}
+        gui_mod, "measure_pc",
+        lambda: {"ram_total_gb": 8.0, "ram_available_gb": 8.0},
     )
     return NewProfileDialog(window)
 
@@ -2799,7 +2800,7 @@ def test_new_profile_tap_shows_details(window, monkeypatch, qapp, seed_models):
     qapp.processEvents()
     assert dialog.details_label.isVisible()
     details = dialog.details_label.text()
-    assert "6.4 GB" in details  # RAM to train
+    assert "4.4 GB" in details  # RAM to train
     assert "1.9 GB" in details  # download size
     assert dialog.name_note.text() == "Profile name: lfm3-1-7b"
     dialog.close()
@@ -8321,3 +8322,320 @@ def test_import_preview_dialog_shows_provenance(window, seeded, tmp_path):
     texts = [child.text() for child in dialog.findChildren(QLabel)]
     assert any("Exported from" in text for text in texts)
     dialog.close()
+
+
+# -- v0.26.0: R27 — the window names a crashed run on startup --------
+
+
+def test_main_window_reconciles_crashed_run_on_startup(
+    qapp, seeded, settings
+):
+    """R27: opening the window with a project stuck on 'training'
+    (a crash) reconciles it to 'paused' and says so in the status
+    bar, with the resume offer."""
+    from stella.gui import MainWindow
+
+    seeded.update_project("lfm3-tool", "tool-calls", status="training")
+    ckpt = (
+        seeded.project_dir("lfm3-tool", "tool-calls")
+        / "checkpoints" / "step-5"
+    )
+    ckpt.mkdir(parents=True)
+    (ckpt / "training_state.json").write_text(json.dumps({
+        "step": 5, "epoch": 1, "loss": 1.5,
+        "examples_seen_in_epoch": 3,
+    }))
+    win = MainWindow(store=seeded, settings=settings)
+    try:
+        win.show()
+        qapp.processEvents()
+        if win._model_list_worker is not None:
+            win._model_list_worker.wait(5000)
+            qapp.processEvents()
+        assert seeded.get_project(
+            "lfm3-tool", "tool-calls"
+        )["status"] == "paused"
+        message = win.statusBar().currentMessage()
+        assert "stopped unexpectedly" in message
+        assert "lfm3-tool/tool-calls" in message
+        assert "resumed from the Train panel" in message
+    finally:
+        win.close()
+
+
+# -- v0.26.0: R40 — the clone button warns about skipped projects ----
+
+
+def test_clone_profile_button_warns_about_skipped_projects(
+    window, seeded, monkeypatch, qapp
+):
+    """R40: cloning a profile with a damaged project warns naming
+    the skipped project — the clone never reports plain success
+    while missing a project."""
+    from PySide6.QtWidgets import QInputDialog, QMessageBox, QPushButton
+
+    seeded.create_project("lfm3-tool", "broken")
+    (seeded.project_dir("lfm3-tool", "broken") / "project.json").write_text(
+        "{this is not json"
+    )
+    win = window.open_profile_window("lfm3-tool")
+    qapp.processEvents()
+    monkeypatch.setattr(
+        QInputDialog, "getText", lambda *a, **k: ("lfm3-copy", True)
+    )
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.Yes
+    )
+    seen = []
+    monkeypatch.setattr(
+        QMessageBox, "warning",
+        lambda *a, **k: seen.append(a[2] if len(a) > 2 else k.get("text", "")),
+    )
+    clone_btn = next(
+        b for b in win.findChildren(QPushButton) if b.text() == "Clone"
+    )
+    clone_btn.click()
+    qapp.processEvents()
+    assert [p["name"] for p in seeded.list_projects("lfm3-copy")] == [
+        "tool-calls"
+    ]
+    assert len(seen) == 1
+    assert "broken" in seen[0]
+    assert "could not be copied" in seen[0]
+
+
+# -- v0.26.0: R41–R45, R49, R51 (GUI/chat half) -----------------------
+
+
+def test_status_bar_true_with_live_session(window, qapp):
+    """R41: with a live session, the status bar never reads "Pick
+    a profile to begin." — and a fresher action message is never
+    clobbered by a refresh."""
+    # Any refresh with no session sets the stale line (the way a
+    # post-startup refresh does); setting the session must
+    # replace it.
+    window.refresh_session()
+    qapp.processEvents()
+    assert window.statusBar().currentMessage() == "Pick a profile to begin."
+    _select_session(window)
+    qapp.processEvents()
+    assert window.statusBar().currentMessage() == "Ready."
+    assert "lfm3-tool" not in window.statusBar().currentMessage()
+    assert "tool-calls" not in window.statusBar().currentMessage()
+    # A fresher action message survives later refreshes.
+    window._say("Did a thing.")
+    window.refresh_session()
+    assert window.statusBar().currentMessage() == "Did a thing."
+
+
+def test_status_bar_true_with_profile_only(window, qapp):
+    """R41: a profile with no project yet is past "Pick a
+    profile" too."""
+    window.refresh_session()
+    assert window.statusBar().currentMessage() == "Pick a profile to begin."
+    window.set_session("lfm3-tool", None)
+    qapp.processEvents()
+    assert window.statusBar().currentMessage() == "Ready."
+
+
+def test_settings_ollama_status_no_overlap(window, seed_models, qapp):
+    """R42: opening Settings with a multi-model Ollama list shows
+    no overlap at any moment — the label's wrapped height is
+    reserved the moment the text lands, not seconds later."""
+    from PySide6.QtCore import QPoint
+
+    seed_models([
+        "lfm3:1.7b", "qwen3.5:4b", "qwen3-vl:2b-instruct",
+        "minicpm-v:8b", "gemma3:4b",
+    ])
+    win = window.open_settings_window()
+    win.show()
+    qapp.processEvents()
+    label = win.ollama_status
+    button = win.ollama_refresh_btn
+    # Settle on the short text first, so the measure below is the
+    # true t=0 state when the long text lands — not a layout that
+    # already settled on an earlier refresh.
+    label.setText("Status: Checking...")
+    qapp.processEvents()
+    win._on_models_refreshed()
+    # No processEvents between the refresh and the measure: the
+    # relayout is synchronous, so the geometry is right at once.
+    assert "lfm3:1.7b" in label.text()
+    assert "gemma3:4b" in label.text()
+    # The box is at least as tall as its wrapped text needs: the
+    # second line cannot spill onto the button below. (The rect
+    # comparison alone would not catch it — the label's rect stays
+    # small while its text overflows it.)
+    assert label.height() >= label.heightForWidth(label.width())
+    label_bottom = label.mapTo(win, QPoint(0, label.height())).y()
+    button_top = button.mapTo(win, QPoint(0, 0)).y()
+    assert label_bottom <= button_top
+    qapp.processEvents()
+    assert label.height() >= label.heightForWidth(label.width())
+    label_bottom = label.mapTo(win, QPoint(0, label.height())).y()
+    button_top = button.mapTo(win, QPoint(0, 0)).y()
+    assert label_bottom <= button_top
+    win.close()
+
+
+def test_starter_row_fits_with_little_free_ram(window, monkeypatch, seed_models):
+    """R43: the verdict is judged against total RAM — with 8 GB
+    total and only 1.6 GB free (the audit's numbers), the starter
+    still reads "Fits this PC", never "Too big" next to "A good
+    first pick"."""
+    import stella.gui as gui_mod
+
+    from stella.gui import NewProfileDialog
+
+    seed_models(
+        ["lfm3:1.7b", "qwen3.5:8b"],
+        {"lfm3:1.7b": 2_000_000_000, "qwen3.5:8b": 5_000_000_000},
+    )
+    monkeypatch.setattr(
+        gui_mod, "measure_pc",
+        lambda: {"ram_total_gb": 8.0, "ram_available_gb": 1.6},
+    )
+    dialog = NewProfileDialog(window)
+    first = dialog.model_list.item(0).text()
+    assert "A good first pick." in first
+    assert "Fits this PC." in first
+    assert "Too big" not in first
+    # The 8B model is still honestly too big at 8 GB total.
+    second = dialog.model_list.item(1).text()
+    assert "Too big for this PC." in second
+    dialog.close()
+
+
+def test_picker_remeasures_ram_on_refresh(window, monkeypatch, seed_models):
+    """R43: a refill re-measures the verdict — the old code
+    measured once at construct and never again."""
+    import stella.gui as gui_mod
+
+    from stella.gui import NewProfileDialog
+
+    seed_models(["lfm3:1.7b"], {"lfm3:1.7b": 2_000_000_000})
+    ram = {"ram_total_gb": 8.0, "ram_available_gb": 8.0}
+    monkeypatch.setattr(gui_mod, "measure_pc", lambda: dict(ram))
+    dialog = NewProfileDialog(window)
+    assert "Fits this PC." in dialog.model_list.item(0).text()
+    ram["ram_total_gb"] = 4.0
+    dialog._fill_model_list()
+    assert "Too big for this PC." in dialog.model_list.item(0).text()
+    dialog.close()
+
+
+def test_run_buttons_visible_at_1366x768(window, qapp):
+    """R44: the full Pause / Resume / Proof run / Estimate row is
+    visible at 1366x768 with no scroll."""
+    from PySide6.QtCore import QPoint
+
+    window.resize(1366, 768)
+    window.show()
+    qapp.processEvents()
+    _select_session(window)
+    # The run buttons live on the bento page, not the first-run
+    # checklist — dismiss the checklist the way the user does.
+    window.check_dismiss_btn.click()
+    qapp.processEvents()
+    assert window.bento_widget.isVisible()
+    viewport = window.session_scroll.viewport()
+    height = viewport.height()
+    for button in (
+        window.train_pause_btn, window.train_resume_btn,
+        window.train_proof_btn, window.train_estimate_btn,
+    ):
+        # A laid-out button is about 31 px tall; an unlaid-out one
+        # reports the 640x480 default — guard the measure itself,
+        # or the row check below passes on nonsense numbers.
+        assert 0 < button.height() < 100, button.text()
+        assert button.isVisibleTo(window), button.text()
+        top = button.mapTo(viewport, QPoint(0, 0)).y()
+        bottom = top + button.height()
+        assert 0 <= top, button.text()
+        assert bottom <= height, (
+            f"{button.text()} bottom {bottom} below viewport {height}"
+        )
+
+
+def test_typed_cloud_model_kept_when_ollama_down(window, seed_models, qapp):
+    """R45: typing a cloud model name with Ollama down keeps the
+    pick — the cloud model does not need Ollama."""
+    from stella.gui import ChatWindow
+    from stella.providers import save_key
+
+    seed_models([], ollama_up=False)
+    save_key(window.store.home, "groq", "gsk-test-key")
+    chat = ChatWindow(window)
+    chat.show()
+    qapp.processEvents()
+    assert "Ollama is not answering" in chat.messages.toPlainText()
+    # A keyless cloud name gets a plain answer, not a silent drop.
+    chat.input.setText("gemini-3.8-flash")
+    chat.send_btn.click()
+    qapp.processEvents()
+    assert window.chat_model == ""
+    assert "did not find that model" in chat.messages.toPlainText()
+    # The keyed cloud name is kept.
+    chat.input.setText("openai/gpt-oss-120b")
+    chat.send_btn.click()
+    qapp.processEvents()
+    assert window.chat_model == "openai/gpt-oss-120b"
+    assert window.chat_provider == "groq"
+    assert "I will chat with openai/gpt-oss-120b" in chat.messages.toPlainText()
+    # A later refresh does not repeat the no-models message.
+    chat._on_models_refreshed()
+    qapp.processEvents()
+    assert chat.messages.toPlainText().count("Ollama is not answering") == 1
+    chat.close()
+
+
+def test_chat_window_shows_template_step(window, seed_models, qapp):
+    """R49: the chat window shows the template step from real
+    store state — step 1 with no session, step 4 once the seeded
+    session (dataset set, not started) is picked."""
+    from stella.gui import ChatWindow
+
+    seed_models(["lfm3:1.7b"])
+    chat = ChatWindow(window)
+    chat.show()
+    qapp.processEvents()
+    assert chat.step_label.text() == "Step 1 of 8: Goal."
+    _select_session(window)
+    chat._refresh_step_label()
+    assert chat.step_label.text() == "Step 4 of 8: Recipe."
+    chat.close()
+
+
+def test_settings_warns_when_model_list_stale(window, monkeypatch, qapp):
+    """R51: a list past its check threshold is noticed in
+    Settings, in plain words with the date."""
+    from stella.providers import PROVIDERS
+
+    monkeypatch.setitem(PROVIDERS["groq"], "checked", "2020-01-01")
+    win = window.open_settings_window()
+    win.show()
+    qapp.processEvents()
+    assert win._freshness_label.isVisible()
+    assert "Groq" in win._freshness_label.text()
+    assert "2020-01-01" in win._freshness_label.text()
+    win.close()
+
+
+def test_settings_hides_freshness_note_when_lists_fresh(
+    window, monkeypatch, qapp
+):
+    """R51: fresh lists show no warning."""
+    from datetime import date
+
+    from stella.providers import PROVIDERS
+
+    today = date.today().isoformat()
+    monkeypatch.setitem(PROVIDERS["groq"], "checked", today)
+    monkeypatch.setitem(PROVIDERS["gemini"], "checked", today)
+    win = window.open_settings_window()
+    win.show()
+    qapp.processEvents()
+    assert not win._freshness_label.isVisible()
+    assert win._freshness_label.text() == ""
+    win.close()

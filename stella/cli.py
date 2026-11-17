@@ -802,7 +802,12 @@ SETTING_FLAGS = [
     ("--val-fraction", "val_fraction", float),
     ("--warmup-steps", "warmup_steps", int),
     ("--seed", "seed", int),
-    ("--method", "method", str),
+    # R28: --method is NOT here any more. It used to accept "full"
+    # and store it, while the engine silently trained LoRA anyway
+    # (train.py has no full path and never reads the setting). The
+    # flag still exists — _add_setting_flags adds it below — but
+    # _settings_from_args refuses "full" in plain words and only
+    # "lora" passes through, which is what every run trains.
 ]
 
 
@@ -814,6 +819,24 @@ def _settings_from_args(args) -> dict:
         value = getattr(args, key, None)
         if value is not None:
             settings[key] = value
+    # R28: --method full is refused, not stored — storing it
+    # would promise a full fine-tune the engine cannot run.
+    method = getattr(args, "method", None)
+    if method is not None:
+        if str(method).strip().lower() == "full":
+            raise StellaError(
+                "method full is not available: Stella always trains "
+                "with LoRA on this PC, because a full fine-tune "
+                "needs far more RAM than this PC has. Use --method "
+                "lora, or leave the flag off."
+            )
+        if str(method).strip().lower() == "lora":
+            settings["method"] = "lora"
+        else:
+            raise StellaError(
+                f"method must be lora, not {method!r}. Stella "
+                "always trains with LoRA on this PC."
+            )
     return settings
 
 
@@ -824,6 +847,13 @@ def _add_setting_flags(parser) -> None:
             flag, dest=key, type=kind, default=None,
             help=f"training setting: {key}",
         )
+    # R28: --method stays a real flag so `--method full` gets the
+    # plain-words refusal in _settings_from_args instead of
+    # argparse's "unrecognized arguments" error.
+    parser.add_argument(
+        "--method", dest="method", type=str, default=None,
+        help="training setting: method (lora only)",
+    )
 
 
 def cmd_update_project(args) -> int:
@@ -883,6 +913,13 @@ def cmd_show_project(args) -> int:
     print("  settings:")
     for key in sorted(settings):
         print(f"    {key}: {settings[key]}")
+    # R28: a stored method of "full" (set before v0.26.0) warns
+    # here, so the listing never implies a full run is coming.
+    if settings.get("method") == "full":
+        print(
+            "  note: this project says method full, but Stella "
+            "always trains with LoRA on this PC."
+        )
     if proj.get("created"):
         print(f"  created: {proj['created']}")
     if proj.get("updated"):
@@ -1606,6 +1643,12 @@ def cmd_distill(args) -> int:
 
     def on_event(event: dict):
         kind = event.get("type")
+        if kind == "warning":
+            # R30/R35: a failed or cut-off prompt says so as it
+            # happens, even under --quiet — it is a result, not
+            # progress chatter.
+            print(event.get("message", ""), flush=True)
+            return
         if kind == "prompt":
             # T172 --quiet: the per-prompt lines go silent.
             if quiet:
@@ -1649,6 +1692,17 @@ def cmd_distill(args) -> int:
         print(
             f"  {report['skipped_resumed']} prompt(s) already answered "
             "in an earlier run."
+        )
+    if report.get("failed"):
+        print(
+            f"  {report['failed']} prompt(s) got no answer from the "
+            "teacher. The answers so far are saved; run it again "
+            "to pick up where it stopped."
+        )
+    if report.get("skipped_truncated"):
+        print(
+            f"  {report['skipped_truncated']} answer(s) were cut off "
+            "mid-sentence and were not saved."
         )
     print(f"Dataset saved: {report['dataset']}")
     print(
@@ -2372,6 +2426,17 @@ def main(argv: list[str] | None = None) -> int:
     _silence_library_warnings()
     parser = build_parser()
     args = parser.parse_args(argv)
+    # R27: a crashed run's "training" status is reconciled at
+    # start-up, so the CLI never lists a dead run as live either
+    # (the window does the same on open). Best effort: a failure
+    # here never blocks the command itself.
+    if hasattr(args, "func"):
+        try:
+            from .train import reconcile_stale_training
+
+            reconcile_stale_training(_store())
+        except Exception:
+            pass
     if not hasattr(args, "func"):
         # T187: bare `stella` prints the command list (the top
         # --help) instead of argparse's "arguments are required"

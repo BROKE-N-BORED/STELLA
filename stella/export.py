@@ -69,6 +69,7 @@ which import, verify, and preview read the same as a folder.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import shutil
@@ -248,9 +249,32 @@ def _extract_package_zip(zip_path: Path, dest: Path) -> None:
     """Extract a `.stella` file into `dest`. Members that would
     escape the folder (a hand-made zip claiming "../x") refuse
     the whole extract — a package from another machine is never
-    trusted to write outside itself."""
+    trusted to write outside itself. The total size is capped
+    (R39) and the free space checked BEFORE extracting: a small
+    zip expanding to gigabytes is refused while it is still just
+    a listing, never while it is filling the disk."""
     with zipfile.ZipFile(zip_path) as zf:
-        for info in zf.infolist():
+        infos = zf.infolist()
+        total = sum(info.file_size for info in infos)
+        if total > MAX_PACKAGE_EXTRACT_BYTES:
+            raise StellaError(
+                "this package is too big to open: it holds about "
+                f"{format_size(total)}, over the "
+                f"{format_size(MAX_PACKAGE_EXTRACT_BYTES)} limit. A "
+                "package that big is not a Stella export."
+            )
+        try:
+            free = shutil.disk_usage(dest).free
+        except OSError:
+            free = None
+        if free is not None and free < total + _DISK_HEADROOM_BYTES:
+            raise StellaError(
+                "Not enough disk space to open this package: it "
+                f"holds about {format_size(total)}, but only "
+                f"{format_size(free)} is free. Free some space and "
+                "try again."
+            )
+        for info in infos:
             target = (dest / info.filename).resolve()
             try:
                 target.relative_to(dest.resolve())
@@ -356,6 +380,44 @@ def estimate_profile_export_size(
 # manifest, the README, and the placeholder notes are small but
 # real, and the estimate does not count them.
 _DISK_HEADROOM_BYTES = 1024 * 1024
+
+# R39: the most a package may hold on import (10 GB). A real
+# Stella package — an adapter plus checkpoints — is far below
+# this; a small zip expanding past it is a zip bomb, refused
+# before it extracts.
+MAX_PACKAGE_EXTRACT_BYTES = 10 * 1024**3
+
+
+def _check_import_fits(store: Store, package_root: Path,
+                       payload_dirs) -> None:
+    """Refuse an import that will not fit (R39): the package must
+    be under the size cap (a folder package is already on disk,
+    so its tree is summed — the zip form is capped in
+    _extract_package_zip before it extracts), and the home's disk
+    must hold the bytes the import will copy. Raises StellaError
+    naming the sizes, before anything is created or copied. An
+    unreadable disk is not a reason to refuse — the copy itself
+    fails readably then."""
+    total = _dir_bytes(package_root)
+    if total > MAX_PACKAGE_EXTRACT_BYTES:
+        raise StellaError(
+            "this package is too big to import: it holds about "
+            f"{format_size(total)}, over the "
+            f"{format_size(MAX_PACKAGE_EXTRACT_BYTES)} limit. A "
+            "package that big is not a Stella export."
+        )
+    needed = _import_total_bytes(package_root, payload_dirs)
+    try:
+        free = shutil.disk_usage(store.home).free
+    except OSError:
+        return
+    if free < needed + _DISK_HEADROOM_BYTES:
+        raise StellaError(
+            "Not enough disk space to import: the package needs "
+            f"about {format_size(needed + _DISK_HEADROOM_BYTES)}, "
+            f"but only {format_size(free)} is free. Free some "
+            "space and try again."
+        )
 
 
 def check_disk_space(dest: str | Path, needed: int) -> None:
@@ -579,6 +641,17 @@ def export_project(
     """
     prof = store.get_profile(profile)
     proj = store.get_project(profile, project)
+    # R38: the manifest is validated before anything is written —
+    # a hand-edited status or bad setting refuses the export with
+    # the same plain error import would give.
+    _validate_export_manifest(
+        {
+            "format": FORMAT_VERSION,
+            "kind": PROJECT_PACKAGE_KIND,
+            "profile": _profile_manifest_block(prof),
+            "project": _project_manifest_block(proj),
+        }
+    )
     dest = Path(dest).expanduser()
     if dest.exists() and not dest.is_dir():
         raise StellaError(f"export destination is not a folder: {dest}")
@@ -901,6 +974,21 @@ def export_profile(
     if profile_notes_src.is_file():
         total += profile_notes_src.stat().st_size
     progress = _CopyProgress(total, on_progress, should_stop)
+    # R38: the manifest is validated before anything is written —
+    # see export_project.
+    _validate_export_manifest(
+        {
+            "format": FORMAT_VERSION,
+            "kind": PROFILE_PACKAGE_KIND,
+            "profile": _profile_manifest_block(prof),
+            "projects": [
+                _project_manifest_block(
+                    store.get_project(profile, p["name"])
+                )
+                for p in projects
+            ],
+        }
+    )
     staging = Path(
         tempfile.mkdtemp(prefix=out.name + ".staging-", dir=str(dest))
     )
@@ -1014,6 +1102,16 @@ def export_recipe(
     """
     prof = store.get_profile(profile)
     proj = store.get_project(profile, project)
+    # R38: the manifest is validated before anything is written —
+    # see export_project.
+    _validate_export_manifest(
+        {
+            "format": FORMAT_VERSION,
+            "kind": RECIPE_PACKAGE_KIND,
+            "profile": _profile_manifest_block(prof),
+            "project": _project_manifest_block(proj),
+        }
+    )
     dest = Path(dest).expanduser()
     if dest.exists() and not dest.is_dir():
         raise StellaError(f"export destination is not a folder: {dest}")
@@ -1174,13 +1272,24 @@ def export_adapter(
         estimate_adapter_export_size(store, profile, project),
         on_progress, should_stop,
     )
+    # R38: the manifest is validated before anything is written —
+    # see export_project. The adapter block is built once, here,
+    # and reused below.
+    adapter_block = _adapter_manifest_block(
+        store, profile, project, prof, proj
+    )
+    _validate_export_manifest(
+        {
+            "format": FORMAT_VERSION,
+            "kind": ADAPTER_PACKAGE_KIND,
+            "profile": _profile_manifest_block(prof),
+            "adapter": adapter_block,
+        }
+    )
     staging = Path(
         tempfile.mkdtemp(prefix=out.name + ".staging-", dir=str(dest))
     )
     try:
-        adapter_block = _adapter_manifest_block(
-            store, profile, project, prof, proj
-        )
         manifest = {
             "stella_version": STELLA_VERSION,
             "format": FORMAT_VERSION,
@@ -1446,6 +1555,39 @@ def _validate_schema(manifest: dict) -> None:
         raise StellaError("export manifest is missing profile or project")
     validate_slug(proj.get("name", ""), "project name in export")
     _validate_project_block(proj)
+
+
+def _validate_export_manifest(manifest: dict) -> None:
+    """Validate a manifest Stella is about to write (R38) with the
+    same rules verify + import use: kind, format, the schema
+    check, and the settings values. A project with a hand-edited
+    status of "banana" is refused here, before anything is
+    written, with the same plain error import would give — Stella
+    must not make a package its own verify refuses. The manifest
+    is validated on a deep copy: the schema check normalizes
+    legacy statuses in memory, and export must not repair (or
+    rewrite) the stored record — it refuses and names the bad
+    value, so the user fixes the source."""
+    candidate = copy.deepcopy(manifest)
+    _validate_kind(candidate)
+    _validate_format(candidate)
+    _validate_schema(candidate)
+    # Settings VALUES are the model layer's job (T6): the schema
+    # check only checks the shape, so the values are validated
+    # here the same way import validates them before creating
+    # anything. An adapter package carries no project block.
+    blocks: list[dict] = []
+    if candidate.get("kind") == PROFILE_PACKAGE_KIND:
+        blocks = candidate.get("projects") or []
+    elif candidate.get("kind") == ADAPTER_PACKAGE_KIND:
+        blocks = []
+    else:
+        project = candidate.get("project")
+        blocks = [project] if isinstance(project, dict) else []
+    for block in blocks:
+        merged = dict(DEFAULT_SETTINGS)
+        merged.update(block.get("settings") or {})
+        validate_settings(merged)
 
 
 def _load_manifest(path: Path) -> dict:
@@ -2226,6 +2368,8 @@ def _create_profile_from_manifest(store, slug, prof) -> None:
 def _restore_project_record(
     store, slug, proj, package_root, payload_dir, warnings,
     progress: _CopyProgress | None = None,
+    *,
+    is_recipe: bool = False,
 ) -> dict:
     """Create one project from a manifest block and restore its
     payload (weights, probe results, checkpoints, notes, sleep
@@ -2237,18 +2381,35 @@ def _restore_project_record(
     collision BEFORE this runs, so a bad value or a taken name
     cannot strand a half-created project behind it. The status
     rule (T41) applies here: a finished status with no weights
-    behind it imports as a draft, with a warning.
+    behind it imports as a draft, with a warning — except for a
+    recipe (R36): a recipe never carries weights by design, so
+    the "Train it first" warning is wrong there (training cannot
+    fix it) and the project keeps its status instead of being
+    demoted.
     """
     project_slug = validate_slug(proj["name"], "project name in export")
     weight_items = _package_weights(payload_dir)
     status = proj.get("status") or "draft"
     if status in WEIGHT_STATUSES and not weight_items:
-        warnings.append(
-            f"the package says project {project_slug!r} is {status}, "
-            "but it carries no trained weights, so it imports as a "
-            "draft. Train it first, then export again."
-        )
-        status = "draft"
+        if is_recipe:
+            # R36: a recipe is the settings and dataset, not the
+            # trained model — no weights is the design, not a
+            # defect. The warning says so plainly, and the status
+            # is kept: the recipe describes a finished project.
+            warnings.append(
+                f"this recipe carries no trained weights by design "
+                f"(a recipe is the settings and dataset, not the "
+                f"trained model). Project {project_slug!r} keeps "
+                f"its status of {status}, but it has no adapter "
+                "until it is trained."
+            )
+        else:
+            warnings.append(
+                f"the package says project {project_slug!r} is {status}, "
+                "but it carries no trained weights, so it imports as a "
+                "draft. Train it first, then export again."
+            )
+            status = "draft"
     metamorph = proj.get("metamorph") or {}
     created = store.create_project(
         slug,
@@ -2542,6 +2703,10 @@ def import_export(
             into_profile=into_profile,
             into_project=into_project,
         )
+    # R39: the size cap and the free-space check run before any
+    # decision or creation — an oversized package or a full disk
+    # refuses while the home is still untouched.
+    _check_import_fits(store, path, [path])
     # A recipe import (T170) is a project import with a different
     # label in the history: the body below is shared, and the
     # recipe's missing payload (no weights, no checkpoints) is
@@ -2662,6 +2827,9 @@ def import_export(
             replaced_trash = store.delete_project(slug, project_slug)
         restored = _restore_project_record(
             store, slug, restore_block, path, path, warnings, progress,
+            # R36: a recipe import skips the weights warning and
+            # the demotion — a recipe never carries weights.
+            is_recipe=(package_label == "recipe"),
         )
         created = restored["project"]
     except BaseException:
@@ -2805,6 +2973,9 @@ def import_profile_export(
         store, slug, prof, profile_choice, on_profile_conflict, warnings
     )
     payload_dirs = [path / "projects" / name for name in names]
+    # R39: the size cap and the free-space check, before anything
+    # is created — see import_export.
+    _check_import_fits(store, path, payload_dirs)
     progress = _CopyProgress(
         _import_total_bytes(path, payload_dirs), on_progress, should_stop,
     )
@@ -3030,6 +3201,9 @@ def import_adapter_export(
                 f"the base model {tag!r} is not installed on this "
                 "PC. Pull it before training."
             )
+    # R39: the size cap and the free-space check, before anything
+    # is created — see import_export.
+    _check_import_fits(store, path, [path])
     progress = _CopyProgress(
         _import_total_bytes(path, [path]), on_progress, should_stop,
     )

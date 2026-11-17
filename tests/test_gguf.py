@@ -1420,8 +1420,12 @@ def test_estimate_export_names_merged_output_and_time(tmp_path):
     assert estimate["merged_bytes"] == 3_460_000_000
     # 1.73B params at Q4_K_M's 4.85 bits per weight.
     assert estimate["gguf_bytes"] == int(1_730_000_000 * 4.85 / 8)
+    # R31: the disk need is the peak — merged + F16 intermediate
+    # (about the merged size again) + GGUF output, all on disk at
+    # once during the quantize step.
+    assert estimate["f16_bytes"] == estimate["merged_bytes"]
     assert estimate["disk_bytes"] == (
-        estimate["merged_bytes"] + estimate["gguf_bytes"]
+        2 * estimate["merged_bytes"] + estimate["gguf_bytes"]
     )
     assert estimate["quant"] == "Q4_K_M"
     assert estimate["time_note"]
@@ -1476,3 +1480,104 @@ def test_merge_adapter_emits_loading_with_model_name(tmp_path):
     assert len(loading) == 1
     assert loading[0]["model"] == "test/tiny-model"
     assert "test/tiny-model" in loading[0]["message"]
+
+
+# -- v0.26.0: R31 — the export refuses on a short disk ---------------
+
+
+def test_export_gguf_refuses_when_disk_is_short(monkeypatch, tmp_path):
+    """R31: the export refuses up front when the disk cannot hold
+    the peak (merged + F16 + output) — before any merge work,
+    with the peak named."""
+    import shutil
+    from collections import namedtuple
+
+    usage = namedtuple("usage", "total used free")
+    store = _estimable_export_project(tmp_path)
+    # Peak: 2 * 3.46 GB merged + ~1.05 GB GGUF. Free space that
+    # covers merged + output (the old, wrong need) must refuse.
+    monkeypatch.setattr(
+        shutil, "disk_usage",
+        lambda path: usage(10**10, 0, 3_460_000_000 + 1_050_000_000),
+    )
+    with pytest.raises(StellaError, match="Not enough free disk"):
+        export_gguf(
+            store, "p1", "proj", tmp_path / "out",
+            _runner=FakeRunner(),
+        )
+
+
+def test_format_export_estimate_names_peak_disk(tmp_path):
+    """R31: the estimate text names the peak disk need, so the
+    user sees the F16 intermediate in the number."""
+    from stella.gguf import estimate_export, format_export_estimate
+
+    store = _estimable_export_project(tmp_path)
+    text = format_export_estimate(estimate_export(store, "p1", "proj"))
+    assert "busiest point" in text
+    assert "F16" in text
+    assert "7.4 GB" in text  # 2 x 3.2 GB merged + ~1.0 GB GGUF
+
+
+# -- v0.26.0: R33 — interrupts clean up the merged weights -----------
+
+
+def test_export_gguf_interrupt_removes_merged_dir(tmp_path):
+    """R33: a Ctrl+C during the convert leaves no merged weights
+    behind — the interrupt is still re-raised, never swallowed."""
+    from stella.model import Store
+
+    store = Store(tmp_path / "home")
+    store.create_profile("tiny", base_ref="test/tiny-model")
+    store.create_project("tiny", "proof")
+    adapter = store.project_dir("tiny", "proof") / "adapter"
+    adapter.mkdir()
+    (adapter / "adapter_config.json").write_text("{}\\n")
+    out = tmp_path / "out"
+
+    def interrupting_runner(cmd):
+        if "convert_hf_to_gguf.py" in cmd[1]:
+            raise KeyboardInterrupt()
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    def fake_merge(base_ref, adapter_dir, merged_dir, **kwargs):
+        merged_dir.mkdir(parents=True)
+        (merged_dir / "config.json").write_text('{"model_type": "gpt2"}\\n')
+        (merged_dir / "model.safetensors").write_bytes(b"fake weights")
+        return merged_dir
+
+    import stella.gguf as gguf_mod
+
+    real_merge = gguf_mod.merge_adapter
+    gguf_mod.merge_adapter = fake_merge
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            export_gguf(
+                store, "tiny", "proof", out,
+                _runner=interrupting_runner,
+            )
+    finally:
+        gguf_mod.merge_adapter = real_merge
+    assert not (out / "proof-merged-hf").exists()
+
+
+def test_convert_interrupt_removes_partial_gguf(tmp_path):
+    """R33: a Ctrl+C during the quantize leaves no partial GGUF
+    behind."""
+    hf = fake_hf_dir(tmp_path)
+
+    def interrupting_runner(cmd):
+        if "convert_hf_to_gguf.py" in cmd[1]:
+            out = Path(cmd[cmd.index("--outfile") + 1])
+            out.write_bytes(b"GGUF-f16-fake")
+            return
+        if "llama-quantize" in cmd[0]:
+            Path(cmd[2]).write_bytes(b"half-written")
+            raise KeyboardInterrupt()
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    target = tmp_path / "model-q4_k_m.gguf"
+    with pytest.raises(KeyboardInterrupt):
+        convert_to_gguf(hf, target, _runner=interrupting_runner)
+    assert not target.exists()
+    assert not (tmp_path / "model-q4_k_m.f16.gguf").exists()

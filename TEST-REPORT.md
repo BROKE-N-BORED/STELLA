@@ -1,3 +1,52 @@
+# STELLA v0.26.0 — Test Report
+
+Verified 2026-11-17 by the coordinator from a FRESH UNZIP of
+stella-v0.26.zip (1,118,059 bytes, SHA-256
+dca72ee7546cf61e9147e59fe20d8f76a7b99aae0e21c5f1ecb95b162eaed215),
+not from the builders' claims. Python 3.12.3, PySide6 offscreen Qt,
+forge-v2-testenv; TMPDIR under the workspace.
+
+## Suite: 1569 passed, 64 skipped (1633 collected)
+
+The single-process full run OOMs on this 6 GB VM, so the suite ran
+in 4 chunks from the same fresh unzip: non-GUI 1205 passed + 64
+skipped, test_gui.py in 3 chunks (126 + 119 + 119 passed). Counts
+reconcile exactly to the 1633 collected. Zero failures in the
+completed runs. A runtime restart killed the first GUI chunk-02
+run at ~60% with one unidentified failure showing in the dots;
+the full re-run of that chunk is 119/119 green, so it was a load
+flake (load average above 25 at the time), not a regression.
+
+## CLI smoke: green
+
+`stella-cli --version` reports 0.26.0; `create-project --help`
+still lists `--method` (R28); `export-gguf --help` lists
+`--from-sleep` (R3, still there).
+
+## GUI drive: green
+
+drive_gui.py offscreen: window opens, job buttons Train / Sleep /
+Make smaller / Teach a small model, Go, Export GGUF, Run refusal
+probe, Install training. Screenshot eyeballed clean — and it
+visibly proves R41: the status bar reads "Ready." with a live
+session, not "Pick a profile to begin."
+
+## Sweeps
+
+Em-dash sweep of non-docstring string literals: 0 hits. Secrets
+grep: clean. Zip modes: all scripts 0o100755, all plain files
+0o100644, file-type bits present; all entries deflated.
+
+## Merge notes
+
+Two conflicts, both additive: tests/test_gui.py (both builders
+added tests at the same spot — kept both) and tests/test_v26.py
+(both builders created it — combined: one copy of the version
+tests + each half's slice tests). No merge-interaction defects
+this version (unlike v0.25.0's R3/R4 modal hang).
+
+---
+
 # STELLA v0.25.0 — Test Report
 
 Verified 2026-11-17 by the coordinator from a FRESH UNZIP of

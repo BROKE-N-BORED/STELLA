@@ -108,6 +108,10 @@ DEFAULT_REGISTRY = "registry.ollama.ai"
 # Slack on top of the estimated output size for the disk check.
 DISK_SLACK_BYTES = 10 * 1024 * 1024
 
+# A hung quantizer fails instead of hanging forever (R34): the
+# same 30-minute bound export gives its converter (gguf.py).
+SUBPROCESS_TIMEOUT_SECONDS = 30 * 60
+
 
 def validate_quant(quant: str) -> str:
     """Normalize a quant name, or reject it in plain words."""
@@ -213,9 +217,11 @@ def _read_gguf_source_quant(path: Path) -> tuple[str | None, float | None]:
 
     Parses just the header: magic, counts, metadata (skipped), then
     the tensor list. Returns (quant name, bits per weight) for the
-    most common tensor type, or (None, None) when the header cannot
-    be read. Never raises: a failed read just means the disk
-    estimate falls back to a cautious guess.
+    quant holding the most BYTES in the file (R29: a count vote is
+    a near-tie on real models, while the bytes are not), or
+    (None, None) when the header cannot be read. Never raises: a
+    failed read just means the disk estimate falls back to a
+    cautious guess.
 
     The header is read by streaming, in 1 MB chunks, instead of
     truncating the file at 1 MB: a real Ollama GGUF blob's
@@ -297,24 +303,45 @@ def _read_gguf_source_quant(path: Path) -> tuple[str | None, float | None]:
             pos += 4
             skip_value(vtype)
 
-        counts: dict[int, int] = {}
+        # R29: the vote is weighted by BYTES, not by tensor count.
+        # The real lfm3 blob is 136 Q5_K tensors vs 133 F32 — a
+        # near-tie by count, while the F32s are tiny norms and
+        # biases. One more norm family would have flipped the call
+        # to F32, suppressing the double-quant warning and
+        # collapsing the disk estimate. Each tensor's bytes are
+        # elements x bits-per-weight, from the dims already parsed.
+        type_bytes: dict[int, float] = {}
         for _ in range(min(tensor_count, 10000)):
             read_string()
             need(4)
             n_dims = struct.unpack_from("<I", buf, pos)[0]
-            pos += 4 + 8 * n_dims
+            if n_dims > 8:
+                # A tensor with more than 8 dims is not a tensor
+                # list any more — the header is corrupt.
+                return None, None
+            pos += 4
+            need(8 * n_dims)
+            elements = 1
+            for dim in struct.unpack_from(f"<{n_dims}Q", buf, pos):
+                elements *= dim
+            pos += 8 * n_dims
             need(4)
             ttype = struct.unpack_from("<I", buf, pos)[0]
             pos += 4 + 8  # type + offset
-            counts[ttype] = counts.get(ttype, 0) + 1
+            entry = _TENSOR_TYPE_QUANT.get(ttype)
+            if entry is not None:
+                type_bytes[ttype] = (
+                    type_bytes.get(ttype, 0.0)
+                    + elements * entry[1] / 8.0
+                )
     except (struct.error, IndexError, KeyError, ValueError, EOFError,
             OSError):
         return None, None
     finally:
         handle.close()
-    if not counts:
+    if not type_bytes:
         return None, None
-    common = max(counts, key=counts.get)
+    common = max(type_bytes, key=type_bytes.get)
     entry = _TENSOR_TYPE_QUANT.get(common)
     if entry is None:
         return None, None
@@ -557,13 +584,18 @@ def validate_new_tag(tag: str) -> str:
 
 def _run(cmd: list[str], *, what: str, _runner=None,
          should_stop=None, on_progress=None,
-         _still_working_seconds: float = 30.0) -> None:
+         _still_working_seconds: float = 30.0,
+         timeout: float | None = SUBPROCESS_TIMEOUT_SECONDS) -> None:
     """Run a command, or hand it to the injected fake (tests).
 
     `should_stop` (a no-arg callable, T74) cancels a long command:
     the process is polled and killed when the flag flips, so the
     job card's Cancel button stops the quantizer instead of
     waiting for it. A Ctrl+C kills the child too before re-raising.
+    `timeout` (R34) bounds the wait at 30 minutes by default,
+    like export's converter: a hung quantizer is killed and fails
+    with a plain-words message naming the timeout, instead of
+    running forever.
 
     The child's output streams (S21): a reader thread hands each
     line to the main loop as it arrives, and per-tensor lines
@@ -609,6 +641,7 @@ def _run(cmd: list[str], *, what: str, _runner=None,
     thread = threading.Thread(target=reader, daemon=True)
     thread.start()
     started = time.monotonic()
+    deadline = None if timeout is None else started + timeout
     last_still_working = started
     saw_count = False
     last_done = -1
@@ -636,6 +669,21 @@ def _run(cmd: list[str], *, what: str, _runner=None,
                 proc.kill()
                 proc.wait()
                 raise StellaError("Cancelled.")
+            # R34: a hung quantizer stops on the timeout, with a
+            # plain-words message naming it — the same shape as
+            # export's converter timeout (gguf._run).
+            if deadline is not None and time.monotonic() >= deadline:
+                proc.kill()
+                proc.wait()
+                if timeout >= 60:
+                    span = f"{timeout / 60:.0f} minutes"
+                else:
+                    span = f"{timeout:g} seconds"
+                raise StellaError(
+                    f"the quantizer timed out after {span}. The "
+                    "requant was stopped. Try again, or check the "
+                    "llama.cpp install."
+                )
             if (
                 on_progress is not None
                 and not saw_count
@@ -773,17 +821,22 @@ def requant_model(
     # Disk check before writing: the output is roughly the source
     # size scaled by the bits per weight. Unknown source quant
     # assumes a cautious 3 bits per weight, so the estimate is an
-    # upper bound.
+    # upper bound. R32: the peak is TWICE the output — `ollama
+    # create` copies the file into Ollama's blob store while the
+    # work file is still on disk, and the work file is kept after
+    # a successful create — so the old estimate (output + slack)
+    # understated the job by about one whole output file.
     target_bpw = _QUANT_BPW[quant]
     ratio = target_bpw / (source_bpw or 3.0)
     estimate = max(int(source_bytes * ratio), source_bytes // 20)
-    needed = estimate + DISK_SLACK_BYTES
+    needed = 2 * estimate + DISK_SLACK_BYTES
     free = shutil.disk_usage(work).free
     if free < needed:
         raise StellaError(
             f"Not enough free disk to shrink {tag!r}. The smaller "
-            f"model needs about {_format_size(needed)} free, and "
-            f"this disk has {_format_size(free)} free. Free some "
+            f"model needs about {_format_size(needed)} free (the "
+            "new file, plus Ollama's own copy of it), and this "
+            f"disk has {_format_size(free)} free. Free some "
             "space and try again."
         )
 
@@ -832,10 +885,14 @@ def requant_model(
             # as progress events, so the run never goes quiet.
             on_progress=emit,
         )
-    except StellaError:
-        # A failed or cancelled run leaves a partial file behind;
-        # remove it so a half-written model never sits in the work
-        # folder.
+    except BaseException:
+        # A failed, cancelled, or interrupted run leaves a partial
+        # file behind; remove it so a half-written model never sits
+        # in the work folder. R33: the old handler caught
+        # StellaError only, so Ctrl+C (a BaseException) and a disk
+        # error (OSError) left the partial file behind. The
+        # interrupt is re-raised, never swallowed, and the cleanup
+        # itself never raises.
         try:
             out_path.unlink(missing_ok=True)
         except OSError:
@@ -870,12 +927,32 @@ def requant_model(
             what=f"Registering the new model {new_tag!r} with Ollama",
             _runner=_runner,
             should_stop=should_stop,
+            # R34 scopes the timeout to the quantizer run; the
+            # create keeps no timeout (its own bound is a
+            # separate P3 task).
+            timeout=None,
         )
     except StellaError as exc:
         raise StellaError(
             f"{exc}\nThe smaller file is still at {out_path}. "
             "Is Ollama running? Start it and try again."
         ) from exc
+    except BaseException:
+        # R33: an interrupted create (Ctrl+C, a disk error) leaves
+        # no work files behind either — the same cleanup as the
+        # failed quantize above. A plain StellaError keeps the
+        # file on purpose (the message above names it, so the user
+        # can retry the create); an interrupt is not a retryable
+        # failure, so the work files go.
+        try:
+            out_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        try:
+            modelfile.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
     emit({"type": "created", "new_tag": new_tag})
 
     # Ollama copied the file into its own store, so the work files

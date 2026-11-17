@@ -330,15 +330,20 @@ def estimate_export(
 ) -> dict:
     """The export estimate (T153), from metadata only.
 
-    Merged size, output GGUF size, the disk the export needs
-    (both at once — the merged weights stay on disk after a
-    successful export), and a rough time band. Raises StellaError
+    Merged size, output GGUF size, the disk the export needs at
+    its busiest point, and a rough time band. Raises StellaError
     when the answer cannot be found out (no trained adapter, no
     base ref, unreadable model metadata) — the caller reports it
     plainly instead of guessing.
 
-    Returns: merged_bytes, gguf_bytes, disk_bytes, time_note,
-    quant, params, base_bytes.
+    The disk figure is the PEAK (R31): during the quantize step
+    the merged weights, the F16 intermediate (about the merged
+    size again), and the GGUF output are all on disk at once —
+    2 x merged + output, not merged + output. The old figure left
+    the F16 out and understated the LFM3 peak by about 3.4 GB.
+
+    Returns: merged_bytes, gguf_bytes, f16_bytes, disk_bytes,
+    time_note, quant, params, base_bytes.
     """
     from .requant import bits_per_weight, validate_quant
     from .train import LFM3_HF_REPO, load_model_metadata
@@ -361,10 +366,15 @@ def estimate_export(
     meta = load_model_metadata(base_ref)
     merged_bytes = meta["base_bytes"]
     gguf_bytes = int(meta["params"] * bits_per_weight(quant) / 8)
+    # R31: the F16 intermediate is about the merged size again
+    # (same weights, 16-bit), and it sits on disk next to the
+    # merged weights and the output during the quantize step.
+    f16_bytes = merged_bytes
     return {
         "merged_bytes": merged_bytes,
         "gguf_bytes": gguf_bytes,
-        "disk_bytes": merged_bytes + gguf_bytes,
+        "f16_bytes": f16_bytes,
+        "disk_bytes": 2 * merged_bytes + gguf_bytes,
         "time_note": _export_time_note(merged_bytes),
         "quant": quant,
         "params": meta["params"],
@@ -382,11 +392,16 @@ def _fmt_size(n: int) -> str:
 
 def format_export_estimate(estimate: dict) -> str:
     """The one-line export estimate for the button label (T153):
-    merged size, output size, rough time — no settings (T16)."""
+    merged size, output size, rough time — no settings (T16).
+    The peak disk need rides along (R31), so the label never
+    promises an export the disk cannot hold."""
     return (
         f"Export merges about {_fmt_size(estimate['merged_bytes'])}, "
         f"then writes about a {_fmt_size(estimate['gguf_bytes'])} "
-        f"GGUF file ({estimate['quant']}). "
+        f"GGUF file ({estimate['quant']}). Needs about "
+        f"{_fmt_size(estimate['disk_bytes'])} free on disk at the "
+        f"busiest point (merged weights, F16 file, and GGUF file "
+        f"together). "
         f"{estimate['time_note'].capitalize()}."
     )
 
@@ -510,6 +525,11 @@ def convert_to_gguf(
     def cancelled() -> bool:
         return should_stop is not None and should_stop()
 
+    # R33: the quantizer writes the output file, so a failure
+    # after it starts can leave a partial GGUF behind. The flag
+    # below marks that point — a failure before it must not
+    # delete a pre-existing output file.
+    quantize_started = False
     try:
         if cancelled():
             raise StellaError("Cancelled.")
@@ -537,6 +557,7 @@ def convert_to_gguf(
             "type": "phase", "phase": "quantize",
             "message": f"Quantizing to {quant}...",
         })
+        quantize_started = True
         _run(
             [str(quantize), str(tmp_f16), str(out_path), quant],
             _runner=_runner,
@@ -548,15 +569,38 @@ def convert_to_gguf(
             raise StellaError(
                 f"quantizer finished but wrote no file: {out_path}"
             )
-    except StellaError as exc:
+    except BaseException as exc:
         # A failed quantize used to leave the F16 intermediate
         # behind — ~3.4 GB on a real model (T26). Remove it and say
-        # so in the error.
+        # so in the error. R33: the old handler caught StellaError
+        # only, so Ctrl+C (a BaseException) and a disk error
+        # (OSError) left the F16 behind. Only a StellaError gains
+        # the "removed" note — an interrupt is re-raised bare,
+        # never rewritten — and the cleanup itself never raises.
+        removed = []
         if tmp_f16.is_file():
-            tmp_f16.unlink()
-            raise StellaError(
-                f"{exc} The half-finished F16 file was removed."
-            ) from exc
+            try:
+                tmp_f16.unlink()
+                removed.append("F16 file")
+            except OSError:
+                pass
+        if quantize_started and out_path.is_file():
+            try:
+                out_path.unlink()
+                removed.append("GGUF file")
+            except OSError:
+                pass
+        if isinstance(exc, StellaError) and removed:
+            if len(removed) == 1:
+                note = (
+                    f"The half-finished {removed[0]} was removed."
+                )
+            else:
+                note = (
+                    "The half-finished "
+                    f"{' and '.join(removed)}s were removed."
+                )
+            raise StellaError(f"{exc} {note}") from exc
         raise
     if tmp_f16.is_file() and _runner is None:
         tmp_f16.unlink()  # the F16 intermediate is 2x the size; drop it
@@ -839,6 +883,41 @@ def export_gguf(
             )
     if base_arch is not None and llama_cpp is not None:
         check_converter_supports_arch(base_arch, llama_cpp[0])
+    # R31: the disk guard — the export's peak is the merged
+    # weights plus the F16 intermediate (about the merged size
+    # again) plus the GGUF output, all on disk at once during the
+    # quantize step. Refused up front, before the merge and the
+    # job lock, with the peak named. Skipped when the metadata
+    # could not be read (a test fake world): the merge guard
+    # raises its own error there. An unreadable disk is not a
+    # reason to refuse — the copy itself fails readably then.
+    if meta is not None:
+        from .requant import bits_per_weight as _bits_per_weight
+
+        params = meta.get("params")
+        if params is None:
+            # A metadata read that never counted params (a test
+            # fake, or a future reader): derive them from the
+            # weight bytes instead of crashing the guard.
+            bpp = meta.get("bytes_per_param") or 2
+            params = max(1, meta["base_bytes"] // bpp)
+        peak_bytes = (
+            2 * meta["base_bytes"]
+            + int(params * _bits_per_weight(quant) / 8)
+        )
+        try:
+            free_bytes = shutil.disk_usage(dest).free
+        except OSError:
+            free_bytes = None
+        if free_bytes is not None and free_bytes < peak_bytes:
+            raise StellaError(
+                "Not enough free disk to export: the export needs "
+                f"about {_fmt_size(peak_bytes)} free at its busiest "
+                "point (the merged weights, plus the F16 file the "
+                "converter writes, plus the GGUF file), and this "
+                f"disk has {_fmt_size(free_bytes)} free. Free some "
+                "space, or export to a different folder."
+            )
 
     def emit(event: dict):
         if on_event is not None:
@@ -873,11 +952,22 @@ def export_gguf(
                 llama_cpp=llama_cpp, _runner=_runner,
                 on_event=on_event, should_stop=should_stop,
             )
-        except StellaError as exc:
+        except BaseException as exc:
             # A failure after the merge leaves no orphaned merged
             # weights behind (T26): remove the merged dir and say so.
+            # R33: the old handler caught StellaError only, so
+            # Ctrl+C and a disk error left the merged weights
+            # behind. Only a StellaError gains the "removed" note;
+            # an interrupt is re-raised bare, and the cleanup
+            # itself never raises.
+            removed = False
             if merged_dir.exists():
-                shutil.rmtree(merged_dir)
+                try:
+                    shutil.rmtree(merged_dir)
+                    removed = True
+                except OSError:
+                    pass
+            if isinstance(exc, StellaError) and removed:
                 raise StellaError(
                     f"{exc} The half-finished merged weights were removed."
                 ) from exc

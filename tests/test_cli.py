@@ -2213,3 +2213,65 @@ def test_cli_train_shows_eta_after_two_steps(home, monkeypatch, capsys):
     assert lines[2].endswith(", about 7 minutes left")
     # Step 5: 4 steps in 240s, 5 to go: 5 minutes.
     assert lines[4].endswith(", about 5 minutes left")
+
+
+# -- v0.26.0: R28 — method full cannot be set from the CLI -----------
+
+
+def test_cli_create_project_method_full_refused(home):
+    """R28: --method full is refused in plain words, and no
+    project is created."""
+    from stella.model import Store
+
+    run_cli(home, "create-profile", "p1")
+    res = run_cli(
+        home, "create-project", "p1", "proj", "--method", "full",
+    )
+    assert res.returncode == 1
+    assert "method full is not available" in res.stderr
+    assert "LoRA" in res.stderr
+    assert not (Store(home).project_dir("p1", "proj")
+                / "project.json").exists()
+
+
+def test_cli_update_project_method_full_refused(home):
+    """R28: --method full is refused on update-project too, and
+    the stored settings are untouched."""
+    from stella.model import Store
+
+    _seed_cli_home(home)
+    res = run_cli(
+        home, "update-project", "p1", "proj", "--method", "full",
+    )
+    assert res.returncode == 1
+    assert "method full is not available" in res.stderr
+    assert Store(home).get_project("p1", "proj")["settings"]["method"] == "lora"
+
+
+def test_cli_method_lora_passes_through(home):
+    """R28: --method lora still works — it is what every run
+    trains."""
+    from stella.model import Store
+
+    run_cli(home, "create-profile", "p1")
+    res = run_cli(
+        home, "create-project", "p1", "proj", "--method", "lora",
+    )
+    assert res.returncode == 0
+    assert Store(home).get_project("p1", "proj")["settings"]["method"] == "lora"
+
+
+def test_cli_show_project_warns_on_stored_full(home):
+    """R28: a project stored with method full (set before v0.26.0)
+    warns in show-project, so the listing never implies a full run
+    is coming."""
+    from stella.model import Store
+
+    _seed_cli_home(home)
+    Store(home).update_project(
+        "p1", "proj", settings={"method": "full"},
+    )
+    res = run_cli(home, "show-project", "p1", "proj")
+    assert res.returncode == 0
+    assert "method: full" in res.stdout
+    assert "always trains with LoRA" in res.stdout

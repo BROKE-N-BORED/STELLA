@@ -1,5 +1,132 @@
 # Changelog
 
+## v0.26.0 — 2026-11-17
+
+The first P2 batch of the 2026-11-15 full-product review (R24–R51):
+training honesty (the dry-run fit counts dataset RAM, resume refuses
+a changed dataset, a crashed run is reconciled on startup instead of
+showing "training" forever), disk guards on export and requant,
+cleanup that runs on interrupts too, a distill run that survives a
+bad prompt, the end of `method: full` on the CLI, a status bar that
+stays true, a fit verdict that no longer calls the recommended
+starter too big, chat history that stops growing without bound, and
+dated cloud model lists with a staleness warning. Full record:
+docs/stella-review-task-list-2026-11-15.md.
+
+- R24 — The dry-run fit answer counts dataset RAM as well as
+  training RAM (`total_bytes` added), and the format names the
+  dataset's share.
+- R25 — Offline, a single-file model link is no longer refused when
+  the weights are already cached: the remote metadata path reads
+  config + weight sizes from the HF cache first (no network, no
+  huggingface_hub). A genuine refusal names the next step.
+- R26 — Checkpoints carry a dataset fingerprint (SHA-256 + row
+  count); resuming after editing the dataset is refused before the
+  lock is taken, instead of silently training the wrong rows. Old
+  fingerprint-less checkpoints warn and continue.
+- R27 — A hard crash no longer leaves a run showing "training"
+  forever: `reconcile_stale_training` marks crashed runs `paused`
+  (checkpoints exist) or `failed` (none), logs `run_crashed`, and
+  no-ops while the job lock is held. It runs at CLI startup and in
+  the main window, which also shows a crash notice + resume offer
+  in the status bar.
+- R28 — `method: full` can no longer be set from the command line:
+  create/update-project refuse it in plain words, and show-project
+  and train warn on a stored `full`. The `--method` flag stays, so
+  `full` gets a plain-words refusal instead of argparse's error.
+- R29 — The GGUF parser picks the quant by bytes (elements x
+  bits-per-weight), not by tensor count, so a near-tie can no
+  longer pick the wrong one.
+- R30 — A distill timeout or failure no longer aborts the whole
+  run: each prompt retries once, then is skipped, recorded, and
+  warned about, and the run continues. The timeout message says
+  the teacher is slow, not down. The report gains `failed` /
+  `failed_prompts`; the CLI prints warnings even under `--quiet`;
+  the GUI logs them.
+- R31 — Export has a disk guard: `estimate_export` returns
+  `f16_bytes` and a peak `disk_bytes` (2x merged + output), the
+  format names the F16 file, and `export_gguf` refuses up front
+  on a short disk.
+- R32 — The requant disk estimate counts Ollama's blob copy
+  (2x estimate + slack, named in the message).
+- R33 — Cleanup runs on interrupts too: the cleanup handlers in
+  requant, `convert_to_gguf`, and `export_gguf` catch
+  `BaseException` and re-raise interrupts bare. `convert_to_gguf`
+  also removes a partial GGUF output once quantize has started
+  (never a pre-existing file).
+- R34 — The requant subprocess has a 30-minute timeout; a hung
+  quantizer is killed with a plain-words error. `ollama create`
+  keeps no timeout (a model load is not a hung process).
+- R35 — Teacher answers are no longer silently cut off at 1024
+  tokens: `ollama.generate_full` returns the done reason, and
+  distill skips length-truncated answers (counted, never saved).
+- R36 — Importing a recipe from a finished project keeps the
+  project's status with a truthful "carries no trained weights by
+  design" warning — no demotion, no "Train it first".
+- R37 — The model layer type-checks what it is given
+  (`_require_text` / `_require_config` / `_require_dependencies`
+  in create/update profile and project); a bare-string
+  dependencies value is refused, never shredded into characters.
+- R38 — Export checks what it writes: `_validate_export_manifest`
+  runs in all four exporters before anything is written, so Stella
+  no longer exports packages its own verify refuses.
+- R39 — Import has size and disk guards: a 10 GB package cap
+  enforced from the zip headers before extraction, plus a
+  free-space check on folder imports.
+- R40 — Cloning a profile names its dropped projects:
+  `clone_profile` returns `skipped_damaged_projects` (name +
+  error), and the GUI clone handler warns naming them, instead of
+  reporting success over a silent drop.
+- R41 — The status bar no longer says "Pick a profile to begin."
+  while a session is live: refresh replaces the stale line with
+  "Ready.", but only when the current message IS that stale line,
+  so a fresher action message is never clobbered.
+- R42 — The Settings Ollama status text no longer overlaps the
+  Refresh button when the window opens: the relayout is forced the
+  moment the status text lands. Word wrap was already set and was
+  not re-added.
+- R43 — The fit verdict is reconciled, not just reworded: the
+  picker formula is now 1.0 GB/param-B + 2.7 GB fixed (resident
+  weights + activations/headroom/LoRA state from the training
+  estimator), so LFM3 1.7B reads 4.4 GB against the recalibrated
+  4.34 GB (was 6.4 GB). The verdict is judged against total RAM
+  (stable) instead of free RAM (transient); the too-big line says
+  Stella checks free RAM again at train time. A test pins the
+  picker and the training estimator together so they cannot drift
+  again.
+- R44 — The run-button row moved above the progress bar in the
+  glanceable card, so it is no longer clipped at 1366x768
+  (measured offscreen: row bottom 605 px vs 664 px viewport).
+- R45 — A typed cloud-model pick is kept when Ollama is down: the
+  no-models branch sets `_awaiting_model`, and a refresh landing
+  on the no-models state no longer repeats its message.
+- R46 — Chat history is bounded: at most the last 20 messages are
+  sent per turn, cut on a user-message boundary so a tool result
+  is never orphaned from its call. The full history stays in the
+  window.
+- R47 — Every tool block in a reply runs (each counts against the
+  12-call cap), and the plain text has every block stripped, so a
+  second tool block's raw JSON no longer leaks into the chat. A
+  malformed second block gets the same garbled-call recovery as
+  the first.
+- R48 — Tool JSON in a ```json fence, or in an unclosed fence with
+  complete JSON, is parsed and run instead of being shown as raw
+  text. A ```json block with no `"tool"` key stays text.
+- R49 — The template walk is tracked, not just prompted:
+  `template_step_for` derives the step from real store state
+  (profile, project, dataset, status, passed probe, export), the
+  system prompt carries the current step, step changes are
+  narrated, and the Chat window shows a step label.
+- R50 — The agent loop fetches the Ollama model list once per turn
+  (`_turn_models`, cleared in a `finally`), instead of up to 12
+  tag fetches per loop.
+- R51 — The curated Groq/Gemini lists carry a `checked` date
+  (2026-11-17), with a 90-day staleness threshold; Settings shows
+  a plain-words freshness label in the AI providers section,
+  hidden while fresh. No online check was added (that needs
+  Joshua's say-so first); each release re-checks the lists and
+  moves the dates.
+
 ## v0.25.0 — 2026-11-17
 
 The P1 batch of the 2026-11-15 full-product review (R1–R18): the

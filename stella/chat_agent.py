@@ -36,7 +36,7 @@ from .gguf import export_gguf
 from .howto import topic_text, topic_titles
 from .model import StellaError, Store, slug_from_model
 from .ollama import OllamaError, chat_stream, list_models
-from .probe import probe_gate, probe_project
+from .probe import load_probe_results, probe_gate, probe_project
 from .providers import ProviderError, make_chat_fn
 from .provision import (
     format_size,
@@ -58,6 +58,14 @@ from .train import (
 # How many tool calls one user message may trigger. A confused model
 # that keeps calling tools forever is stopped here, in plain words.
 MAX_TOOL_CALLS = 12
+
+# How much history the model is sent (R46): the last 20 messages,
+# about 10 turns. The full history stays in the window; only what
+# is SENT is bounded, so a long chat stops re-paying for the whole
+# conversation on cloud models with every turn. The window is cut
+# on a user-message boundary, never between a tool call and its
+# result (see _messages).
+MAX_HISTORY_MESSAGES = 20
 
 # The plan-first flow (T76): "just do it" shows the plan and waits.
 # A trigger starts a plan; an approval runs the pending plan; a
@@ -125,6 +133,14 @@ TEMPLATE_STEPS: list[tuple[str, str, str]] = [
 # for imports and stored projects — the chat just never touches them.
 
 TOOL_BLOCK_RE = re.compile(r"```tool\s*\n?(.*?)\n?```", re.DOTALL)
+
+# R47/R48: every fenced block that could hold a tool call — a
+# ```tool block (the protocol) or a ```json block holding a tool
+# object (the fence small models most commonly produce), closed
+# or unclosed (a truncated reply). The closing fence is optional:
+# an unclosed block runs to the end of the reply, and counts when
+# the JSON in it is otherwise complete.
+FENCE_RE = re.compile(r"```(tool|json)\s*\n?(.*?)(?:```(?!\w)|$)", re.DOTALL)
 
 # One line per tool, for the system prompt. Keep these short: the
 # model reads them on every turn, and small models drown in text.
@@ -230,32 +246,97 @@ class ToolParseError(Exception):
     """The model emitted a tool block that is not usable JSON."""
 
 
+def parse_tool_calls(text: str) -> tuple[str, list[tuple[str, dict]]]:
+    """Split a model reply into (plain text, [(tool name, args), ...]).
+
+    Every fenced tool block in the reply is returned (R47): a reply
+    with two tool blocks runs both, and no tool block's raw JSON
+    ever reaches the plain text. A ```json block counts only when
+    it parses as an object with a string "tool" key (R48) — a plain
+    JSON example stays text. An unclosed fence counts when the JSON
+    in it is otherwise complete; words after the JSON in an
+    unclosed block stay in the plain text. A ```tool block that is
+    not valid JSON, or names no tool, raises ToolParseError — the
+    same garbled-call recovery as before, for every block, not
+    just the first.
+    """
+    calls: list[tuple[str, dict]] = []
+    consumed: list[tuple[int, int]] = []
+    for match in FENCE_RE.finditer(text):
+        kind = match.group(1)
+        body = match.group(2)
+        closed = match.group(0).endswith("```")
+        stripped = body.strip()
+        payload: object = None
+        end = match.end()
+        try:
+            payload = json.loads(stripped)
+        except json.JSONDecodeError as exc:
+            if closed:
+                if kind == "json":
+                    # Not a tool call: a JSON example, or JSON the
+                    # model mangled. It stays text, untouched.
+                    continue
+                raise ToolParseError(
+                    f"the tool block was not valid JSON: {exc}"
+                ) from exc
+            # Unclosed: take the first JSON value, if there is a
+            # complete one, and let words after it stay text.
+            try:
+                payload, end_index = json.JSONDecoder().raw_decode(stripped)
+            except json.JSONDecodeError:
+                if kind == "json":
+                    continue
+                raise ToolParseError(
+                    f"the tool block was not valid JSON: {exc}"
+                ) from exc
+            leading = len(body) - len(body.lstrip())
+            end = match.start(2) + leading + end_index
+        if kind == "json":
+            # Gate: only a tool object counts. A JSON example, a
+            # list, or an object without a "tool" name stays text.
+            if not isinstance(payload, dict):
+                continue
+            name = payload.get("tool")
+            if not isinstance(name, str) or not name:
+                continue
+            args = payload.get("args", {})
+            if not isinstance(args, dict):
+                raise ToolParseError(
+                    "the tool block args were not an object"
+                )
+            calls.append((name, args))
+            consumed.append((match.start(), end))
+            continue
+        if not isinstance(payload, dict):
+            raise ToolParseError("the tool block was not a JSON object")
+        name = payload.get("tool")
+        if not isinstance(name, str) or not name:
+            raise ToolParseError("the tool block named no tool")
+        args = payload.get("args", {})
+        if not isinstance(args, dict):
+            raise ToolParseError("the tool block args were not an object")
+        calls.append((name, args))
+        consumed.append((match.start(), end))
+    plain = text
+    for start, end in reversed(consumed):
+        plain = plain[:start] + plain[end:]
+    return plain.strip(), calls
+
+
 def parse_tool_call(text: str) -> tuple[str, str | None, dict | None]:
     """Split a model reply into (plain text, tool name, args).
 
-    The tool call is a fenced ```tool block holding one JSON object
-    {"tool": name, "args": {...}}. Text outside the block is
-    narration and comes back as the plain text. When there is no
-    tool block, the whole reply is plain text. A tool block that is
-    not valid JSON, or has no "tool" name, raises ToolParseError.
+    The first tool call; see parse_tool_calls for the full split.
+    The plain text still has EVERY tool block removed (R47), so a
+    second block never leaks into the chat through this path
+    either. A tool block that is not valid JSON, or has no "tool"
+    name, raises ToolParseError.
     """
-    match = TOOL_BLOCK_RE.search(text)
-    if match is None:
-        return text.strip(), None, None
-    plain = (text[: match.start()] + text[match.end() :]).strip()
-    raw = match.group(1).strip()
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ToolParseError(f"the tool block was not valid JSON: {exc}") from exc
-    if not isinstance(payload, dict):
-        raise ToolParseError("the tool block was not a JSON object")
-    name = payload.get("tool")
-    if not isinstance(name, str) or not name:
-        raise ToolParseError("the tool block named no tool")
-    args = payload.get("args", {})
-    if not isinstance(args, dict):
-        raise ToolParseError("the tool block args were not an object")
+    plain, calls = parse_tool_calls(text)
+    if not calls:
+        return plain, None, None
+    name, args = calls[0]
     return plain, name, args
 
 
@@ -266,17 +347,79 @@ def _template_text() -> str:
     return "\n".join(lines)
 
 
+def template_step_for(
+    store: Store, profile: str | None, project: str | None
+) -> tuple[int, str, str]:
+    """The template step (number, key, title) the session is on
+    (R49), derived from real store state — never from counting
+    turns, so it cannot drift from reality when the user jumps
+    around or does steps outside chat. The user is never blocked
+    from skipping a step; this only says where they are.
+
+    No profile: Goal. A profile, no project: Base model. A
+    project with no dataset: Data. Dataset set, not started:
+    Recipe (Stella picks it, nothing to set). Training, paused,
+    or failed: Train. Trained, probe not passed: Check. Trained
+    with a passed probe: Export. Exported: Test and back up.
+    """
+    if not profile:
+        return 1, "goal", "Goal"
+    try:
+        store.get_profile(profile)
+    except StellaError:
+        return 1, "goal", "Goal"
+    if not project:
+        return 2, "model", "Base model"
+    try:
+        proj = store.get_project(profile, project)
+    except StellaError:
+        return 2, "model", "Base model"
+    if not proj.get("dataset_ref"):
+        return 3, "data", "Data"
+    status = proj.get("status", "draft")
+    if status == "exported":
+        return 8, "test", "Test and back up"
+    if status == "done":
+        result = load_probe_results(store, profile, project)
+        if result is not None:
+            passed, _reason = probe_gate(result)
+            if passed:
+                return 7, "export", "Export"
+        return 6, "check", "Check"
+    if status in ("training", "paused", "failed"):
+        return 5, "train", "Train"
+    return 4, "recipe", "Recipe"
+
+
+def template_step_text(
+    store: Store, profile: str | None, project: str | None
+) -> str:
+    """The step in words: "Step 3 of 8: Data"."""
+    number, _key, title = template_step_for(store, profile, project)
+    return f"Step {number} of {len(TEMPLATE_STEPS)}: {title}."
+
+
 def build_system_prompt(
     *,
     profile: str | None,
     project: str | None,
     installed_models: list[str],
+    current_step: tuple[int, str, str] | None = None,
 ) -> str:
-    """The system prompt: template, tools, protocol, plain words."""
+    """The system prompt: template, tools, protocol, plain words.
+    `current_step` (R49) is the step the session is on, from
+    template_step_for — the model is told where it is instead of
+    having to remember."""
     session = (
         f"Current profile: {profile or 'none'}. "
         f"Current project: {project or 'none'}."
     )
+    if current_step is not None:
+        number, _key, title = current_step
+        session += (
+            f" You are currently on step {number} of "
+            f"{len(TEMPLATE_STEPS)}: {title}."
+        )
     models = (
         "Installed Ollama models: " + ", ".join(installed_models) + "."
         if installed_models
@@ -305,7 +448,8 @@ def build_system_prompt(
         "```tool\n"
         '{"tool": "list_profiles", "args": {}}\n'
         "```\n"
-        "One tool per message. Put any plain words OUTSIDE the block. "
+        "One tool per block. You can use two blocks in one message "
+        "if two things need doing. Put any plain words OUTSIDE the blocks. "
         "When the tool result comes back, answer the user in plain "
         "words. Never show the user raw JSON or tool names.\n\n"
         "Tools:\n" + tools + "\n\n" + session + "\n" + models
@@ -358,6 +502,11 @@ class ChatAgent:
         self._on_progress = on_progress
         self._on_token = on_token
         self._history: list[dict] = []
+        # R50: the installed-model list for the reply in progress —
+        # fetched once per reply(), reused by every model call in
+        # the loop, cleared when the reply ends. None outside a
+        # reply, so the list is never cached across turns.
+        self._turn_models: list[str] | None = None
         self._cancelled = False
         self._controller: TrainController | None = None
         # The plan-first flow (T76): the pending plan, if one was
@@ -426,12 +575,48 @@ class ChatAgent:
             self._on_progress(text)
 
     def _messages(self) -> list[dict]:
+        """The messages for one model call: a fresh system prompt
+        (with the current template step, R49) plus the recent
+        history, bounded (R46). The installed-model list comes
+        from the reply's single fetch when one is running (R50);
+        outside a reply it is fetched here."""
+        if self._turn_models is not None:
+            installed_models = self._turn_models
+        else:
+            installed_models = list_models()
         system = build_system_prompt(
             profile=self.current_profile,
             project=self.current_project,
-            installed_models=list_models(),
+            installed_models=installed_models,
+            current_step=self.current_template_step(),
         )
-        return [{"role": "system", "content": system}] + self._history
+        history = self._history
+        if len(history) > MAX_HISTORY_MESSAGES:
+            # Cut on a user-message boundary, so a tool result is
+            # never orphaned from the call that asked for it. The
+            # full history stays in self._history (and the
+            # window); only what is SENT is bounded.
+            window = history[-MAX_HISTORY_MESSAGES:]
+            for i, entry in enumerate(window):
+                if entry.get("role") == "user":
+                    window = window[i:]
+                    break
+            history = window
+        return [{"role": "system", "content": system}] + history
+
+    # -- the template step (R49) ------------------------------------
+    def current_template_step(self) -> tuple[int, str, str]:
+        """The template step this session is on, from real store
+        state (see template_step_for)."""
+        return template_step_for(
+            self.store, self.current_profile, self.current_project
+        )
+
+    def current_step_text(self) -> str:
+        """The step in words: "Step 3 of 8: Data"."""
+        return template_step_text(
+            self.store, self.current_profile, self.current_project
+        )
 
     # -- the plan (T76) -------------------------------------------
     @property
@@ -495,10 +680,10 @@ class ChatAgent:
 
         The reply streams token by token through on_token — but
         only the plain words. A tool block is never streamed: the
-        filter holds back from the first ```tool fence, so the
-        user never sees JSON. `last_streamed_plain` holds the
-        streamed plain words, so the window knows what is already
-        on screen and does not show it twice.
+        filter holds back from the first ```tool or ```json fence,
+        so the user never sees JSON. `last_streamed_plain` holds
+        the streamed plain words, so the window knows what is
+        already on screen and does not show it twice.
         """
         if self._on_token is not None and self._stream_fn is not None:
             self._stream_buf = ""
@@ -519,17 +704,26 @@ class ChatAgent:
         if self._stream_suppressed:
             return
         self._stream_buf += token
+        # R47/R48: a tool block is never streamed — the filter holds
+        # back from the first ```tool fence, or a ```json fence
+        # (which may hold a tool call too). Plain words after the
+        # fence still arrive in the final reply, just not live.
         idx = self._stream_buf.find("```tool")
+        json_idx = self._stream_buf.find("```json")
+        if json_idx >= 0 and (idx < 0 or json_idx < idx):
+            idx = json_idx
         if idx >= 0:
             self._emit_streamed(self._stream_buf[:idx])
             self._stream_suppressed = True
             self._stream_buf = ""
             return
         # Hold back the last few chars: a fence could be split
-        # across chunks ("``" now, "`tool" next).
-        if len(self._stream_buf) > 6:
-            self._emit_streamed(self._stream_buf[:-6])
-            self._stream_buf = self._stream_buf[-6:]
+        # across chunks ("``" now, "`tool" next). Seven chars —
+        # the length of the fences above — so no fence start can
+        # be emitted before its kind is known.
+        if len(self._stream_buf) > 7:
+            self._emit_streamed(self._stream_buf[:-7])
+            self._stream_buf = self._stream_buf[-7:]
 
     def _emit_streamed(self, text: str) -> None:
         if not text:
@@ -595,59 +789,90 @@ class ChatAgent:
             return text
         else:
             self._history.append({"role": "user", "content": user_text})
-        calls = 0
-        while calls < MAX_TOOL_CALLS:
-            if self._cancelled:
-                return "Stopped. Tell me what you want to do next."
-            try:
-                text = self._model_call(self._messages())
-            except (OllamaError, ProviderError) as exc:
-                reply = str(exc)
-                self._history.append({"role": "assistant", "content": reply})
-                return reply
-            except Exception as exc:  # noqa: BLE001 - never crash the chat
-                reply = f"The chat model hit a problem: {exc}"
-                self._history.append({"role": "assistant", "content": reply})
-                return reply
-            if self._cancelled:
-                # Cancel landed while the model call was in flight.
-                return "Stopped. Tell me what you want to do next."
-            try:
-                plain, name, args = parse_tool_call(text)
-            except ToolParseError:
-                # The model garbled its own tool call. Never crash,
-                # never show the user JSON: ask in plain words.
-                reply = (
-                    "I got mixed up there. Tell me in plain words what "
-                    "you want, for example: train LFM3 to write short "
-                    "replies, or: what projects do I have?"
-                )
-                self._history.append({"role": "assistant", "content": reply})
-                return reply
-            if name is None:
-                reply = plain or (
-                    "I did not get an answer out of that. Tell me what "
-                    "you want to do, and I will do it."
-                )
-                self._history.append({"role": "assistant", "content": reply})
-                return reply
-            calls += 1
-            if plain and not self._last_call_streamed:
-                # The plain words already streamed live when the
-                # call streamed; narrating them again would show
-                # them twice.
-                self._narrate(plain)
-            self._narrate(TOOL_NARRATION.get(name, f"Working on {name}..."))
-            result = self.call_tool(name, args or {})
-            self._history.append({"role": "assistant", "content": text})
-            self._history.append({"role": "tool", "content": result})
-            if self._cancelled:
-                return "Stopped. Tell me what you want to do next."
-        return (
+        # R50: the installed-model list is fetched once for this
+        # reply and reused by every model call in the loop (and by
+        # the tools — see _tool_create_profile). A model installed
+        # mid-loop appears on the next turn, not this one; the
+        # list is never cached across turns.
+        try:
+            self._turn_models = list_models()
+        except Exception:  # noqa: BLE001 - a failed list is an empty list
+            self._turn_models = []
+        # R49: the step before the loop, so a step change during
+        # the reply can be narrated.
+        step_before = self.current_template_step()
+        cap_reply = (
             "I have done a lot of steps in a row, so I am stopping here "
             "rather than running away with your PC. Tell me what to do "
             "next, and I will carry on."
         )
+        try:
+            calls = 0
+            while calls < MAX_TOOL_CALLS:
+                if self._cancelled:
+                    return "Stopped. Tell me what you want to do next."
+                try:
+                    text = self._model_call(self._messages())
+                except (OllamaError, ProviderError) as exc:
+                    reply = str(exc)
+                    self._history.append({"role": "assistant", "content": reply})
+                    return reply
+                except Exception as exc:  # noqa: BLE001 - never crash the chat
+                    reply = f"The chat model hit a problem: {exc}"
+                    self._history.append({"role": "assistant", "content": reply})
+                    return reply
+                if self._cancelled:
+                    # Cancel landed while the model call was in flight.
+                    return "Stopped. Tell me what you want to do next."
+                try:
+                    plain, tool_calls = parse_tool_calls(text)
+                except ToolParseError:
+                    # The model garbled its own tool call. Never crash,
+                    # never show the user JSON: ask in plain words.
+                    reply = (
+                        "I got mixed up there. Tell me in plain words what "
+                        "you want, for example: train LFM3 to write short "
+                        "replies, or: what projects do I have?"
+                    )
+                    self._history.append({"role": "assistant", "content": reply})
+                    return reply
+                if not tool_calls:
+                    reply = plain or (
+                        "I did not get an answer out of that. Tell me what "
+                        "you want to do, and I will do it."
+                    )
+                    self._history.append({"role": "assistant", "content": reply})
+                    return reply
+                if plain and not self._last_call_streamed:
+                    # The plain words already streamed live when the
+                    # call streamed; narrating them again would show
+                    # them twice.
+                    self._narrate(plain)
+                # R47: every tool block in the reply runs, each
+                # counting as one call against the cap — and the
+                # reply's raw text is stored once, with one tool
+                # result per call after it.
+                self._history.append({"role": "assistant", "content": text})
+                for name, args in tool_calls:
+                    if calls >= MAX_TOOL_CALLS:
+                        return cap_reply
+                    calls += 1
+                    self._narrate(TOOL_NARRATION.get(name, f"Working on {name}..."))
+                    result = self.call_tool(name, args or {})
+                    self._history.append({"role": "tool", "content": result})
+                    if self._cancelled:
+                        return "Stopped. Tell me what you want to do next."
+                    # R49: the step moved — say so in plain words.
+                    step_now = self.current_template_step()
+                    if step_now != step_before:
+                        step_before = step_now
+                        number, _key, title = step_now
+                        self._narrate(
+                            f"Step {number} of {len(TEMPLATE_STEPS)}: {title}."
+                        )
+            return cap_reply
+        finally:
+            self._turn_models = None
 
     # -- tool dispatch ----------------------------------------------
     def call_tool(self, name: str, args: dict) -> str:
@@ -710,7 +935,13 @@ class ChatAgent:
         model = (args.get("model") or "").strip()
         if not model:
             return "Tell me which model, for example LiquidAI/LFM3-1.7B."
-        installed = list_models()
+        # R50: inside a reply, the turn's single model-list fetch
+        # (reply() sets _turn_models); outside one, fetch here.
+        installed = (
+            self._turn_models
+            if self._turn_models is not None
+            else list_models()
+        )
         if model in installed or "/" not in model:
             tag, ref = model, ""
         else:

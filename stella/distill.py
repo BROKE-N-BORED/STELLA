@@ -96,6 +96,36 @@ def _read_answered_prompts(path: Path) -> set[str]:
     return answered
 
 
+def _plain_teacher_error(exc: Exception) -> str:
+    """A teacher failure in plain words, naming the real cause
+    (R30). A timeout is not Ollama being down — Ollama is running,
+    just slow — so the generic "Is Ollama running on this PC?
+    (timed out)" is reworded here, in the distill-facing message,
+    instead of rewriting the shared Ollama error other callers
+    rely on."""
+    text = str(exc)
+    if "timed out" in text.lower():
+        return (
+            "the teacher took too long to answer (it timed out). "
+            "The teacher may still have been loading, or the "
+            "prompt may need a longer wait."
+        )
+    return text
+
+
+def _ask_teacher(_generate, tag: str, prompt: str) -> tuple[str, bool]:
+    """One teacher answer: (text, truncated). The generate seam
+    returns either plain text (the old shape, no truncation info)
+    or a {"text", "done_reason"} dict (R35: generate_full's
+    shape) — a done_reason of "length" means the answer was cut
+    off at the token cap."""
+    reply = _generate(tag, prompt)
+    if isinstance(reply, dict):
+        text = reply.get("text") or ""
+        return text, reply.get("done_reason") == "length"
+    return reply if isinstance(reply, str) else "", False
+
+
 def distill_dataset(
     store: Store,
     profile: str,
@@ -113,17 +143,25 @@ def distill_dataset(
 
     Writes project_dir/distilled.jsonl (appending one row at a time,
     so a stop mid-run keeps its progress) and points the project at
-    it. Returns a report: prompts, asked, skipped counts, rows, and
-    the dataset path. Raises StellaError in plain words when the
-    teacher is missing, the prompts file is empty, or fewer than 2
-    good rows come back (training needs at least 2). `should_stop`
-    (a no-arg callable, T74) cancels between prompts: the answers
-    so far stay saved, and a re-run picks up where it stopped.
-    `timeout` (S3) is how long to wait for each answer, in seconds.
-    Every prompt's call also carries keep_alive (S4,
+    it. Returns a report: prompts, asked, skipped counts, failed
+    prompts, rows, and the dataset path. Raises StellaError in plain
+    words when the teacher is missing, the prompts file is empty, or
+    fewer than 2 good rows come back (training needs at least 2).
+    `should_stop` (a no-arg callable, T74) cancels between prompts:
+    the answers so far stay saved, and a re-run picks up where it
+    stopped. `timeout` (S3) is how long to wait for each answer, in
+    seconds. Every prompt's call also carries keep_alive (S4,
     DISTILL_KEEP_ALIVE): the teacher stays loaded across prompts
     instead of reloading on each one, and unloads on its own
     after the run.
+
+    A failed prompt (R30) no longer aborts the run: it is retried
+    once, then skipped, counted, and reported at the end — the
+    prompts after it are still asked, and the message says plainly
+    that the saved answers are kept and a re-run resumes. A
+    truncated answer (R35: the teacher hit the token cap
+    mid-answer) is never saved as a full answer: it is skipped,
+    counted, and reported the same way.
     """
     store.get_profile(profile)
     store.get_project(profile, project)
@@ -135,8 +173,8 @@ def distill_dataset(
     answered = _read_answered_prompts(out_path)
 
     if _generate is None:
-        def _generate(tag: str, prompt: str) -> str:
-            return ollama_client.generate(
+        def _generate(tag: str, prompt: str) -> dict:
+            return ollama_client.generate_full(
                 tag, prompt, url=ollama_url, timeout=timeout,
                 keep_alive=DISTILL_KEEP_ALIVE,
             )
@@ -149,6 +187,8 @@ def distill_dataset(
     skipped_empty = 0
     skipped_dup = 0
     skipped_resumed = 0
+    skipped_truncated = 0
+    failed: list[dict] = []
     kept = 0
     asked_this_run: set[str] = set()
     with out_path.open("a", encoding="utf-8") as handle:
@@ -178,8 +218,51 @@ def distill_dataset(
                 "total": len(prompts),
                 "prompt": prompt,
             })
-            reply = _generate(teacher_tag, prompt)
+            # R30: one bad prompt must not kill hours of work — a
+            # failure is retried once, then skipped and reported,
+            # and the run goes on to the next prompt.
+            reply = None
+            truncated = False
+            last_error: str | None = None
+            for _attempt in range(2):
+                try:
+                    reply, truncated = _ask_teacher(
+                        _generate, teacher_tag, prompt
+                    )
+                    last_error = None
+                    break
+                except StellaError as exc:
+                    last_error = _plain_teacher_error(exc)
+            if last_error is not None:
+                failed.append(
+                    {"prompt": prompt, "error": last_error}
+                )
+                emit({
+                    "type": "warning",
+                    "message": (
+                        f"prompt {index} of {len(prompts)} got no "
+                        f"answer ({last_error}). The answers so far "
+                        "are saved; run it again to pick up where "
+                        "it stopped."
+                    ),
+                })
+                continue
             asked += 1
+            # R35: a truncated answer is cut off mid-sentence — it
+            # is skipped, never saved as a full training example.
+            if truncated:
+                skipped_truncated += 1
+                emit({
+                    "type": "warning",
+                    "message": (
+                        f"prompt {index} of {len(prompts)} got an "
+                        "answer that was cut off mid-sentence (the "
+                        "teacher hit its length limit), so it was "
+                        "not saved. Ask it again with a shorter "
+                        "prompt, or raise the limit."
+                    ),
+                })
+                continue
             if not reply.strip():
                 skipped_empty += 1
                 continue
@@ -196,9 +279,38 @@ def distill_dataset(
             handle.flush()
             kept += 1
 
+    if failed:
+        emit({
+            "type": "warning",
+            "message": (
+                f"{len(failed)} prompt(s) got no answer from the "
+                "teacher. The answers so far are saved; run it "
+                "again to pick up where it stopped."
+            ),
+        })
+    if skipped_truncated:
+        emit({
+            "type": "warning",
+            "message": (
+                f"{skipped_truncated} answer(s) were cut off "
+                "mid-sentence and were not saved."
+            ),
+        })
+
     # The whole file must be a valid training dataset. This also
-    # catches a file the user hand-edited into a bad state.
-    _examples, info = load_dataset(out_path)
+    # catches a file the user hand-edited into a bad state. When
+    # failures left too few rows, the refusal names the resume
+    # behaviour too — the answers so far are still on disk.
+    try:
+        _examples, info = load_dataset(out_path)
+    except StellaError as exc:
+        if failed:
+            raise StellaError(
+                f"{exc} {len(failed)} prompt(s) got no answer from "
+                "the teacher. The answers so far are saved; run it "
+                "again to pick up where it stopped."
+            ) from exc
+        raise
     store.update_project(
         profile, project, dataset_ref=DISTILLED_FILENAME
     )
@@ -210,6 +322,9 @@ def distill_dataset(
         "skipped_empty": skipped_empty,
         "skipped_dup": skipped_dup,
         "skipped_resumed": skipped_resumed,
+        "skipped_truncated": skipped_truncated,
+        "failed": len(failed),
+        "failed_prompts": failed,
         "rows": info["count"],
         "dataset": str(out_path),
     }
