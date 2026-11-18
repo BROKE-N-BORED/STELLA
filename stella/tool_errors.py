@@ -14,6 +14,12 @@ no Stella imports, so both can use it without a cycle.
 
 from __future__ import annotations
 
+# The out-of-memory wording, shared by the tool paths (the map
+# below) and the training path (R76: oom_message): one message,
+# one place, so every OOM on the machine reads the same.
+OOM_PLAIN = "The machine ran out of memory."
+OOM_ACTION = "Close other programs and try again, or pick a smaller model."
+
 # (raw substrings, plain-words message, what to do). An entry
 # matches when ALL of its substrings are present (lowercased);
 # first match wins, so the specific entries come before the
@@ -164,18 +170,18 @@ _TRANSLATIONS: tuple[tuple[tuple[str, ...], str, str], ...] = (
     ),
     (
         ("out of memory",),
-        "The machine ran out of memory.",
-        "Close other programs and try again, or pick a smaller model.",
+        OOM_PLAIN,
+        OOM_ACTION,
     ),
     (
         ("cannot allocate memory",),
-        "The machine ran out of memory.",
-        "Close other programs and try again, or pick a smaller model.",
+        OOM_PLAIN,
+        OOM_ACTION,
     ),
     (
         ("bad_alloc",),
-        "The machine ran out of memory.",
-        "Close other programs and try again, or pick a smaller model.",
+        OOM_PLAIN,
+        OOM_ACTION,
     ),
     (
         ("no such file or directory",),
@@ -228,3 +234,31 @@ def translate_tool_error(
     if code is not None:
         head += f" ({code})"
     return f"{head}. {plain}\n{action}\n\nThe tool said:\n{tail}"
+
+
+# R76: what counts as out-of-memory, for the training path. A
+# MemoryError is one outright; torch's OutOfMemoryError is a
+# RuntimeError whose text says so (CUDA or CPU), and the C++
+# allocator surfaces as bad_alloc / cannot allocate memory.
+_OOM_NEEDLES = (
+    "out of memory",
+    "outofmemoryerror",
+    "cannot allocate memory",
+    "bad_alloc",
+)
+
+
+def oom_message(exc: BaseException) -> str | None:
+    """The plain-words message when `exc` is an out-of-memory
+    failure, else None. The training path (train_project, the GUI
+    worker) routes a catchable OOM through this instead of
+    surfacing raw torch text — the same wording the tool paths
+    already use. A kernel OOM-kill still kills the process
+    outright; nothing can catch that, so this covers the
+    catchable exception only."""
+    if isinstance(exc, MemoryError):
+        return f"{OOM_PLAIN} {OOM_ACTION}"
+    lowered = str(exc).lower()
+    if any(needle in lowered for needle in _OOM_NEEDLES):
+        return f"{OOM_PLAIN} {OOM_ACTION}"
+    return None

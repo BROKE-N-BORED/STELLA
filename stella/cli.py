@@ -51,6 +51,12 @@
                                           change a project
     stella show-project <profile> <name>  show a project's record and
                                           its checkpoints
+    stella delete-checkpoint <profile> <name> <step>
+                                          delete one checkpoint forever
+    stella prune-checkpoints <profile> <name> [--keep N]
+                                          delete all but the newest
+                                          checkpoints (and clean up
+                                          unfinished ones)
     stella clone-profile <name> <new-name> [--with-projects]
                                           copy a profile under a new
                                           name (with its projects too,
@@ -796,6 +802,15 @@ def cmd_import_adapter(args) -> int:
     return 0
 
 
+def _print_base_ref_warnings(base_ref: str) -> None:
+    """R87: the save-time base-ref warnings, printed (one line
+    each, \"Warning: ...\"). Silent when there is nothing to say."""
+    from .train import base_ref_warnings
+
+    for warning in base_ref_warnings(base_ref):
+        print(f"Warning: {warning}")
+
+
 def cmd_create_profile(args) -> int:
     store = _store()
     data = store.create_profile(
@@ -814,6 +829,11 @@ def cmd_create_profile(args) -> int:
         f"{_normalized_note(args.name, data['name'])} "
         f"(role: {data.get('role') or '-'})"
     )
+    # R87: the base ref is checked against the actual weights at
+    # save time — a tag, a GGUF file, or a folder with no model
+    # warns here, in the same soft voice as the window. JSON mode
+    # stays clean (the record above is the whole output).
+    _print_base_ref_warnings(args.base or "")
     return 0
 
 
@@ -842,6 +862,16 @@ def cmd_rename_profile(args) -> int:
 def cmd_delete_profile(args) -> int:
     store = _store()
     if getattr(args, "purge", False):
+        # R90: purging is forever, so it asks first (default No),
+        # like the window's purge confirm — unless --yes says the
+        # script already decided.
+        if not getattr(args, "yes", False):
+            if not _confirm_destructive(
+                f"Delete profile {args.name!r} forever? "
+                "This cannot be undone."
+            ):
+                print(f"Kept profile {args.name!r}.", file=sys.stderr)
+                return 1
         store.purge_profile(args.name)
         if _as_json(args):
             # R52: the structured form — what happened, no prose.
@@ -918,6 +948,10 @@ def cmd_update_profile(args) -> int:
         _print_json(data)
         return 0
     print(f"Updated profile {data['name']!r}.")
+    # R87: a changed base ref is checked against the actual
+    # weights — see cmd_create_profile.
+    if "base_ref" in fields:
+        _print_base_ref_warnings(fields["base_ref"])
     return 0
 
 
@@ -982,6 +1016,18 @@ def cmd_rename_project(args) -> int:
 def cmd_delete_project(args) -> int:
     store = _store()
     if getattr(args, "purge", False):
+        # R90: purging is forever, so it asks first (default No),
+        # like the window's purge confirm — unless --yes says the
+        # script already decided.
+        if not getattr(args, "yes", False):
+            if not _confirm_destructive(
+                f"Delete project {args.name!r} from profile "
+                f"{args.profile!r} forever? This cannot be undone."
+            ):
+                print(
+                    f"Kept project {args.name!r}.", file=sys.stderr
+                )
+                return 1
         store.purge_project(args.profile, args.name)
         if _as_json(args):
             # R52: the structured form — what happened, no prose.
@@ -1169,6 +1215,156 @@ def cmd_show_project(args) -> int:
             )
     else:
         print("  checkpoints: (none)")
+    return 0
+
+
+def _confirm_destructive(question: str) -> bool:
+    """A destructive confirmation on stdin (R90/R77): [y/N],
+    default No. A non-interactive stdin (piped, closed, CI)
+    reads EOF and counts as No, never a hang. The prompt goes to
+    stderr so --json output on stdout stays clean."""
+    print(f"{question} [y/N] ", file=sys.stderr, end="", flush=True)
+    try:
+        answer = sys.stdin.readline()
+    except (OSError, EOFError):
+        return False
+    if not answer:
+        return False
+    return answer.strip().lower() in ("y", "yes")
+
+
+def cmd_delete_checkpoint(args) -> int:
+    """Delete one checkpoint, permanently (R77) — the CLI delete
+    for checkpoints, including orphans (a crashed save's
+    step dir, which the list never shows). The trash does not
+    free disk, so there is no trash here; the prompt (or --yes)
+    is the chance to back out."""
+    from .train import (
+        delete_checkpoint,
+        list_checkpoints,
+        list_orphan_checkpoints,
+    )
+
+    store = _store()
+    target = None
+    for ck in list_checkpoints(store, args.profile, args.name):
+        if ck["step"] == args.step:
+            target = ck
+            break
+    if target is None:
+        for orphan in list_orphan_checkpoints(
+            store, args.profile, args.name
+        ):
+            if orphan["name"] == f"step-{args.step}":
+                target = orphan
+                break
+    if target is None:
+        print(
+            f"stella: no checkpoint step-{args.step} for project "
+            f"{args.name!r}",
+            file=sys.stderr,
+        )
+        return 1
+    size = _fmt_size(target.get("size_bytes") or 0)
+    if not getattr(args, "yes", False):
+        if not _confirm_destructive(
+            f"Delete checkpoint step-{args.step} of project "
+            f"{args.name!r} forever ({size})? This cannot be undone."
+        ):
+            print(
+                f"Kept checkpoint step-{args.step}.", file=sys.stderr
+            )
+            return 1
+    result = delete_checkpoint(store, args.profile, args.name, args.step)
+    if _as_json(args):
+        _print_json({
+            "profile": args.profile,
+            "name": args.name,
+            "action": "checkpoint-deleted",
+            "step": result["step"],
+            "freed_bytes": result["freed_bytes"],
+        })
+        return 0
+    print(
+        f"Deleted checkpoint step-{args.step} of project "
+        f"{args.name!r} forever "
+        f"({_fmt_size(result['freed_bytes'])} freed)."
+    )
+    return 0
+
+
+def cmd_prune_checkpoints(args) -> int:
+    """Delete all but the newest N checkpoints (R77) — the CLI
+    prune, which R112 deliberately excludes because this task
+    owns it. Old orphans (unfinished saves from a crash) are
+    cleaned up with it and reported; orphans too young to tell
+    from a live save are left alone."""
+    from .train import (
+        list_checkpoints,
+        prune_checkpoints,
+        reap_orphan_checkpoints,
+    )
+
+    store = _store()
+    checkpoints = list_checkpoints(store, args.profile, args.name)
+    keep = args.keep
+    doomed = checkpoints[:-keep] if len(checkpoints) > keep else []
+    if not doomed:
+        if not _as_json(args):
+            # R52: --json never mixes plain text into stdout —
+            # the JSON summary below carries the same facts.
+            print(
+                f"Project {args.name!r} has {len(checkpoints)} "
+                f"checkpoint{'s' if len(checkpoints) != 1 else ''}; "
+                f"keeping {keep} deletes nothing."
+            )
+    elif not getattr(args, "yes", False):
+        steps = ", ".join(f"step-{ck['step']}" for ck in doomed)
+        freed = _fmt_size(sum(ck["size_bytes"] for ck in doomed))
+        if not _confirm_destructive(
+            f"Delete {len(doomed)} old checkpoint"
+            f"{'s' if len(doomed) != 1 else ''} of project "
+            f"{args.name!r} forever ({steps}, {freed} freed)? "
+            "This cannot be undone."
+        ):
+            print("Kept every checkpoint.", file=sys.stderr)
+            return 1
+    result = prune_checkpoints(store, args.profile, args.name, keep=keep)
+    reaped = reap_orphan_checkpoints(store, args.profile, args.name)
+    if _as_json(args):
+        _print_json({
+            "profile": args.profile,
+            "name": args.name,
+            "action": "checkpoints-pruned",
+            **result,
+            "orphans_reaped": reaped["reaped"],
+            "orphans_skipped": reaped["skipped"],
+            "orphans_freed_bytes": reaped["freed_bytes"],
+        })
+        return 0
+    if result["deleted"]:
+        kept = len(result["kept"])
+        print(
+            f"Deleted {len(result['deleted'])} old checkpoint"
+            f"{'s' if len(result['deleted']) != 1 else ''} "
+            f"({_fmt_size(result['freed_bytes'])} freed); kept "
+            f"the {kept} newest."
+        )
+    if reaped["reaped"]:
+        print(
+            f"Also cleaned up {len(reaped['reaped'])} unfinished "
+            f"checkpoint folder"
+            f"{'s' if len(reaped['reaped']) != 1 else ''} from "
+            "interrupted saves "
+            f"({_fmt_size(reaped['freed_bytes'])} freed)."
+        )
+    if reaped["skipped"]:
+        print(
+            f"Left {len(reaped['skipped'])} recent unfinished "
+            "checkpoint folder"
+            f"{'s' if len(reaped['skipped']) != 1 else ''} alone "
+            "(too recent to tell from a save in progress)."
+        )
     return 0
 
 
@@ -1450,6 +1646,25 @@ def cmd_export_gguf(args) -> int:
         elif event.get("type") == "phase" and event.get("message"):
             print(event["message"], flush=True)
 
+    # R81: the estimate the GUI shows, printed before the export
+    # starts — a CLI user exports with the same size/time picture.
+    # An estimate that cannot be computed (no adapter yet, unknown
+    # base) is left to the export itself, which refuses with its
+    # own plain-words error.
+    try:
+        from .gguf import estimate_export, format_export_estimate
+
+        print(
+            format_export_estimate(
+                estimate_export(
+                    store, args.profile, args.project, quant=args.quant
+                )
+            ),
+            flush=True,
+        )
+    except StellaError:
+        pass
+
     result = export_gguf(
         store,
         args.profile,
@@ -1475,10 +1690,14 @@ def cmd_export_gguf(args) -> int:
     if getattr(args, "create", False):
         # T89: --create runs the command instead of leaving it to
         # a copy-paste. The manual commands above are still printed.
-        from .gguf import create_in_ollama
+        from .gguf import SUBPROCESS_TIMEOUT_SECONDS, create_in_ollama
 
         output = create_in_ollama(
-            result["ollama_name"], result["modelfile"]
+            result["ollama_name"], result["modelfile"],
+            # R82: a hung Ollama create stops on a timeout instead
+            # of hanging the export forever — the same 30 minutes
+            # the converter and quantizer runs use.
+            timeout=SUBPROCESS_TIMEOUT_SECONDS,
         )
         print()
         print(f"Created in Ollama as {result['ollama_name']}.")
@@ -2567,6 +2786,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--purge", action="store_true",
         help="delete forever instead of moving to the trash.",
     )
+    p.add_argument(
+        "--yes", action="store_true",
+        help="purge without asking first (for scripts).",
+    )
     p.set_defaults(func=cmd_delete_profile)
 
     p = _cmd("update-profile", "change a profile",
@@ -2636,6 +2859,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--purge", action="store_true",
         help="delete forever instead of moving to the trash.",
     )
+    p.add_argument(
+        "--yes", action="store_true",
+        help="purge without asking first (for scripts).",
+    )
     p.set_defaults(func=cmd_delete_project)
 
     p = _cmd("update-project", "change a project",
@@ -2662,6 +2889,37 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("profile", help="profile name, e.g. lfm3-tool")
     p.add_argument("name", help="project name, e.g. tool-calls")
     p.set_defaults(func=cmd_show_project)
+
+    p = _cmd("delete-checkpoint", "delete one checkpoint forever",
+             "examples:\n"
+             "  stella delete-checkpoint lfm3-tool tool-calls 50")
+    p.add_argument("profile", help="profile name, e.g. lfm3-tool")
+    p.add_argument("name", help="project name, e.g. tool-calls")
+    p.add_argument("step", type=int,
+                   help="checkpoint step, e.g. 50 for step-50")
+    p.add_argument(
+        "--yes", action="store_true",
+        help="delete without asking first (for scripts).",
+    )
+    p.set_defaults(func=cmd_delete_checkpoint)
+
+    p = _cmd("prune-checkpoints",
+             "delete all but the newest checkpoints",
+             "examples:\n"
+             "  stella prune-checkpoints lfm3-tool tool-calls\n"
+             "  stella prune-checkpoints lfm3-tool tool-calls "
+             "--keep 5")
+    p.add_argument("profile", help="profile name, e.g. lfm3-tool")
+    p.add_argument("name", help="project name, e.g. tool-calls")
+    p.add_argument(
+        "--keep", type=int, default=3,
+        help="how many of the newest checkpoints to keep (default 3)",
+    )
+    p.add_argument(
+        "--yes", action="store_true",
+        help="prune without asking first (for scripts).",
+    )
+    p.set_defaults(func=cmd_prune_checkpoints)
 
     p = _cmd("clone-project", "copy a project under a new name",
              "examples:\n"

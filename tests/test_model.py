@@ -307,7 +307,12 @@ def test_create_project_defaults(store):
 
     store.create_profile("p1")
     data = store.create_project("p1", "proj")
-    expected = compute_settings(measure_pc(store.home)["ram_available_gb"])
+    measurement = measure_pc(store.home)
+    expected = compute_settings(
+        measurement["ram_available_gb"],
+        disk_free_gb=measurement["disk_free_gb"],
+        cpu_count=measurement["cpu_count"],
+    )
     assert data["settings_source"] == "auto"
     assert data["settings"]["method"] == "lora"
     assert data["settings"]["rank"] == expected["rank"]

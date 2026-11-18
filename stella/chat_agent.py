@@ -83,11 +83,11 @@ PLAN_REFUSALS = {
 
 
 def _is_just_do_it(cleaned: str) -> bool:
-    """The message asks for the whole thing (T76)."""
-    return any(
-        cleaned == trigger or cleaned.startswith(trigger)
-        for trigger in JUST_DO_IT_TRIGGERS
-    )
+    """The message asks for the whole thing (T76, R100): the
+    phrase may appear anywhere in the message — "ok, just do it"
+    triggers the plan-first flow, not only a message that starts
+    with it."""
+    return any(trigger in cleaned for trigger in JUST_DO_IT_TRIGGERS)
 
 
 def _is_approval(cleaned: str) -> bool:
@@ -806,11 +806,19 @@ class ChatAgent:
             "rather than running away with your PC. Tell me what to do "
             "next, and I will carry on."
         )
+        # R99: the stopped reply, like the cap-hit reply, is a real
+        # reply — every exit below records it in the history before
+        # returning, so the conversation's record has no hole where
+        # the agent stopped.
+        stopped_reply = "Stopped. Tell me what you want to do next."
         try:
             calls = 0
             while calls < MAX_TOOL_CALLS:
                 if self._cancelled:
-                    return "Stopped. Tell me what you want to do next."
+                    self._history.append(
+                        {"role": "assistant", "content": stopped_reply}
+                    )
+                    return stopped_reply
                 try:
                     text = self._model_call(self._messages())
                 except (OllamaError, ProviderError) as exc:
@@ -823,7 +831,10 @@ class ChatAgent:
                     return reply
                 if self._cancelled:
                     # Cancel landed while the model call was in flight.
-                    return "Stopped. Tell me what you want to do next."
+                    self._history.append(
+                        {"role": "assistant", "content": stopped_reply}
+                    )
+                    return stopped_reply
                 try:
                     plain, tool_calls = parse_tool_calls(text)
                 except ToolParseError:
@@ -855,13 +866,19 @@ class ChatAgent:
                 self._history.append({"role": "assistant", "content": text})
                 for name, args in tool_calls:
                     if calls >= MAX_TOOL_CALLS:
+                        self._history.append(
+                            {"role": "assistant", "content": cap_reply}
+                        )
                         return cap_reply
                     calls += 1
                     self._narrate(TOOL_NARRATION.get(name, f"Working on {name}..."))
                     result = self.call_tool(name, args or {})
                     self._history.append({"role": "tool", "content": result})
                     if self._cancelled:
-                        return "Stopped. Tell me what you want to do next."
+                        self._history.append(
+                            {"role": "assistant", "content": stopped_reply}
+                        )
+                        return stopped_reply
                     # R49: the step moved — say so in plain words.
                     step_now = self.current_template_step()
                     if step_now != step_before:
@@ -870,6 +887,7 @@ class ChatAgent:
                         self._narrate(
                             f"Step {number} of {len(TEMPLATE_STEPS)}: {title}."
                         )
+            self._history.append({"role": "assistant", "content": cap_reply})
             return cap_reply
         finally:
             self._turn_models = None

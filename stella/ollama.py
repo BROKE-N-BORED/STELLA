@@ -502,9 +502,11 @@ def generate_full(
             "Is the model still loading? Try again in a minute."
         ) from exc
     except (urllib.error.URLError, OSError, TimeoutError) as exc:
+        # R80: no raw exception text in the user-facing message —
+        # the sentence already says what to do. The raw error
+        # stays on the exception chain (from exc) for debugging.
         raise StellaError(
-            "Ollama did not answer. Is Ollama running on this PC? "
-            f"({exc})"
+            "Ollama did not answer. Is Ollama running on this PC?"
         ) from exc
     except ValueError as exc:
         raise StellaError(

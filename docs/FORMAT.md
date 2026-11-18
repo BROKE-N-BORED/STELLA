@@ -81,6 +81,7 @@ An unknown `kind` is refused as not a Stella export.
     "display_name": "Tool calls",
     "dataset_ref": "forge-traces.jsonl",
     "settings": {"rank": 8, "learning_rate": 0.0002, "...": "..."},
+    "settings_source": "auto",
     "metamorph": {"mode": "morph", "notes": ""},
     "status": "draft",
     "created": "2026-11-12T09:05:00Z",
@@ -105,6 +106,12 @@ An unknown `kind` is refused as not a Stella export.
 - `project.settings` holds the training settings; the model
   validates their values on import, before anything is created,
   so a bad value cannot strand a half-created profile behind it.
+- `project.settings_source` (v0.28.0, R88) is `auto` or `manual`:
+  whether the settings were picked by the PC or set by a human.
+  An `auto` project re-resolves its settings for the importing PC
+  instead of freezing the source PC's values. Packages that
+  predate the field (v0.27.0 and earlier) have no field, and
+  import as `manual`, as before.
 - `exported_at` (v0.18.0, T118) is when the package was made, in
   UTC ISO form. `profile.created` / `profile.updated` and
   `project.created` / `project.updated` are the records' own

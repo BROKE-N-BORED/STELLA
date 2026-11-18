@@ -13,8 +13,9 @@ Two halves:
   throughout: a reading that cannot be taken is ``None``, never a
   crash, and the settings rules treat unknown RAM as plenty (the
   defaults are already the conservative CPU recipe).
-- ``compute_settings(ram_available_gb, model_params_b=None)`` — the
-  documented conservative rules:
+- ``compute_settings(ram_available_gb, model_params_b=None,
+  disk_free_gb=None, cpu_count=None)`` — the documented
+  conservative rules:
 
   - batch size is always 1 on CPU (bigger batches do not fit 8 GB
     and buy nothing on a CPU-only run).
@@ -23,11 +24,18 @@ Two halves:
   - When less than 4 GB of RAM is available, rank drops to 4 and
     max sequence length to 512, so the run still fits with room
     for the system.
-  - ``model_params_b`` is accepted so callers can pass the base
-    model size; the current rules key off available RAM only,
-    because on a CPU-only 8 GB machine RAM is the binding
-    constraint. A future rule may use the size for very large
-    bases; today it changes nothing.
+  - A base model of 3 billion parameters or more shrinks the
+    recipe the same way (rank 4, seq 512): the weights alone
+    nearly fill an 8 GB machine, so the recipe shrinks before
+    the RAM guard has to refuse the run.
+  - When less than 10 GB of disk is free, checkpoints are written
+    every 200 steps instead of every 50, so the run leaves fewer
+    checkpoint folders behind on a nearly-full disk.
+  - On a machine with 2 or fewer CPUs, max sequence length drops
+    to 512: attention cost grows with the square of the sequence
+    length, so a shorter sequence keeps each step finishing in
+    reasonable time on few cores. (Rank is a memory knob, not a
+    compute knob, so few CPUs do not change it.)
 
 ``create_project`` (no explicit settings) stores the computed
 settings with ``settings_source="auto"``; ``train_project``
@@ -46,12 +54,29 @@ from pathlib import Path
 # the run still fits with room for the system.
 LOW_RAM_GB = 4.0
 
+# R78: a base this big (billions of parameters) shrinks the recipe
+# the same way — its weights alone nearly fill an 8 GB machine.
+LARGE_MODEL_B = 3.0
+
+# R78: below this much free disk, checkpoints are written every
+# 200 steps instead of every 50, so a run leaves fewer checkpoint
+# folders behind on a nearly-full disk.
+LOW_DISK_GB = 10.0
+LOW_DISK_CHECKPOINT_STEPS = 200
+
+# R78: on a machine with this many CPUs or fewer, the sequence
+# length drops to 512 — attention cost grows with the square of
+# the sequence length, so a shorter sequence keeps each step
+# finishing in reasonable time on few cores.
+LOW_CPU_COUNT = 2
+
 # The usual recipe, on a machine with enough RAM.
 DEFAULT_RANK = 8
 DEFAULT_LEARNING_RATE = 0.0002
 DEFAULT_EPOCHS = 3
 DEFAULT_BATCH_SIZE = 1
 DEFAULT_MAX_SEQ_LEN = 1024
+DEFAULT_CHECKPOINT_STEPS = 50
 
 # The shrunken recipe, on a machine short of RAM.
 LOW_RAM_RANK = 4
@@ -159,29 +184,53 @@ def measure_pc(home: str | Path | None = None) -> dict:
 
 
 def compute_settings(
-    ram_available_gb: float | None, model_params_b: float | None = None
+    ram_available_gb: float | None,
+    model_params_b: float | None = None,
+    disk_free_gb: float | None = None,
+    cpu_count: int | None = None,
 ) -> dict:
-    """Training settings for a PC with this much RAM available.
+    """Training settings for this PC and this base model.
 
-    ``model_params_b`` (billions of parameters in the base model)
-    is accepted for future rules; the current rules key off
-    available RAM only — see the module docstring.
+    ``model_params_b`` is the base model's size in billions of
+    parameters; ``disk_free_gb`` and ``cpu_count`` come from
+    ``measure_pc``. Unknown readings (None) count as plenty —
+    the defaults are already the conservative CPU recipe. The
+    rules are in the module docstring. ``checkpoint_steps`` is
+    always returned (50 normally, 200 on a nearly-full disk) so
+    a re-resolve can un-shrink it when disk frees up.
     """
     low_ram = ram_available_gb is not None and ram_available_gb < LOW_RAM_GB
+    large_model = model_params_b is not None and model_params_b >= LARGE_MODEL_B
+    low_disk = disk_free_gb is not None and disk_free_gb < LOW_DISK_GB
+    few_cpus = cpu_count is not None and cpu_count <= LOW_CPU_COUNT
+    shrink = low_ram or large_model
     return {
-        "rank": LOW_RAM_RANK if low_ram else DEFAULT_RANK,
+        "rank": LOW_RAM_RANK if shrink else DEFAULT_RANK,
         "learning_rate": DEFAULT_LEARNING_RATE,
         "epochs": DEFAULT_EPOCHS,
         "batch_size": DEFAULT_BATCH_SIZE,
-        "max_seq_len": LOW_RAM_MAX_SEQ_LEN if low_ram else DEFAULT_MAX_SEQ_LEN,
+        "max_seq_len": (
+            LOW_RAM_MAX_SEQ_LEN if (shrink or few_cpus)
+            else DEFAULT_MAX_SEQ_LEN
+        ),
+        "checkpoint_steps": (
+            LOW_DISK_CHECKPOINT_STEPS if low_disk
+            else DEFAULT_CHECKPOINT_STEPS
+        ),
     }
 
 
 def auto_settings(home: str | Path | None = None) -> tuple[dict, dict]:
     """Measure this PC and compute its settings. Returns
-    (measurement, settings)."""
+    (measurement, settings). No base model is known here, so the
+    size rule does not apply — the run-start re-resolve
+    (train.refresh_auto_settings) supplies the model size."""
     measurement = measure_pc(home)
-    settings = compute_settings(measurement["ram_available_gb"])
+    settings = compute_settings(
+        measurement["ram_available_gb"],
+        disk_free_gb=measurement["disk_free_gb"],
+        cpu_count=measurement["cpu_count"],
+    )
     return measurement, settings
 
 

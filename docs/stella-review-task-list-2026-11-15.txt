@@ -1,6 +1,6 @@
 STELLA - task list from the full review, 2026-11-15
 
-129 tasks: 71 done, 53 to do, 5 gated. 0 urgent. 23 important, 52 correctness and polish, 54 nice to have.
+129 tasks: 97 done, 27 to do, 5 gated. 0 urgent. 23 important, 52 correctness and polish, 54 nice to have.
 The 5 marked (needs your PC) can only be done on your machine.
 Full detail for every task - evidence, what to fix, what done looks like -
 is in stella-review-task-list-2026-11-15.md in this same folder.
@@ -88,33 +88,33 @@ R75. Resume is enabled with nothing to resume, and never offered after a pause o
 
 P3 - NICE TO HAVE
 
-R76. An out-of-memory crash mid-run has no plain-words message
-R77. A crash mid-save leaves orphan checkpoint folders nothing can see or delete
-R78. Autoconfig ignores model size, disk, and CPU, and can silently change rank/seq between runs
-R79. There is no free-disk check in the training path
-R80. Raw error text leaks into the user-facing messages on the GGUF paths
-R81. CLI export never shows the estimate the GUI shows
-R82. create_in_ollama is called with no timeout
-R83. Export deletes the merged dir before the job lock, and unlinks the GGUF unconditionally
-R84. The --modelfile fallback breaks on paths with spaces
-R85. Prompts are not stripped of a byte-order mark
-R86. Requant work files can collide by name
-R87. base_ref is never checked against the actual weights
-R88. settings_source is silently lost on a round-trip (auto becomes manual)
-R89. The LFM3 template still carries a dead settings["notes"] key
-R90. CLI --purge has no prompt
-R91. The trash shows no size and has no auto-purge age
+R76. An out-of-memory crash mid-run has no plain-words message [DONE]
+R77. A crash mid-save leaves orphan checkpoint folders nothing can see or delete [DONE]
+R78. Autoconfig ignores model size, disk, and CPU, and can silently change rank/seq between runs [DONE]
+R79. There is no free-disk check in the training path [DONE]
+R80. Raw error text leaks into the user-facing messages on the GGUF paths [DONE]
+R81. CLI export never shows the estimate the GUI shows [DONE]
+R82. create_in_ollama is called with no timeout [DONE]
+R83. Export deletes the merged dir before the job lock, and unlinks the GGUF unconditionally [DONE]
+R84. The --modelfile fallback breaks on paths with spaces [DONE]
+R85. Prompts are not stripped of a byte-order mark [DONE]
+R86. Requant work files can collide by name [DONE]
+R87. base_ref is never checked against the actual weights [DONE]
+R88. settings_source is silently lost on a round-trip (auto becomes manual) [DONE]
+R89. The LFM3 template still carries a dead settings["notes"] key [DONE]
+R90. CLI --purge has no prompt [DONE]
+R91. The trash shows no size and has no auto-purge age [DONE]
 R92. How to Use opens on an empty pane, not Getting started [DONE]
-R93. A picked job cannot be un-picked; Go stays armed
-R94. No Quit in the File menu, no Ctrl+Q
-R95. The finish moment lasts 250 ms: too brief to read
-R96. How to Use search with no match gives no "nothing found" message
-R97. No drag-and-drop for a dataset file
-R98. No shortcut help: F2-rename and Ctrl+S are undiscoverable
-R99. The cap-hit reply is not recorded in the chat history
-R100. "just do it" only matches at the start of a message
-R101. A custom base URL ending in /chat/completions doubles the path
-R102. The chat-window model buttons are Ollama-only
+R93. A picked job cannot be un-picked; Go stays armed [DONE]
+R94. No Quit in the File menu, no Ctrl+Q [DONE]
+R95. The finish moment lasts 250 ms: too brief to read [DONE]
+R96. How to Use search with no match gives no "nothing found" message [DONE]
+R97. No drag-and-drop for a dataset file [DONE]
+R98. No shortcut help: F2-rename and Ctrl+S are undiscoverable [DONE]
+R99. The cap-hit reply is not recorded in the chat history [DONE]
+R100. "just do it" only matches at the start of a message [DONE]
+R101. A custom base URL ending in /chat/completions doubles the path [DONE]
+R102. The chat-window model buttons are Ollama-only [DONE]
 R103. The resume / dest tool arguments are accepted but undocumented
 R104. Cloud providers never stream
 R105. A corrupt providers.json silently reads as "no keys"

@@ -830,8 +830,11 @@ def export_gguf(
             "or export to a different folder."
         )
     merged_dir = dest / f"{project}-merged-hf"
-    if merged_dir.exists():
-        shutil.rmtree(merged_dir)
+    # R83: the stale merged dir is NOT cleared here any more — it
+    # used to be deleted before the job lock, where a second
+    # concurrent export could delete the first's merged dir
+    # mid-merge. It is cleared inside the lock instead, just
+    # before the merge.
     # Check llama.cpp BEFORE the merge (T26): the check is cheap,
     # the merge is minutes. A missing install used to fail only
     # after the whole merge, leaving ~3.4 GB of merged weights
@@ -933,6 +936,24 @@ def export_gguf(
         try:
             if cancelled():
                 raise StellaError("Cancelled.")
+            # R83: re-check under the lock, before the merge — a
+            # GGUF that appeared between the pre-flight refuse
+            # check and the lock is refused here, before the merge
+            # wastes minutes. With --force the old file stays
+            # until the merge succeeds (see the unlink below), so
+            # a failed merge never destroys the previous export.
+            if gguf_path.exists() and not force:
+                raise StellaError(
+                    f"{gguf_path} appeared while the export was "
+                    "starting. Exporting again would overwrite it. "
+                    "Use --force to replace it deliberately, or "
+                    "export to a different folder."
+                )
+            # R83: the stale merged dir is cleared inside the
+            # lock, not before it — the lock is what makes the
+            # delete safe from a concurrent export.
+            if merged_dir.exists():
+                shutil.rmtree(merged_dir)
             emit({
                 "type": "phase", "phase": "merge",
                 "message": "Merging the adapter into the base model...",
@@ -943,6 +964,20 @@ def export_gguf(
                 on_event=on_event,
             )
             if gguf_path.exists():
+                # R83: the unlink is gated on --force. Without it
+                # the export refuses rather than deleting a file
+                # it did not make — a GGUF that appeared mid-run
+                # (a concurrent export finishing, or a file
+                # dropped in by hand) is kept, not silently
+                # overwritten. The lock-time re-check above
+                # catches the usual race; this is the backstop.
+                if not force:
+                    raise StellaError(
+                        f"{gguf_path} appeared while the export was "
+                        "running. Exporting again would overwrite it. "
+                        "Use --force to replace it deliberately, or "
+                        "export to a different folder."
+                    )
                 # --force: the deliberate overwrite (T24).
                 gguf_path.unlink()
             if cancelled():

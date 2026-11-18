@@ -38,6 +38,7 @@ import json
 import math
 import os
 import random
+import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -202,20 +203,98 @@ def validate_run_settings(config: dict) -> dict:
     return cleaned
 
 
-def refresh_auto_settings(store: Store, profile: str, project: str) -> dict:
+def _auto_model_params_b(store: Store, profile: str) -> float | None:
+    """R78: the profile base model's size in billions of
+    parameters, or None when it cannot be found out (no base ref,
+    unreadable metadata, no network). Best effort only —
+    autoconfig treats unknown as plenty, and a failure here must
+    never fail the run."""
+    try:
+        prof = store.get_profile(profile)
+    except StellaError:
+        return None
+    ref = (prof.get("base_ref") or "").strip()
+    if not ref:
+        return None
+    try:
+        meta = load_model_metadata(ref)
+    except Exception:
+        return None
+    params = meta.get("params")
+    if not isinstance(params, (int, float)) or params <= 0:
+        return None
+    return params / 1e9
+
+
+def _auto_settings_changed_message(
+    old: dict, new: dict, changed: list[str]
+) -> str:
+    """R78: the re-resolve announcement, naming old → new for
+    each changed setting."""
+    parts = []
+    for key in changed:
+        if key == "rank":
+            parts.append(f"rank {old[key]} to {new[key]}")
+        elif key == "max_seq_len":
+            parts.append(
+                f"max sequence length {old[key]} to {new[key]}"
+            )
+        elif key == "checkpoint_steps":
+            parts.append(
+                f"checkpoints every {old[key]} steps to every "
+                f"{new[key]} steps"
+            )
+        else:
+            parts.append(f"{key} {old[key]} to {new[key]}")
+    return (
+        "The automatic training settings changed for this run: "
+        + ", ".join(parts)
+        + ". The run uses the new settings."
+    )
+
+
+def refresh_auto_settings(
+    store: Store, profile: str, project: str, *,
+    on_event=None, work_dir: str | Path | None = None,
+) -> dict:
     """Re-resolve an "auto" project's settings from a fresh
     measurement of this PC, and store the fresh values (the project
     stays "auto"). A "manual" project — or one with no source
     recorded, which reads as manual — is left exactly as it is.
-    Returns the settings the run should use."""
+    Returns the settings the run should use.
+
+    R78: the re-resolve is model-aware — the base model's size
+    shapes the recipe alongside RAM, disk, and CPU. When the
+    re-resolve changes a setting, the change is announced — a
+    warning event (which reaches the GUI job log) and a line in
+    the run log, naming old and new — so the same project never
+    silently trains different settings on different days.
+    """
     proj = store.get_project(profile, project)
     if proj.get("settings_source", "manual") != "auto":
         return dict(proj.get("settings", {}) or {})
     measurement = measure_pc(store.home)
-    computed = compute_settings(measurement["ram_available_gb"])
+    computed = compute_settings(
+        measurement["ram_available_gb"],
+        model_params_b=_auto_model_params_b(store, profile),
+        disk_free_gb=measurement["disk_free_gb"],
+        cpu_count=measurement["cpu_count"],
+    )
+    old = dict(proj.get("settings", {}) or {})
+    changed = [
+        key for key in computed
+        if key in old and old[key] != computed[key]
+    ]
     updated = store.update_project(
         profile, project, settings=computed, settings_source="auto"
     )
+    if changed:
+        message = _auto_settings_changed_message(old, computed, changed)
+        _emit_warning(on_event, message)
+        if work_dir is not None:
+            _append_log(
+                Path(work_dir), {"event": "warning", "message": message}
+            )
     return dict(updated["settings"])
 
 
@@ -1161,6 +1240,54 @@ def load_model_metadata(base_ref: str) -> dict:
     return _remote_model_metadata(base_ref)
 
 
+def base_ref_warnings(base_ref: str) -> list[str]:
+    """R87: plain-words problems with a base_ref, checked against
+    the actual weights — the T12 soft-warning pattern extended
+    from the Ollama tag to the base. Empty list = no problem.
+    Warns (never refuses) when the ref is a GGUF file or an
+    Ollama tag (training cannot start from either), a local
+    folder that holds no model, or a name that is not shaped like
+    a Hugging Face repo id. A repo id that is not cached locally
+    is never warned about: checking it would need the network,
+    a network failure must not become a false warning, and the
+    Hub answers 401, not 404, for a missing repo, so existence
+    cannot be told from here anyway. The train path still refuses
+    an unresolvable ref, later, with the bridge error — this is
+    the early warning, not the gate."""
+    ref = (base_ref or "").strip()
+    if not ref:
+        return []
+    kind, _detail = classify_base_ref(ref)
+    if kind == "gguf":
+        return [
+            f"{ref!r} is a GGUF file. Training needs Hugging Face "
+            "weights, not the file Ollama runs."
+        ]
+    if kind == "ollama":
+        return [
+            f"{ref!r} is an Ollama tag, not a Hugging Face repo. "
+            "Training needs the Hugging Face repo of the base model."
+        ]
+    if kind == "local":
+        try:
+            load_model_metadata(ref)
+        except StellaError:
+            return [
+                f"the folder {ref!r} does not hold a model (no "
+                "config or weights found there)."
+            ]
+        return []
+    # A Hub repo id: shaped like owner/model, or it is a typo.
+    # (A well-shaped id that is not cached cannot be checked
+    # without the network, so it is never warned about on a guess.)
+    if not re.fullmatch(r"[^/\s:]+/[^/\s:]+", ref):
+        return [
+            f"{ref!r} does not look like a Hugging Face repo name. "
+            "A repo name looks like owner/model."
+        ]
+    return []
+
+
 def estimate_lora_params(
     *,
     hidden_size: int,
@@ -1234,18 +1361,26 @@ def _rough_time_note(total_steps: int) -> str:
 
 
 def _effective_settings_for_estimate(
-    store: Store, profile: str, project: str
+    store: Store, profile: str, project: str,
+    model_params_b: float | None = None,
 ) -> dict:
     """The settings a run would use (T84): the auto-config recipe
     for an "auto" project, re-resolved from a fresh measurement
     WITHOUT storing it (a display refresh must not write), or the
     stored settings for a "manual" one. The user never sees these
-    numbers (T16) — the estimate shows fit and time, not knobs."""
+    numbers (T16) — the estimate shows fit and time, not knobs.
+    R78: the re-resolve is model-aware when the caller knows the
+    base size, like the run-start one."""
     proj = store.get_project(profile, project)
     settings = dict(DEFAULT_TRAIN)
     if proj.get("settings_source", "manual") == "auto":
         measurement = measure_pc(store.home)
-        settings.update(compute_settings(measurement["ram_available_gb"]))
+        settings.update(compute_settings(
+            measurement["ram_available_gb"],
+            model_params_b=model_params_b,
+            disk_free_gb=measurement["disk_free_gb"],
+            cpu_count=measurement["cpu_count"],
+        ))
     else:
         settings.update(proj.get("settings", {}) or {})
     return settings
@@ -1266,6 +1401,58 @@ def _no_dataset_error(project: str, *, cli: bool) -> StellaError:
         f"project {project!r} has no dataset set. Pick a .jsonl "
         "dataset in the Train panel, or use the sample dataset"
     )
+
+
+def estimate_run_disk_bytes(
+    *,
+    base_bytes: int,
+    trainable_params: int,
+    total_steps: int,
+    checkpoint_steps: int,
+) -> int:
+    """The disk one run needs (R79): the merged weights (a full
+    copy of the base) + one checkpoint per checkpoint interval
+    plus the final one + the finished adapter. Shared by
+    estimate_run and the train-start disk guard, so the estimate
+    and the refusal agree."""
+    if checkpoint_steps > 0:
+        n_checkpoints = total_steps // checkpoint_steps + 1
+    else:
+        n_checkpoints = 1
+    return (
+        base_bytes
+        + n_checkpoints * trainable_params * _CHECKPOINT_BYTES_PER_PARAM
+        + trainable_params * 4
+    )
+
+
+# R79: headroom above the run's own disk need — the disk must hold
+# the run plus this much spare, so a nearly-full disk refuses
+# before the run starts filling it.
+DISK_HEADROOM_BYTES = 512 * 1024 * 1024
+
+
+def check_disk_fit(needed_bytes: int, free_bytes: int | None) -> None:
+    """R79: refuse when the disk cannot hold this run. `needed`
+    is the run's own new disk need (its checkpoints, the merged
+    weights, the adapter); the headroom rides on top. Existing
+    checkpoints are NOT added in — they are already on the disk,
+    so free space already excludes them, and adding them would
+    refuse runs that fit. An unreadable disk (free_bytes None)
+    never refuses — the writes themselves fail readably then.
+    Raises StellaError in plain words."""
+    if free_bytes is None:
+        return
+    total_needed = needed_bytes + DISK_HEADROOM_BYTES
+    if free_bytes < total_needed:
+        raise StellaError(
+            "Not enough free disk to train: this run needs about "
+            f"{_fmt_disk(total_needed)} free (the checkpoints it "
+            "will write, plus the merged weights, plus room to "
+            "spare), and this disk has "
+            f"{_fmt_disk(free_bytes)} free. Free some space, or "
+            "delete old checkpoints first."
+        )
 
 
 def estimate_run(
@@ -1300,9 +1487,16 @@ def estimate_run(
             f"profile {profile!r} has no base_ref. Set it to the "
             f"Hugging Face repo of the base model (e.g. {LFM3_HF_REPO!r})"
         )
-    settings = _effective_settings_for_estimate(store, profile, project)
-    settings.update(validate_run_settings(settings))
+    # R78: the metadata loads first, so the estimate uses the same
+    # model-aware recipe the run will use — otherwise the estimate
+    # could refuse a run that would have shrunk and fit.
     meta = load_model_metadata(ref)
+    params = meta.get("params")
+    settings = _effective_settings_for_estimate(
+        store, profile, project,
+        model_params_b=params / 1e9 if params else None,
+    )
+    settings.update(validate_run_settings(settings))
     trainable = estimate_lora_params(
         hidden_size=meta["hidden_size"],
         intermediate_size=meta["intermediate_size"],
@@ -1352,16 +1546,14 @@ def estimate_run(
     # Disk: the merged weights (a full copy of the base) + one
     # checkpoint per checkpoint interval plus the final one + the
     # finished adapter. A checkpoint interval of 0 means no
-    # mid-run checkpoints, only the final save.
-    checkpoint_steps = int(settings.get("checkpoint_steps", 50))
-    if checkpoint_steps > 0:
-        n_checkpoints = total_steps // checkpoint_steps + 1
-    else:
-        n_checkpoints = 1
-    disk_bytes = (
-        meta["base_bytes"]
-        + n_checkpoints * trainable * _CHECKPOINT_BYTES_PER_PARAM
-        + trainable * 4
+    # mid-run checkpoints, only the final save. The formula lives
+    # in estimate_run_disk_bytes, shared with the train-start
+    # disk guard (R79).
+    disk_bytes = estimate_run_disk_bytes(
+        base_bytes=meta["base_bytes"],
+        trainable_params=trainable,
+        total_steps=total_steps,
+        checkpoint_steps=int(settings.get("checkpoint_steps", 50)),
     )
     total_chars = (
         info["avg_prompt_chars"] + info["avg_completion_chars"]
@@ -1537,7 +1729,6 @@ def load_base_model(base_ref: str, *, dtype: str = "bfloat16"):
 def _hf_load_message(base_ref: str, exc: Exception) -> str:
     """A plain-words cause for a failed from_pretrained call."""
     detail = str(exc).strip().splitlines()
-    first = detail[0][:200] if detail else ""
     lowered = " ".join(detail).lower()
     if Path(base_ref).expanduser().is_dir():
         return (
@@ -1559,8 +1750,11 @@ def _hf_load_message(base_ref: str, exc: Exception) -> str:
             f"could not load the base model {base_ref!r}: the download "
             "failed. Check the network and try again."
         )
-    if first:
-        return f"could not load the base model {base_ref!r}: {first}"
+    # R80: the old fallback returned the first raw transformers
+    # line verbatim — library internals in a user-facing message.
+    # The generic closing branch says the same thing in plain
+    # words; the raw line stays on the exception chain (the
+    # caller raises `from exc`) for debugging.
     return (
         f"could not load the base model {base_ref!r}. Check the name "
         "and the network, then try again."
@@ -1978,6 +2172,10 @@ def list_checkpoints(
     for d in sorted(ckpt_dir.iterdir()):
         if not d.is_dir() or not d.name.startswith("step-"):
             continue
+        # R77: a `.tmp` dir is a save in progress, not a
+        # checkpoint — never listed, never resumed from.
+        if d.name.endswith(".tmp"):
+            continue
         state_file = d / "training_state.json"
         if not state_file.is_file():
             continue
@@ -2063,25 +2261,131 @@ def prune_checkpoints(store: Store, profile: str, project: str,
 def _save_checkpoint(model, optimizer, ckpt_dir: Path, state: dict) -> None:
     import torch
 
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
-    model.save_pretrained(str(ckpt_dir))
-    torch.save(
-        {
-            "optimizer": optimizer.state_dict(),
-            "step": state["step"],
-            "epoch": state["epoch"],
-            "examples_seen_in_epoch": state["examples_seen_in_epoch"],
-            # The torch RNG state (T32): resume restores it, so the
-            # dropout draws continue exactly where they left off
-            # and a paused run is bit-identical to an uninterrupted
-            # one. A ByteTensor loads fine under weights_only=True.
-            "rng_state": torch.get_rng_state(),
-        },
-        ckpt_dir / "optimizer.pt",
+    # R77: write to a tmp dir and rename into place — a crash
+    # mid-save leaves a `.tmp` dir, never a half-written step-N.
+    # A stale tmp dir from a crashed save is cleared first. A
+    # previous save of this same step is replaced only once the
+    # new one is complete (rename onto a non-empty dir fails, so
+    # the old dir goes just before the rename — the window where
+    # the step is missing is one rename). A failed save removes
+    # the tmp dir and leaves any previous step-N untouched.
+    tmp_dir = ckpt_dir.with_name(ckpt_dir.name + ".tmp")
+    if tmp_dir.exists():
+        shutil.rmtree(tmp_dir)
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        model.save_pretrained(str(tmp_dir))
+        torch.save(
+            {
+                "optimizer": optimizer.state_dict(),
+                "step": state["step"],
+                "epoch": state["epoch"],
+                "examples_seen_in_epoch": state["examples_seen_in_epoch"],
+                # The torch RNG state (T32): resume restores it, so the
+                # dropout draws continue exactly where they left off
+                # and a paused run is bit-identical to an uninterrupted
+                # one. A ByteTensor loads fine under weights_only=True.
+                "rng_state": torch.get_rng_state(),
+            },
+            tmp_dir / "optimizer.pt",
+        )
+        (tmp_dir / "training_state.json").write_text(
+            json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+    except BaseException:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
+    if ckpt_dir.exists():
+        shutil.rmtree(ckpt_dir)
+    tmp_dir.rename(ckpt_dir)
+
+
+def list_orphan_checkpoints(
+    store: Store, profile: str, project: str, *, ckpt_dir: Path | None = None
+) -> list[dict]:
+    """Orphan checkpoint folders for a project (R77): step dirs
+    with no readable training_state.json (a crash mid-save, from
+    before tmp+rename) plus stale `.tmp` dirs (a crash mid-save
+    since). Each entry carries name, path, size_bytes, modified.
+    A live run's in-progress tmp dir looks exactly like a stale
+    one — callers must not reap without the grace (see
+    reap_orphan_checkpoints) or the job lock."""
+    if ckpt_dir is None:
+        ckpt_dir = store.project_dir(profile, project) / "checkpoints"
+    out = []
+    if not ckpt_dir.is_dir():
+        return out
+    for d in sorted(ckpt_dir.iterdir()):
+        if not d.is_dir() or not d.name.startswith("step-"):
+            continue
+        orphan = False
+        if d.name.endswith(".tmp"):
+            orphan = True
+        else:
+            state_file = d / "training_state.json"
+            if not state_file.is_file():
+                orphan = True
+            else:
+                try:
+                    json.loads(state_file.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+                    orphan = True
+        if not orphan:
+            continue
+        try:
+            modified = d.stat().st_mtime
+        except OSError:
+            modified = 0.0
+        out.append(
+            {
+                "name": d.name,
+                "path": str(d),
+                "size_bytes": _dir_size_bytes(d),
+                "modified": modified,
+            }
+        )
+    return out
+
+
+# R77: an orphan younger than this is left alone unless the caller
+# holds the job lock (force=True) — a live run's in-progress save
+# looks exactly like a crashed one.
+ORPHAN_GRACE_SECONDS = 3600
+
+
+def reap_orphan_checkpoints(
+    store: Store, profile: str, project: str, *,
+    ckpt_dir: Path | None = None,
+    force: bool = False,
+) -> dict:
+    """Delete orphan checkpoint folders (R77). Without force, only
+    orphans older than ORPHAN_GRACE_SECONDS go — a live run's
+    in-progress save is never touched. With force (the caller
+    holds the job lock, so no run is writing), every orphan goes.
+    Returns the reaped names, the skipped (too young) names, and
+    the bytes freed."""
+    import time
+
+    orphans = list_orphan_checkpoints(
+        store, profile, project, ckpt_dir=ckpt_dir
     )
-    (ckpt_dir / "training_state.json").write_text(
-        json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    now = time.time()
+    reaped: list[str] = []
+    skipped: list[str] = []
+    freed = 0
+    for orphan in orphans:
+        if not force and now - orphan["modified"] < ORPHAN_GRACE_SECONDS:
+            skipped.append(orphan["name"])
+            continue
+        path = Path(orphan["path"])
+        freed += _dir_size_bytes(path)
+        shutil.rmtree(path, ignore_errors=True)
+        reaped.append(orphan["name"])
+    return {
+        "reaped": reaped,
+        "skipped": skipped,
+        "freed_bytes": freed,
+    }
 
 
 def _append_log(project_dir: Path, record: dict) -> None:
@@ -2093,6 +2397,16 @@ def _emit_warning(on_event, message: str) -> None:
     """A warning event, when there is someone listening."""
     if on_event is not None:
         on_event({"type": "warning", "message": message})
+
+
+def _oom_error(exc: BaseException) -> StellaError | None:
+    """R76: the plain-words StellaError for an out-of-memory
+    failure, or None when the exception is not one. The wording
+    is tool_errors' — the same message the llama.cpp paths use."""
+    from .tool_errors import oom_message
+
+    message = oom_message(exc)
+    return StellaError(message) if message is not None else None
 
 
 def _run_started_at() -> str:
@@ -2777,7 +3091,10 @@ def train_project(
     # runs (update_status=False) never rewrite the project — the
     # consolidation job trains with its own override.
     if update_status:
-        refresh_auto_settings(store, profile, project)
+        refresh_auto_settings(
+            store, profile, project,
+            on_event=on_event, work_dir=work_dir,
+        )
         proj = store.get_project(profile, project)
 
     settings = dict(DEFAULT_TRAIN)
@@ -2977,6 +3294,46 @@ def train_project(
             check_dataset_fit(
                 dataset_bytes, pre_estimate, available_bytes=available
             )
+            # R79: the disk guard — a run must not start on a disk
+            # that cannot hold its checkpoints. The metadata read
+            # is the same one the RAM guard just did (cached by
+            # the Hub client on the second call). A test-injected
+            # loader skips it, like the RAM guard above.
+            meta = load_model_metadata(ref)
+            trainable = estimate_lora_params(
+                hidden_size=meta["hidden_size"],
+                intermediate_size=meta["intermediate_size"],
+                num_layers=meta["num_layers"],
+                rank=int(settings.get("rank", 8)),
+            )
+            total_steps = (
+                max(
+                    1,
+                    math.ceil(
+                        len(train_examples)
+                        / (
+                            int(settings.get("batch_size", 1))
+                            * int(settings.get("grad_accum", 8))
+                        )
+                    ),
+                )
+                * int(settings.get("epochs", 3))
+            )
+            try:
+                free_disk = shutil.disk_usage(work_dir).free
+            except OSError:
+                free_disk = None
+            check_disk_fit(
+                estimate_run_disk_bytes(
+                    base_bytes=meta["base_bytes"],
+                    trainable_params=trainable,
+                    total_steps=total_steps,
+                    checkpoint_steps=int(
+                        settings.get("checkpoint_steps", 50)
+                    ),
+                ),
+                free_disk,
+            )
 
         # T165: the profile was just used — a real training run
         # (not a sleep consolidation, which passes
@@ -2986,6 +3343,26 @@ def train_project(
         # so a run that never started never stamps.
         if update_status:
             store.touch_last_used(profile)
+
+        # R77: a crashed save leaves orphan checkpoint folders —
+        # this run holds the job lock, so no other run is writing
+        # and every orphan is safe to reap. Said out loud (event
+        # + run log), so a reaped folder is never a mystery.
+        reaped = reap_orphan_checkpoints(
+            store, profile, project,
+            ckpt_dir=work_dir / "checkpoints", force=True,
+        )
+        if reaped["reaped"]:
+            count = len(reaped["reaped"])
+            message = (
+                f"cleaned up {count} unfinished checkpoint "
+                f"folder{'s' if count != 1 else ''} from an "
+                "interrupted save "
+                f"({_fmt_disk(reaped['freed_bytes'])} freed)."
+            )
+            if on_event is not None:
+                on_event({"type": "warning", "message": message})
+            _append_log(work_dir, {"event": "warning", "message": message})
 
         # Load the base, then check the guard a second time with the
         # real param counts (belt and braces: the pre-load estimate
@@ -3005,10 +3382,19 @@ def train_project(
                     "download finishes."
                 ),
             })
-        if _model_loader is not None:
-            model, tokenizer = _model_loader()
-        else:
-            model, tokenizer = load_base_model(ref, dtype=_dtype)
+        # R76: the base load is the first big allocation — an
+        # out-of-memory here gets the plain-words message, not
+        # raw torch text.
+        try:
+            if _model_loader is not None:
+                model, tokenizer = _model_loader()
+            else:
+                model, tokenizer = load_base_model(ref, dtype=_dtype)
+        except Exception as exc:
+            oom = _oom_error(exc)
+            if oom is not None:
+                raise oom from exc
+            raise
         import torch
         from peft import LoraConfig, PeftModel, get_peft_model
 
@@ -3201,7 +3587,7 @@ def train_project(
                 # checkpoint this run writes.
                 dataset_fingerprint=fingerprint,
             )
-        except Exception:
+        except Exception as exc:
             # A crash is not a pause (T53): a run that errors is
             # failed, so the project never looks resumable when
             # there is no clean checkpoint to resume from. A
@@ -3209,6 +3595,11 @@ def train_project(
             # and lands in "paused" below, not here.
             if update_status:
                 store.update_project(profile, project, status="failed")
+            # R76: an out-of-memory crash mid-run gets the
+            # plain-words message, not raw torch text.
+            oom = _oom_error(exc)
+            if oom is not None:
+                raise oom from exc
             raise
         if update_status:
             store.update_project(

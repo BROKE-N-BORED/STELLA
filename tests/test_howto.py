@@ -21,15 +21,17 @@ EXPECTED_TITLES = [
     "Making a model smaller",
     "Teaching a small model",
     "Troubleshooting",
+    "Shortcuts",
 ]
 
 
-def test_seventeen_topics_in_order():
+def test_eighteen_topics_in_order():
     # R70: four topics added (Bridge, Checkpoints, Recipe and
     # adapter packages, Governing seats) — the count moves
-    # deliberately, from 13 to 17.
+    # deliberately, from 13 to 17. R98: the Shortcuts topic,
+    # generated from the shortcut registry, makes 18.
     assert topic_titles() == EXPECTED_TITLES
-    assert len(TOPICS) == 17
+    assert len(TOPICS) == 18
 
 
 def test_every_topic_has_real_content():

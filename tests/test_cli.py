@@ -30,6 +30,7 @@ ALL_COMMANDS = [
     "rename-profile", "delete-profile", "update-profile",
     "show-profile", "rename-project", "delete-project",
     "update-project", "show-project",
+    "delete-checkpoint", "prune-checkpoints",
     "export-recipe", "export-adapter", "import-adapter",
     "pull-weights", "bridge",
     "clone-profile", "clone-project",
@@ -1703,7 +1704,7 @@ def test_cli_delete_profile_purge(home):
     from stella.model import Store
 
     _seed_cli_home(home)
-    res = run_cli(home, "delete-profile", "p1", "--purge")
+    res = run_cli(home, "delete-profile", "p1", "--purge", "--yes")
     assert res.returncode == 0
     assert "forever" in res.stdout
     assert Store(home).list_trash() == []
@@ -1767,7 +1768,7 @@ def test_cli_delete_project_moves_to_trash(home):
     assert res.returncode == 0
     assert "to the trash" in res.stdout
     assert Store(home).list_trash()
-    res = run_cli(home, "delete-project", "p1", "proj", "--purge")
+    res = run_cli(home, "delete-project", "p1", "proj", "--purge", "--yes")
     assert res.returncode == 1  # already gone
 
 
@@ -1775,7 +1776,7 @@ def test_cli_delete_project_purge(home):
     from stella.model import Store
 
     _seed_cli_home(home)
-    res = run_cli(home, "delete-project", "p1", "proj", "--purge")
+    res = run_cli(home, "delete-project", "p1", "proj", "--purge", "--yes")
     assert res.returncode == 0
     assert "forever" in res.stdout
     assert Store(home).list_trash() == []
@@ -1922,7 +1923,7 @@ def test_cli_export_profile_round_trip(home, tmp_path):
     res = run_cli(home, "export-profile", "solo", str(dest))
     assert res.returncode == 0
     assert "solo-stella-profile-export" in res.stdout
-    run_cli(home, "delete-profile", "solo", "--purge")
+    run_cli(home, "delete-profile", "solo", "--purge", "--yes")
     res = run_cli(home, "import", str(dest / "solo-stella-profile-export"))
     assert res.returncode == 0
     assert "Imported profile 'solo' (no projects)." in res.stdout
@@ -2561,6 +2562,8 @@ def _json_sweep_args(command, tmp_path):
         "show-project": ["p1", "proj"],
         "clone-profile": ["p1", "p1-clone"],
         "clone-project": ["p1", "proj", "proj-clone"],
+        "delete-checkpoint": ["p1", "proj", "1"],
+        "prune-checkpoints": ["p1", "proj"],
         "list-keys": [],
         "remove-key": ["groq"],
     }[command]
@@ -2731,7 +2734,7 @@ def test_json_create_rename_update_delete_parse(home):
     assert res.returncode == 0, res.stderr
     assert json.loads(res.stdout)["name"] == "p1b"
 
-    res = run_cli(home, "delete-profile", "p1b", "--purge", "--json")
+    res = run_cli(home, "delete-profile", "p1b", "--purge", "--yes", "--json")
     assert res.returncode == 0, res.stderr
     assert json.loads(res.stdout)["action"] == "purged"
 

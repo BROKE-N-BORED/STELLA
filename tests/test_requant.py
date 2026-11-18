@@ -565,9 +565,10 @@ def test_requant_create_failure_keeps_work_file(env_setup, tmp_path):
             work_dir=work, _runner=runner,
             _models_dir=env_setup["models"],
         )
-    # The smaller file survives the failed create, for a retry.
-    assert len(list(work.glob("*.gguf"))) == 1
-    assert (work / "Modelfile").is_file()
+    # The smaller file survives the failed create, for a retry —
+    # inside the per-job dir (R86).
+    assert len(list(work.glob("**/*.gguf"))) == 1
+    assert len(list(work.glob("**/Modelfile"))) == 1
 
 
 # -- CLI end to end (real subprocess, fake tools on PATH) --------------

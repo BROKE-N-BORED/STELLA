@@ -63,19 +63,8 @@ def window(qapp, seeded, settings):
 # -- Version --------------------------------------------------------
 
 
-def test_version_is_0_27_0(home):
-    """The version is 0.27.0 everywhere the CLI reports it."""
-    from stella.model import STELLA_VERSION
-
-    assert STELLA_VERSION == "0.27.0"
-    res = run_cli(home, "--version")
-    assert res.returncode == 0
-    assert "0.27.0" in res.stdout
-
-
-def test_window_title_carries_version(window):
-    """The window title carries STELLA 0.27.0."""
-    assert "0.27.0" in window.windowTitle()
+# NOTE: the version tests moved to test_v28.py (test_version_is_0_28_0,
+# test_window_title_carries_version) — the version is 0.28.0 now.
 
 
 # -- Slice: the new commands exist ---------------------------------

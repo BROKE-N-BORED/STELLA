@@ -25,6 +25,7 @@ import re
 import shutil
 import struct
 import subprocess
+import tempfile
 from pathlib import Path
 
 from .gguf import LLAMA_CPP_HINT, write_modelfile
@@ -206,7 +207,22 @@ def _modelfile_blob(tag: str) -> Path | None:
         return None
     for line in proc.stdout.splitlines():
         if line.strip().upper().startswith("FROM "):
-            candidate = Path(line.split(None, 1)[1].strip())
+            # R84: the path may be quoted ("FROM "/a b/c.gguf"") —
+            # strip one pair of matching quotes, or the quotes stay
+            # attached and is_file() fails on a path that exists.
+            # The split itself is already right for unquoted spaced
+            # paths (split(None, 1) cuts only at the first
+            # whitespace), so unquoted input is used as-is — a
+            # shlex.split here would cut an unquoted spaced path
+            # at its first space.
+            remainder = line.split(None, 1)[1].strip()
+            if (
+                len(remainder) >= 2
+                and remainder[0] == remainder[-1]
+                and remainder[0] in ("\"", "'")
+            ):
+                remainder = remainder[1:-1]
+            candidate = Path(remainder)
             if candidate.is_file():
                 return candidate
     return None
@@ -813,10 +829,19 @@ def requant_model(
 
     work = Path(work_dir) if work_dir else default_home() / "requant"
     work.mkdir(parents=True, exist_ok=True)
+    # R86: a per-job dir under the work dir — the GGUF and the
+    # Modelfile both live inside it, so two concurrent requants
+    # can never share a work-file name. Tags like a/b:c and a-b:c
+    # used to map to the same file, and the Modelfile was one
+    # fixed shared name; requant takes no job lock, so two CLI
+    # requants genuinely run concurrently. mkdtemp makes the name
+    # unique, and the delete-first pre-clear is gone with it — a
+    # fresh dir has nothing stale in it.
     safe = tag.strip().lower().replace("/", "-").replace(":", "-")
-    out_path = work / f"{safe}-{quant.lower().replace('_', '-')}.gguf"
-    if out_path.exists():
-        out_path.unlink()
+    job_dir = Path(tempfile.mkdtemp(
+        prefix=f"{safe}-{quant.lower().replace('_', '-')}-", dir=work
+    ))
+    out_path = job_dir / f"{safe}-{quant.lower().replace('_', '-')}.gguf"
 
     # Disk check before writing: the output is roughly the source
     # size scaled by the bits per weight. Unknown source quant
@@ -892,18 +917,12 @@ def requant_model(
         # StellaError only, so Ctrl+C (a BaseException) and a disk
         # error (OSError) left the partial file behind. The
         # interrupt is re-raised, never swallowed, and the cleanup
-        # itself never raises.
-        try:
-            out_path.unlink(missing_ok=True)
-        except OSError:
-            pass
+        # itself never raises. R86: the whole per-job dir goes.
+        shutil.rmtree(job_dir, ignore_errors=True)
         raise
     if not out_path.is_file() or out_path.stat().st_size == 0:
         # Empty output is no output: clear it before complaining.
-        try:
-            out_path.unlink(missing_ok=True)
-        except OSError:
-            pass
+        shutil.rmtree(job_dir, ignore_errors=True)
         raise StellaError(
             f"The quantizer finished but wrote no file for {tag!r}. "
             "Try again, and check the disk is not full."
@@ -917,9 +936,12 @@ def requant_model(
     })
 
     modelfile, _command = write_modelfile(
-        out_path, work / "Modelfile", name=new_tag
+        out_path, job_dir / "Modelfile", name=new_tag
     )
     if should_stop is not None and should_stop():
+        # A cancel between the quantize and the create leaves no
+        # work files behind either (R86: the whole per-job dir).
+        shutil.rmtree(job_dir, ignore_errors=True)
         raise StellaError("Cancelled.")
     try:
         _run(
@@ -943,25 +965,16 @@ def requant_model(
         # failed quantize above. A plain StellaError keeps the
         # file on purpose (the message above names it, so the user
         # can retry the create); an interrupt is not a retryable
-        # failure, so the work files go.
-        try:
-            out_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        try:
-            modelfile.unlink(missing_ok=True)
-        except OSError:
-            pass
+        # failure, so the work files go. R86: the whole per-job
+        # dir goes.
+        shutil.rmtree(job_dir, ignore_errors=True)
         raise
     emit({"type": "created", "new_tag": new_tag})
 
     # Ollama copied the file into its own store, so the work files
-    # can go. The original blob was never touched.
-    try:
-        out_path.unlink()
-        modelfile.unlink()
-    except OSError:
-        pass
+    # can go. The original blob was never touched. R86: the whole
+    # per-job dir goes.
+    shutil.rmtree(job_dir, ignore_errors=True)
     return {
         "source_tag": tag,
         "source_bytes": source_bytes,

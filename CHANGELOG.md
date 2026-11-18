@@ -1,5 +1,95 @@
 # Changelog
 
+## v0.28.0 — 2026-11-18
+
+The first P3 batch of the 2026-11-15 full-product review
+(R76–R102, minus R92 which shipped in v0.27.0): training honesty
+(plain-words out-of-memory, a disk check before a run starts,
+orphan checkpoints reaped, settings that re-resolve when the
+model changes), a CLI that asks before deleting, a trash that
+shows its size and clears out old items on its own, a job that
+can be un-picked, Quit in the File menu, a finish moment that
+lingers, drag-and-drop for a dataset file, one shortcuts registry
+behind the Shortcuts topic, and cloud models as buttons in the
+chat window. Full record:
+docs/stella-review-task-list-2026-11-15.md.
+
+- R76 — An out-of-memory failure during training says so in
+  plain words ("the PC ran out of memory") with what to do
+  next, instead of a raw traceback. The shared wording lives in
+  tool_errors.py.
+- R77 — Checkpoints save through a temp file + rename, so a
+  crash mid-save leaves no half checkpoint behind. Orphans are
+  reaped when a run starts, and `delete-checkpoint` /
+  `prune-checkpoints` manage them from the CLI.
+- R78 — Auto-settings now react to the model and the machine:
+  a model of 3B or more trains smaller, under 10 GB of disk
+  checkpoints less often, and 2 CPUs or fewer trains shorter
+  sequences. A run-start refresh announces any change.
+- R79 — A run is refused before it starts when the disk cannot
+  hold the checkpoints, with 512 MB of headroom. Existing
+  checkpoint bytes are not double-counted.
+- R80 — Raw error text from Ollama and from Hugging Face loads
+  no longer reaches the user; the plain-words message is shown
+  and the raw text is kept on the exception chain.
+- R81 — `export-gguf` on the CLI prints the size estimate
+  first, like the window does.
+- R82 — `ollama create` gets a 30-minute timeout from the CLI
+  and the window, so a stuck create cannot hang forever.
+- R83 — The stale merged-model directory is cleared inside the
+  job lock with a lock-time re-check, so two exports cannot
+  delete each other's work.
+- R84 — A Modelfile FROM line with a quoted path (spaces in
+  the folder) is read right: one pair of matching quotes is
+  stripped, and unquoted spaced paths still work.
+- R85 — A prompts file saved with a byte-order mark (Windows
+  editors do this) reads cleanly; the mark is stripped.
+- R86 — Each requant run gets its own temp job directory for
+  the GGUF and the Modelfile, so two requants can no longer
+  overwrite each other's files.
+- R87 — A base model reference that cannot be found gets a
+  health warning on GUI save, on import, and on the CLI when
+  the user explicitly sets it. Tag-valued bases (the store's
+  synced default) are not flagged.
+- R88 — `settings_source` (auto vs manual) survives an export
+  and an import: the package manifest carries it, validates it,
+  and restores it. Documented in docs/FORMAT.md.
+- R89 — The LFM3 template's dead `notes` key is gone, and a
+  guard test fails if any template carries a dropped key again.
+- R90 — `delete-profile` and `delete-project` on the CLI ask
+  first (the window already did); `--yes` skips the prompt.
+- R91 — Trash shows each item's size and a total, and items
+  older than 30 days are purged when the Trash window opens.
+- R93 — A picked job can be un-picked: clicking it again
+  disarms Go. Switching jobs still keeps at most one picked.
+- R94 — Quit is in the File menu with Ctrl+Q, wired to the
+  same close path as the window chrome, so a running job gets
+  the same stop-and-wait.
+- R95 — The finish moment lingers 2.5 s (was 250 ms), long
+  enough to actually read it. Reduced motion is unchanged.
+- R96 — A How to Use search with no matches says so in the
+  pane ("Nothing matches '<query>'. Try fewer words.") instead
+  of leaving the old body up.
+- R97 — A dataset file can be dropped onto the "Pick dataset
+  file" button and the project window's Dataset field. A bad
+  drop (not .jsonl, missing, unreadable) is refused in plain
+  words.
+- R98 — All shortcuts live in one registry (stella/shortcuts.py)
+  and the How to Use Shortcuts topic is generated from it, so
+  the list can never drift from the keys that work. 8 shortcuts
+  including the new Ctrl+Q.
+- R99 — A reply that hits the 12 tool-call cap, or is
+  cancelled, is recorded in the chat history instead of
+  vanishing.
+- R100 — "just do it" matches anywhere in a message, not only
+  at the start. A refusal still wins when a plan is pending.
+- R101 — A custom provider base URL ending in
+  /chat/completions has it stripped before Stella appends it,
+  so the URL is never doubled.
+- R102 — The chat window offers cloud models as buttons
+  (Groq, Gemini, custom — with saved keys only), labelled with
+  their provider, even when Ollama is down.
+
 ## v0.27.0 — 2026-11-17
 
 The second P2 batch of the 2026-11-15 full-product review (R52–R75),

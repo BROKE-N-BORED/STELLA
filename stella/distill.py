@@ -45,7 +45,11 @@ def _read_prompts(path: str | Path) -> list[str]:
         )
     prompts = [
         line.strip()
-        for line in path.read_text(encoding="utf-8").splitlines()
+        # R85: utf-8-sig strips a leading byte-order mark, so a
+        # prompts file saved with a BOM does not send an invisible
+        # character as the first character of prompt 1. BOM-less
+        # files read byte-identical.
+        for line in path.read_text(encoding="utf-8-sig").splitlines()
         if line.strip()
     ]
     if not prompts:

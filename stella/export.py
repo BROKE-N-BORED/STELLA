@@ -83,6 +83,7 @@ from .model import (
     DEFAULT_SETTINGS,
     METAMORPH_MODES,
     PROJECT_STATUSES,
+    SETTINGS_SOURCES,
     STELLA_VERSION,
     WEIGHT_STATUSES,
     StellaError,
@@ -809,6 +810,10 @@ def _project_manifest_block(proj: dict) -> dict:
         "display_name": proj.get("display_name", proj["name"]),
         "dataset_ref": proj.get("dataset_ref", ""),
         "settings": proj.get("settings", {}),
+        # R88: whether the settings were picked by this PC (auto)
+        # or set by a human (manual) — the round-trip keeps it, so
+        # an auto project stays auto after an import.
+        "settings_source": proj.get("settings_source", "manual"),
         "metamorph": _metamorph_block(proj),
         "status": proj.get("status", "draft"),
     }
@@ -1388,6 +1393,16 @@ def _validate_project_block(proj: dict) -> None:
     for key in ("display_name", "dataset_ref", "dataset_bundled"):
         _check_field(proj, key, "str", "project")
     _check_field(proj, "settings", "dict", "project")
+    _check_field(proj, "settings_source", "str", "project")
+    # R88: the source is an enum when present — an unknown value
+    # is a broken manifest, like an unknown metamorph mode. An
+    # absent field is fine (old packages predate it).
+    source = proj.get("settings_source")
+    if source is not None and source not in SETTINGS_SOURCES:
+        raise StellaError(
+            f"export has unknown settings source: {source!r} "
+            f"(must be one of {', '.join(SETTINGS_SOURCES)})"
+        )
     _check_field(proj, "created", "str", "project")
     _check_field(proj, "updated", "str", "project")
     metamorph = proj.get("metamorph")
@@ -2346,6 +2361,27 @@ def _profile_merge_decision(
     return profile_existed, profile_diff, choice, local_block
 
 
+def _base_ref_import_warnings(prof: dict, warnings: list[str]) -> None:
+    """R87: the imported profile's base ref is checked against the
+    actual weights — a GGUF file, a local folder with no model,
+    or a malformed id warns (never refuses the import). A
+    tag-valued base stays silent here: it is the store's synced
+    default (T54 — the base follows the tag until split), not a
+    mistake, and the manifest cannot tell a synced tag from one
+    a user typed. The GUI save and the CLI warn about a tag only
+    when the user explicitly sets it. Only called when the
+    package's base ref is actually landing (a created or
+    take-merged profile), never when the local profile is kept."""
+    from .ollama_bridge import classify_base_ref
+    from .train import base_ref_warnings
+
+    ref = prof.get("base_ref", "")
+    kind, _detail = classify_base_ref(ref)
+    if kind == "ollama":
+        return
+    warnings.extend(base_ref_warnings(ref))
+
+
 def _create_profile_from_manifest(store, slug, prof) -> None:
     """Create a profile from a manifest block (T118: the original
     timestamps are restored, not re-stamped)."""
@@ -2411,12 +2447,22 @@ def _restore_project_record(
             )
             status = "draft"
     metamorph = proj.get("metamorph") or {}
+    # R88: the settings source rides along — an auto project stays
+    # auto (re-resolved for this PC by create_project, not frozen
+    # at the source PC's values), a manual one stays manual. Old
+    # packages lack the field, and an unrecognized value reads as
+    # missing: None means "infer as before" (explicit settings
+    # read as manual), so the change is backward-compatible.
+    source = proj.get("settings_source")
+    if source not in SETTINGS_SOURCES:
+        source = None
     created = store.create_project(
         slug,
         project_slug,
         display_name=proj.get("display_name", project_slug),
         dataset_ref=proj.get("dataset_ref", ""),
         settings=proj.get("settings", {}),
+        settings_source=source,
         metamorph_mode=metamorph.get("mode", "morph"),
         metamorph_notes=metamorph.get("notes", ""),
         created=proj.get("created"),
@@ -2819,6 +2865,8 @@ def import_export(
                 base_ref=prof.get("base_ref", ""),
             )
             merged_profile = True
+        if created_profile or merged_profile:
+            _base_ref_import_warnings(prof, warnings)
         if collision_mode == "replace":
             # T117 replace: the old project goes to the trash
             # first, so the import can land — and a failed import
@@ -3009,6 +3057,8 @@ def import_profile_export(
                 base_ref=prof.get("base_ref", ""),
             )
             merged_profile = True
+        if created_profile or merged_profile:
+            _base_ref_import_warnings(prof, warnings)
         for proj, name in zip(blocks, names):
             # The name is recorded BEFORE the restore: a restore
             # that fails midway still created the project, and the
@@ -3347,6 +3397,8 @@ def _import_adapter_new_project(
                 base_ref=prof.get("base_ref", ""),
             )
             merged_profile = True
+        if created_profile or merged_profile:
+            _base_ref_import_warnings(prof, warnings)
         created = store.create_project(
             slug,
             project_slug,

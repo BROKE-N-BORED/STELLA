@@ -25,12 +25,12 @@ import json
 import math
 import re
 import shutil
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .autoconfig import compute_settings, measure_pc
 
-STELLA_VERSION = "0.27.0"
+STELLA_VERSION = "0.28.0"
 
 # Slug: lowercase letters, digits, dash, underscore. Must start alnum.
 # No dots, no slashes — a slug can never climb out of its directory.
@@ -180,6 +180,13 @@ WEIGHT_STATUSES = ("done", "exported")
 # Projects written before v0.9 have no field and read as "manual",
 # so old hand-tuned settings are never overwritten.
 SETTINGS_SOURCES = ("auto", "manual")
+
+# R91: trashed items older than this are purged automatically when
+# the Trash window opens, so the trash never grows forever. The age
+# is counted from the dated folder name (the delete date), not the
+# folder's mtime — a rename preserves mtime, so mtime would date
+# the item from its last edit, not its delete.
+TRASH_AUTO_PURGE_DAYS = 30
 
 # Settings the model validates, with their allowed ranges. These are
 # the chat's ranges (chat_agent.SETTING_RULES imports this table) —
@@ -510,6 +517,40 @@ def _migrate_project_file(data: dict, manifest: Path) -> None:
             pass
 
 
+def _dir_size_bytes(path: Path) -> int:
+    """A directory's size in bytes (R91): every file under it,
+    symlinks not followed. Unreadable files count 0 rather than
+    failing the listing. (A twin of train._dir_size_bytes — the
+    model layer cannot import train.)"""
+    total = 0
+    try:
+        entries = list(path.rglob("*"))
+    except OSError:
+        return 0
+    for entry in entries:
+        try:
+            if entry.is_file() and not entry.is_symlink():
+                total += entry.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def _trash_date(name: str) -> datetime | None:
+    """The delete date from a trash folder name
+    (<base>-YYYYMMDD-HHMMSS, with an optional -2, -3 suffix), or
+    None when the name carries no date (a hand-moved folder)."""
+    match = re.match(r"^(.+)-(\d{8})-(\d{6})(?:-\d+)?$", name)
+    if not match:
+        return None
+    try:
+        return datetime.strptime(
+            match.group(2) + match.group(3), "%Y%m%d%H%M%S"
+        ).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
 class Store:
     """All profile/project storage. One Store = one home dir."""
 
@@ -542,10 +583,12 @@ class Store:
 
     def list_trash(self) -> list[dict]:
         """Every trashed item: {"name", "kind", "profile",
-        "project", "trashed", "path"}. The kind and names come
-        from the manifest inside the folder, so a hand-moved
-        folder still reads right; the date comes from the folder
-        name."""
+        "project", "trashed", "path", "size_bytes"}. The kind and
+        names come from the manifest inside the folder, so a
+        hand-moved folder still reads right; the date comes from
+        the folder name. The size is the folder's disk use (R91),
+        weights and checkpoints included — counted from the
+        folder, not the manifest."""
         out = []
         if not self.trash_dir.is_dir():
             return out
@@ -559,16 +602,11 @@ class Store:
                 "project": "",
                 "trashed": "",
                 "path": str(d),
+                "size_bytes": _dir_size_bytes(d),
             }
-            match = re.match(
-                r"^(.+)-(\d{8})-(\d{6})(?:-\d+)?$", d.name
-            )
-            if match:
-                date, clock = match.group(2), match.group(3)
-                entry["trashed"] = (
-                    f"{date[:4]}-{date[4:6]}-{date[6:]} "
-                    f"{clock[:2]}:{clock[2:4]}:{clock[4:]}"
-                )
+            deleted = _trash_date(d.name)
+            if deleted is not None:
+                entry["trashed"] = deleted.strftime("%Y-%m-%d %H:%M:%S")
             prof_manifest = d / "profile.json"
             proj_manifest = d / "project.json"
             try:
@@ -595,6 +633,30 @@ class Store:
         if not target.is_dir():
             raise StellaError(f"nothing in the trash named {name!r}")
         shutil.rmtree(target)
+
+    def purge_old_trash(
+        self, max_age_days: int = TRASH_AUTO_PURGE_DAYS
+    ) -> dict:
+        """R91: purge trashed items older than `max_age_days`,
+        counted from the delete date in the folder name. Items
+        with no date in the name (hand-moved folders) are never
+        auto-purged — only dated deletes go. Returns the purged
+        names and the bytes freed."""
+        purged: list[str] = []
+        freed = 0
+        if not self.trash_dir.is_dir():
+            return {"purged": purged, "freed_bytes": freed}
+        cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+        for d in sorted(self.trash_dir.iterdir()):
+            if not d.is_dir():
+                continue
+            deleted = _trash_date(d.name)
+            if deleted is None or deleted >= cutoff:
+                continue
+            freed += _dir_size_bytes(d)
+            shutil.rmtree(d, ignore_errors=True)
+            purged.append(d.name)
+        return {"purged": purged, "freed_bytes": freed}
 
     def restore_trash(self, name: str) -> dict:
         """Move one trashed item back where it came from (R2).
@@ -1105,6 +1167,7 @@ class Store:
         display_name: str = "",
         dataset_ref: str = "",
         settings: dict | None = None,
+        settings_source: str | None = None,
         metamorph_mode: str = "morph",
         metamorph_notes: str = "",
         created: str | None = None,
@@ -1146,16 +1209,38 @@ class Store:
             )
         # Settings: no explicit settings means this PC picks them
         # (auto-config, measured now); explicit settings are the
-        # caller's and are validated but never recomputed.
-        if settings is None:
+        # caller's and are validated but never recomputed. R88: an
+        # explicit settings_source (an import restoring one) wins
+        # over the inference — "auto" re-resolves for this PC
+        # rather than freezing the source PC's values, and
+        # "manual" keeps the passed values. None means "infer as
+        # before" (no settings reads as auto, explicit ones as
+        # manual), so old callers are untouched.
+        if settings_source is not None and settings_source not in SETTINGS_SOURCES:
+            raise StellaError(
+                "settings source must be one of "
+                f"{', '.join(SETTINGS_SOURCES)}"
+            )
+        if settings_source == "auto" or (
+            settings is None and settings_source is None
+        ):
             measurement = measure_pc(self.home)
-            computed = compute_settings(measurement["ram_available_gb"])
+            # R78: the disk and CPU readings shape the recipe too.
+            # The model size is not resolved here (the base lives
+            # on the profile, and reading its metadata could
+            # fetch) — the run-start re-resolve supplies it before
+            # any training happens.
+            computed = compute_settings(
+                measurement["ram_available_gb"],
+                disk_free_gb=measurement["disk_free_gb"],
+                cpu_count=measurement["cpu_count"],
+            )
             merged = dict(DEFAULT_SETTINGS)
             merged.update(computed)
             settings_source = "auto"
         else:
             merged = dict(DEFAULT_SETTINGS)
-            merged.update(settings)
+            merged.update(settings or {})
             settings_source = "manual"
         merged = validate_settings(merged)
         data = {

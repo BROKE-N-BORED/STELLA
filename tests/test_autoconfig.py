@@ -68,15 +68,42 @@ def test_compute_settings_rules(ram, rank, seq):
     assert settings["epochs"] == 3
 
 
-def test_compute_settings_ignores_model_size_for_now():
-    # The base size is accepted but the RAM rules decide today.
-    assert compute_settings(8.0, model_params_b=70) == compute_settings(8.0)
-    assert compute_settings(2.0, model_params_b=0.5) == compute_settings(2.0)
+def test_compute_settings_uses_model_size():
+    # R78: a big base shrinks the recipe before the RAM guard has
+    # to refuse the run; a small base leaves it alone. Unknown
+    # size counts as plenty.
+    big = compute_settings(8.0, model_params_b=3.0)
+    assert big["rank"] == 4
+    assert big["max_seq_len"] == 512
+    assert compute_settings(8.0, model_params_b=70)["rank"] == 4
+    assert compute_settings(8.0, model_params_b=2.9)["rank"] == 8
+    assert compute_settings(8.0, model_params_b=0.5) == compute_settings(8.0)
+    assert compute_settings(8.0, model_params_b=None)["rank"] == 8
+    # Low RAM still shrinks a small model on its own.
+    assert compute_settings(2.0, model_params_b=0.5)["rank"] == 4
+
+
+def test_compute_settings_uses_disk_and_cpu():
+    # R78: a nearly-full disk spaces checkpoints out; few CPUs
+    # shorten the sequence. Rank is a memory knob, not a compute
+    # knob, so few CPUs do not change it. Unknown readings count
+    # as plenty.
+    assert compute_settings(8.0, disk_free_gb=9.9)["checkpoint_steps"] == 200
+    assert compute_settings(8.0, disk_free_gb=10.0)["checkpoint_steps"] == 50
+    assert compute_settings(8.0, disk_free_gb=None)["checkpoint_steps"] == 50
+    assert compute_settings(8.0, cpu_count=2)["max_seq_len"] == 512
+    assert compute_settings(8.0, cpu_count=2)["rank"] == 8
+    assert compute_settings(8.0, cpu_count=3)["max_seq_len"] == 1024
+    assert compute_settings(8.0, cpu_count=None)["max_seq_len"] == 1024
 
 
 def test_auto_settings_matches_parts(tmp_path):
     measurement, settings = auto_settings(tmp_path)
-    assert settings == compute_settings(measurement["ram_available_gb"])
+    assert settings == compute_settings(
+        measurement["ram_available_gb"],
+        disk_free_gb=measurement["disk_free_gb"],
+        cpu_count=measurement["cpu_count"],
+    )
     assert set(measurement) == {
         "cpu_count", "cpu_model", "ram_total_gb",
         "ram_available_gb", "disk_free_gb", "load1",
@@ -97,7 +124,12 @@ def test_format_report_plain_words(tmp_path):
 def test_create_project_uses_computed_settings(store):
     store.create_profile("p1")
     data = store.create_project("p1", "proj")
-    expected = compute_settings(measure_pc(store.home)["ram_available_gb"])
+    measurement = measure_pc(store.home)
+    expected = compute_settings(
+        measurement["ram_available_gb"],
+        disk_free_gb=measurement["disk_free_gb"],
+        cpu_count=measurement["cpu_count"],
+    )
     assert data["settings_source"] == "auto"
     for key, value in expected.items():
         assert data["settings"][key] == value
@@ -140,7 +172,11 @@ def test_refresh_auto_settings_recomputes(store, monkeypatch):
     # plenty-RAM recipe and the project stays auto.
     monkeypatch.setattr(
         train_mod, "measure_pc",
-        lambda home: {"ram_available_gb": 16.0},
+        lambda home: {
+            "ram_available_gb": 16.0,
+            "disk_free_gb": 50.0,
+            "cpu_count": 8,
+        },
     )
     settings = train_mod.refresh_auto_settings(store, "p1", "proj")
     assert settings["rank"] == 8
@@ -205,7 +241,9 @@ def test_train_project_calls_refresh(store, monkeypatch, tmp_path):
     monkeypatch.setattr(train_mod, "require_training_deps", lambda: None)
     monkeypatch.setattr(
         train_mod, "refresh_auto_settings",
-        lambda s, prof, proj: calls.append((prof, proj)) or real_refresh(s, prof, proj),
+        lambda s, prof, proj, **kwargs: (
+            calls.append((prof, proj)) or real_refresh(s, prof, proj)
+        ),
     )
     with pytest.raises(StellaError, match="no dataset"):
         train_mod.train_project(store, "p1", "proj")

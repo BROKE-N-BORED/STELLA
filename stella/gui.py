@@ -114,6 +114,7 @@ from .model import (
     CANONICAL_ROLES,
     GOVERNING_SEATS,
     STELLA_VERSION,
+    TRASH_AUTO_PURGE_DAYS,
     StellaError,
     Store,
     governing_seat_warning,
@@ -145,6 +146,7 @@ from .providers import (
     stale_list_notes,
     test_connection,
 )
+from .shortcuts import shortcut_for
 from .train import TrainController
 
 # The proof run's step cap (T95): a short smoke test before an
@@ -281,11 +283,13 @@ def _tag_warnings(store, tag, *, exclude_slug=None):
     return warnings
 
 
-def _confirm_tag(parent, warnings):
+def _confirm_tag(parent, warnings, question="Use this tag anyway?"):
     """One Proceed / Cancel dialog for tag warnings (T12). A
     deliberate entry — a tag about to be pulled — must never be
-    blocked, so the choice is always the user's. True = proceed."""
-    text = ". ".join(warnings) + ". Use this tag anyway?"
+    blocked, so the choice is always the user's. True = proceed.
+    R87: the question varies when base-ref warnings ride along
+    (see _confirm_save_warnings)."""
+    text = ". ".join(warnings) + ". " + question
     return (
         QMessageBox.question(
             parent, "Stella", text,
@@ -293,6 +297,23 @@ def _confirm_tag(parent, warnings):
         )
         == QMessageBox.Yes
     )
+
+
+def _confirm_save_warnings(parent, tag_warnings, base_warnings) -> bool:
+    """R87: one Proceed / Cancel dialog for the save-time soft
+    warnings — the T12 tag warnings plus the base-ref warnings
+    (a base that is a tag, a GGUF file, or a folder with no
+    model). No warnings means no dialog. True = proceed."""
+    all_warnings = list(tag_warnings) + list(base_warnings)
+    if not all_warnings:
+        return True
+    if tag_warnings and base_warnings:
+        question = "Use them anyway?"
+    elif base_warnings:
+        question = "Use this base anyway?"
+    else:
+        question = "Use this tag anyway?"
+    return _confirm_tag(parent, all_warnings, question)
 
 
 def _fmt_bytes(n: int) -> str:
@@ -801,7 +822,17 @@ class TrainWorker(QThread):
             self.finished.emit(False, str(exc))
             return
         except Exception as exc:  # keep the window alive on a crash
-            self.finished.emit(False, f"Training failed: {exc}")
+            # R76: an out-of-memory crash anywhere in the run gets
+            # the plain-words message. train_project translates
+            # its own, but the worker is the last line of defence
+            # for an OOM raised outside the translated regions.
+            from .tool_errors import oom_message
+
+            message = oom_message(exc)
+            if message is not None:
+                self.finished.emit(False, message)
+            else:
+                self.finished.emit(False, f"Training failed: {exc}")
             return
         # T96: the finish line carries the val loss next to the
         # training loss — it is the number that says whether the
@@ -1215,6 +1246,80 @@ class LossCurveWidget(QWidget):
             painter.end()
 
 
+def _dropped_file_path(mime_data) -> str | None:
+    """The first local file in dropped mime data (R97), or None
+    when the drag carries no local file."""
+    if not mime_data.hasUrls():
+        return None
+    for url in mime_data.urls():
+        if url.isLocalFile():
+            return url.toLocalFile()
+    return None
+
+
+def _refuse_bad_dataset_drop(path: str) -> str | None:
+    """The plain-words refusal for a dropped file that cannot be
+    a dataset (R97), or None when the file is usable: a .jsonl
+    file, present and readable. A dropped .txt must never
+    silently set a broken dataset."""
+    if not path.lower().endswith(".jsonl"):
+        return (
+            "That is not a .jsonl file. Drop a .jsonl dataset "
+            "file, or pick one with the Browse button."
+        )
+    if not Path(path).is_file():
+        return "That file is not there anymore. Drop the file again."
+    if not os.access(path, os.R_OK):
+        return (
+            "Stella cannot read that file. Check its permissions, "
+            "then drop it again."
+        )
+    return None
+
+
+class _FileDropMixin:
+    """Drag-and-drop for one local file (R97): the drag is
+    accepted when it carries a local file, and the drop emits
+    file_dropped with the plain path. Any file is accepted at
+    drag time; the receiver validates it and refuses a bad one
+    in plain words."""
+
+    def dragEnterEvent(self, event):
+        if _dropped_file_path(event.mimeData()) is not None:
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        path = _dropped_file_path(event.mimeData())
+        if path is None:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        self.file_dropped.emit(path)
+
+
+class DropButton(_FileDropMixin, QPushButton):
+    """A button that also takes a dropped file (R97)."""
+
+    file_dropped = Signal(str)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setAcceptDrops(True)
+
+
+class DropLineEdit(_FileDropMixin, QLineEdit):
+    """A line edit that takes a dropped file (R97): the drop
+    fills the field with the plain path, not a file:// URL."""
+
+    file_dropped = Signal(str)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setAcceptDrops(True)
+
+
 class JobCard(QFrame):
     """One running job (T74, entry 021): a title, a live status
     line, a progress bar, and a Cancel button. Every job — Train,
@@ -1224,6 +1329,10 @@ class JobCard(QFrame):
     so no job is ever below the fold while it runs."""
 
     cancel_clicked = Signal()
+
+    # R95: how long the finish moment lingers (2.5 s). A nine-word
+    # summary cannot be read in the 250 ms it used to last.
+    FINISH_MOMENT_MS = 2500
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1345,7 +1454,7 @@ class JobCard(QFrame):
             "background-color: #3a3016; }"
         )
         self.setVisible(True)
-        self._moment_timer.start(250)
+        self._moment_timer.start(self.FINISH_MOMENT_MS)
 
     def _end_finish_moment(self) -> None:
         self.setStyleSheet("")
@@ -1640,7 +1749,7 @@ class ProfileWindow(QDialog):
         )
         self._load()
         # Ctrl+S saves here (T82); Tab walks the form in visual order.
-        QShortcut(QKeySequence("Ctrl+S"), self, self.save)
+        QShortcut(QKeySequence(shortcut_for("save")), self, self.save)
         _chain_tab_order([
             self.display_edit, self.role_combo, self.seat_combo,
             self.tag_combo, self.base_edit, self.config_edit,
@@ -1982,12 +2091,21 @@ class ProfileWindow(QDialog):
                 return False
         # Soft tag check (T12): warn when the tag is not installed
         # or already used by another profile, and let the user
-        # proceed anyway. Cancelling saves nothing.
+        # proceed anyway. Cancelling saves nothing. R87: the base
+        # ref is checked against the actual weights the same soft
+        # way — but only when the user changed it (like the T54
+        # rule below): an untouched field is the store's business.
         tag = self.tag_combo.currentText().strip()
         warnings = _tag_warnings(
             self._main.store, tag, exclude_slug=self._slug
         )
-        if warnings and not _confirm_tag(self, warnings):
+        base_ref = self.base_edit.text().strip()
+        base_warnings = []
+        if base_ref != self._loaded_base:
+            from .train import base_ref_warnings
+
+            base_warnings = base_ref_warnings(base_ref)
+        if not _confirm_save_warnings(self, warnings, base_warnings):
             return False
         fields = {
             "display_name": self.display_edit.text().strip(),
@@ -2104,8 +2222,9 @@ class ProjectWindow(QDialog):
         details = CollapsibleSection("Details")
         form = QFormLayout()
         self.display_edit = QLineEdit()
-        self.dataset_edit = QLineEdit()
+        self.dataset_edit = DropLineEdit()
         self.dataset_edit.setPlaceholderText("path or name of the training data")
+        self.dataset_edit.file_dropped.connect(self._on_dataset_dropped)
         self.dataset_browse_btn = QPushButton("Browse...")
         self.dataset_browse_btn.clicked.connect(self._browse_dataset)
         dataset_row = QWidget()
@@ -2120,6 +2239,7 @@ class ProjectWindow(QDialog):
             "",
             _help_label(
                 "The training data: a .jsonl file of examples. "
+                "Drop a .jsonl file here, or press Browse. "
                 "The main screen has a sample to try."
             ),
         )
@@ -2229,7 +2349,7 @@ class ProjectWindow(QDialog):
         )
         self._load()
         # Ctrl+S saves here (T82); Tab walks the form in visual order.
-        QShortcut(QKeySequence("Ctrl+S"), self, self.save)
+        QShortcut(QKeySequence(shortcut_for("save")), self, self.save)
         _chain_tab_order([
             self.notes_edit, self.save_notes_btn,
             self.display_edit, self.dataset_edit, self.dataset_browse_btn,
@@ -2416,6 +2536,19 @@ class ProjectWindow(QDialog):
         self.dataset_edit.setText(path)
         self._check_dataset_display()
 
+    def _on_dataset_dropped(self, path):
+        """A file dropped on the Dataset field (R97): a .jsonl
+        file fills the field like Browse does, and the check below
+        says what it holds. Anything else is refused in plain
+        words, in the same spot the check reports."""
+        refusal = _refuse_bad_dataset_drop(path)
+        if refusal is not None:
+            self.dataset_info.setText(refusal)
+            self.dataset_info.setVisible(True)
+            return
+        self.dataset_edit.setText(path)
+        self._check_dataset_display()
+
     def _check_dataset_display(self):
         """Validate the Dataset field and say what it holds (T45):
         a valid file shows its example count, the train/check
@@ -2535,6 +2668,10 @@ class TrashDialog(QDialog):
                 "Delete forever removes it for good."
             )
         )
+        # R91: the trash total and the auto-purge age, refreshed
+        # with the list.
+        self.summary_label = QLabel()
+        layout.addWidget(self.summary_label)
         self.list_widget = QListWidget()
         self.list_widget.itemSelectionChanged.connect(self._on_selection)
         layout.addWidget(self.list_widget, 1)
@@ -2559,12 +2696,18 @@ class TrashDialog(QDialog):
         btns.addStretch(1)
         btns.addWidget(close_btn)
         layout.addLayout(btns)
+        # R91: items older than the auto-purge age are purged when
+        # this window opens — never silently mid-session — and the
+        # count is shown in the summary line, so nothing disappears
+        # without the user seeing it said.
+        self._auto_purged = main.store.purge_old_trash()
         self._refresh()
 
     def _refresh(self):
         """Rebuild the list from the store. Nothing selected."""
         self.list_widget.clear()
         entries = self._main.store.list_trash()
+        total = sum(e.get("size_bytes", 0) for e in entries)
         for entry in entries:
             if entry["kind"] == "profile":
                 what = f"profile {entry['profile']}"
@@ -2578,9 +2721,30 @@ class TrashDialog(QDialog):
             label = what
             if entry["trashed"]:
                 label += f", deleted {entry['trashed']}"
+            # R91: each item's size, so the user can tell how much
+            # disk the trash holds.
+            label += f", {_fmt_bytes(entry.get('size_bytes', 0))}"
             item = QListWidgetItem(label)
             item.setData(Qt.UserRole, entry["name"])
             self.list_widget.addItem(item)
+        # R91: the trash total, the auto-purge age, and what this
+        # open purged (if anything).
+        count = len(entries)
+        summary = (
+            f"Trash holds {_fmt_bytes(total)} in {count} "
+            f"item{'s' if count != 1 else ''}. Items older than "
+            f"{TRASH_AUTO_PURGE_DAYS} days are deleted automatically "
+            "when this window opens."
+        )
+        purged = getattr(self, "_auto_purged", None) or {}
+        if purged.get("purged"):
+            n = len(purged["purged"])
+            summary += (
+                f" {n} old item{'s' if n != 1 else ''} "
+                f"({_fmt_bytes(purged['freed_bytes'])}) were deleted "
+                "just now."
+            )
+        self.summary_label.setText(summary)
         self.empty_label.setVisible(not entries)
         self.list_widget.setVisible(bool(entries))
         self.empty_btn.setEnabled(bool(entries))
@@ -3129,12 +3293,16 @@ class HowToUseWindow(QDialog):
     2026-11-17: the first thing a lost user sees is the short
     path, not an empty pane)."""
 
+    # The pane's text when no topic is picked (R96 restores it
+    # after a no-match search clears).
+    _PLACEHOLDER = "Pick a topic on the left to read how it works."
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("How to Use Stella")
         self.resize(900, 600)
         layout = QHBoxLayout(self)
-        # T193: a search box over the topics — seventeen topics in
+        # T193: a search box over the topics — eighteen topics in
         # a plain list is a lot to scan. Typing narrows the list
         # by title or body; clearing it shows all of them again.
         # Filtering never picks a topic for the user.
@@ -3150,9 +3318,10 @@ class HowToUseWindow(QDialog):
         left.addWidget(self.topic_list, 1)
         layout.addLayout(left, 1)
         self.content = QTextBrowser()
-        self.content.setPlainText(
-            "Pick a topic on the left to read how it works."
-        )
+        self.content.setPlainText(self._PLACEHOLDER)
+        # R96: whether the pane currently shows the no-match line
+        # (rather than a topic body or the placeholder).
+        self._no_match_shown = False
         layout.addWidget(self.content, 2)
         _chain_tab_order([self.search_box, self.topic_list, self.content])
         # R92: open on Getting started — the window's own
@@ -3161,6 +3330,7 @@ class HowToUseWindow(QDialog):
 
     def _on_search(self, text):
         needle = text.strip().lower()
+        visible = 0
         for row in range(self.topic_list.count()):
             item = self.topic_list.item(row)
             title = item.text()
@@ -3171,6 +3341,25 @@ class HowToUseWindow(QDialog):
                 or needle in body.lower()
             )
             self.topic_list.setRowHidden(row, not match)
+            if match:
+                visible += 1
+        if needle and visible == 0:
+            # R96: a search with no match says so, in the pane —
+            # otherwise the user cannot tell whether the search
+            # ran or matched nothing.
+            self.content.setPlainText(
+                f"Nothing matches '{text.strip()}'. Try fewer words."
+            )
+            self._no_match_shown = True
+        elif self._no_match_shown:
+            # The search matches again (or cleared): restore the
+            # picked topic's body, or the placeholder when no
+            # topic is picked. A search that matches never touches
+            # a topic body — only the no-match line is restored.
+            self._no_match_shown = False
+            current = self.topic_list.currentItem()
+            body = topic_text(current.text()) if current else None
+            self.content.setPlainText(body or self._PLACEHOLDER)
 
     def show_topic(self, title):
         """Open the guide on one topic (T193): the empty state's
@@ -3185,6 +3374,8 @@ class HowToUseWindow(QDialog):
             return
         text = topic_text(current.text())
         if text is not None:
+            # Picking a topic replaces the no-match line too (R96).
+            self._no_match_shown = False
             self.content.setPlainText(text)
 
 
@@ -3387,6 +3578,24 @@ class ChatWindow(QDialog):
         self.activity_text.setText(text)
 
     # -- chat model -------------------------------------------------
+    def _chat_model_choices(self):
+        """(provider, model) pairs the chat can use (R102): the
+        installed Ollama models first, then the cloud models with
+        a saved key — the same lists Settings shows. A cloud model
+        with no key gets no button: a dead button is worse than
+        no button."""
+        choices = [("ollama", name) for name in MODEL_CACHE.models()]
+        home = self._main.store.home
+        for pid in ("groq", "gemini"):
+            if not has_key(home, pid):
+                continue
+            for name in PROVIDERS[pid]["models"]:
+                choices.append((pid, name))
+        custom = get_custom_config(home)
+        if custom.get("model") and has_key(home, "custom"):
+            choices.append(("custom", custom["model"]))
+        return choices
+
     def _ask_for_model(self):
         models, _sizes, loaded, _up, _at = MODEL_CACHE.snapshot()
         if not loaded:
@@ -3399,7 +3608,8 @@ class ChatWindow(QDialog):
             )
             self._main.refresh_model_list()
             return
-        if not models:
+        choices = self._chat_model_choices()
+        if not choices:
             # R45: Ollama is down, but a typed cloud pick does not
             # need Ollama — so this branch awaits a typed pick too.
             # (It used to return without setting _awaiting_model,
@@ -3417,13 +3627,26 @@ class ChatWindow(QDialog):
             return
         self._awaiting_model = True
         self._waiting_for_models = False
-        self._append(
-            "Stella",
-            "Which model should I chat with? Pick one below.\n\n"
-            "You can also pick a Groq or Gemini model in "
-            "Settings, under AI providers.",
-        )
-        self._show_model_buttons(models)
+        if not models:
+            # R102: Ollama is down, but a cloud model with a saved
+            # key is still clickable — the buttons render even
+            # when the Ollama list is empty.
+            self._append(
+                "Stella",
+                "Ollama is not answering, so I cannot see the models "
+                "on this PC. These cloud models are ready: pick one "
+                "below.",
+            )
+        else:
+            text = "Which model should I chat with? Pick one below."
+            if any(provider != "ollama" for provider, _ in choices):
+                text += (
+                    "\n\nThe ones with a provider in brackets run in "
+                    "the cloud with your key; the others run on "
+                    "this PC."
+                )
+            self._append("Stella", text)
+        self._show_model_buttons(choices)
 
     def _on_models_refreshed(self):
         """A background model-list refresh landed (T43): if the chat
@@ -3434,18 +3657,26 @@ class ChatWindow(QDialog):
         if self._waiting_for_models:
             self._ask_for_model()
 
-    def _show_model_buttons(self, models):
-        """One button per installed model (T76): click to pick, no
-        typing a tag by hand. Any old buttons go first, so asking
-        twice never doubles the list."""
+    def _show_model_buttons(self, choices):
+        """One button per model the chat can use (T76, R102):
+        installed Ollama models, then cloud models with a saved
+        key. A cloud button carries its provider in brackets, so
+        a 5-year-old can tell it from a local one. Click to pick,
+        no typing a tag by hand. Any old buttons go first, so
+        asking twice never doubles the list."""
         for btn in self.model_buttons:
             self.model_pick_layout.removeWidget(btn)
             btn.deleteLater()
         self.model_buttons = []
-        for name in models:
-            btn = QPushButton(name)
+        for provider, name in choices:
+            if provider == "ollama":
+                label = name
+            else:
+                label = f"{name} ({PROVIDERS[provider]['display']})"
+            btn = QPushButton(label)
             btn.clicked.connect(
-                lambda _checked=False, n=name: self._pick_chat_model(n)
+                lambda _checked=False, n=name, p=provider:
+                    self._pick_chat_model(n, p)
             )
             self.model_pick_layout.addWidget(btn)
             self.model_buttons.append(btn)
@@ -3455,11 +3686,13 @@ class ChatWindow(QDialog):
                 [*self.model_buttons, self.input]
             )
 
-    def _pick_chat_model(self, name: str):
-        """A model button was clicked: chat with that model."""
+    def _pick_chat_model(self, name: str, provider: str = "ollama"):
+        """A model button was clicked: chat with that model, on
+        its own provider (R102 — a cloud button sets the cloud
+        provider, not Ollama)."""
         self._awaiting_model = False
         self.model_pick_scroll.setVisible(False)
-        self._main.set_chat_provider("ollama")
+        self._main.set_chat_provider(provider)
         self._main.set_chat_model(name)
         self._append(
             "Stella",
@@ -4281,11 +4514,11 @@ class MainWindow(QMainWindow):
         else:
             self.refresh_session()
         # Ctrl+S saves any open edit window (T82).
-        QShortcut(QKeySequence("Ctrl+S"), self, self._save_open_windows)
+        QShortcut(QKeySequence(shortcut_for("save")), self, self._save_open_windows)
         # F2 renames the picked tree row (T168): double-click keeps
         # opening the detail window, so rename lives on F2 and the
         # right-click menu instead.
-        QShortcut(QKeySequence("F2"), self, self._rename_current_row)
+        QShortcut(QKeySequence(shortcut_for("rename")), self, self._rename_current_row)
         # R27: the crash notice, last — a crashed run is named, and
         # a resumable one is offered its resume (the Train panel's
         # Resume button picks it up from the paused state).
@@ -4439,11 +4672,11 @@ class MainWindow(QMainWindow):
         self._menu_action_new_profile = file_menu.addAction(
             "New profile...", self.new_profile
         )
-        self._menu_action_new_profile.setShortcut("Ctrl+N")
+        self._menu_action_new_profile.setShortcut(shortcut_for("new-profile"))
         self._menu_action_new_project = file_menu.addAction(
             "New project...", self.new_project
         )
-        self._menu_action_new_project.setShortcut("Ctrl+Shift+N")
+        self._menu_action_new_project.setShortcut(shortcut_for("new-project"))
         self._menu_action_export = file_menu.addAction(
             "Export project...", self.export_project
         )
@@ -4483,7 +4716,7 @@ class MainWindow(QMainWindow):
         self._menu_action_run = file_menu.addAction(
             "Run the picked job", self._on_go
         )
-        self._menu_action_run.setShortcut("Ctrl+G")
+        self._menu_action_run.setShortcut(shortcut_for("run-job"))
         file_menu.addSeparator()
         self._menu_action_settings = file_menu.addAction(
             "Settings...", self.open_settings_window
@@ -4493,6 +4726,13 @@ class MainWindow(QMainWindow):
         self._menu_action_trash = file_menu.addAction(
             "Trash...", self.open_trash_window
         )
+        # R94: Quit, with Ctrl+Q — wired to the window's own close
+        # path, so a running job gets the same stop-and-wait the
+        # window chrome gives (closeEvent, T36), not a second,
+        # stricter or laxer, close path.
+        file_menu.addSeparator()
+        self._menu_action_quit = file_menu.addAction("Quit", self.close)
+        self._menu_action_quit.setShortcut(shortcut_for("quit"))
         view_menu = bar.addMenu("View")
         self._menu_action_profiles = view_menu.addAction(
             "Profiles", self.open_current_profile_window
@@ -4504,12 +4744,12 @@ class MainWindow(QMainWindow):
         self._menu_action_howto = help_menu.addAction(
             "How to Use Stella...", self.open_howto_window
         )
-        self._menu_action_howto.setShortcut("F1")
+        self._menu_action_howto.setShortcut(shortcut_for("howto"))
         self._menu_action_chat = help_menu.addAction(
             "Chat...", self.open_chat_window
         )
         # F2 is Rename (T168); Chat moved to F3.
-        self._menu_action_chat.setShortcut("F3")
+        self._menu_action_chat.setShortcut(shortcut_for("chat"))
 
     def _refresh_menu_state(self):
         """Grey out the actions that cannot work yet (T19): New
@@ -4652,8 +4892,14 @@ class MainWindow(QMainWindow):
 
         hero_layout.addWidget(QLabel("2. Pick a job"))
         job_row = QHBoxLayout()
+        # R93: the job buttons are non-exclusive toggles. An
+        # exclusive group keeps one button checked forever, so a
+        # picked job could never be un-picked and Go stayed armed.
+        # Clicking a picked job again un-picks it; _on_job_picked
+        # unchecks the others, so switching jobs still works and
+        # at most one job is picked at a time.
         self._job_group = QButtonGroup(self)
-        self._job_group.setExclusive(True)
+        self._job_group.setExclusive(False)
         self.job_buttons: dict[str, QPushButton] = {}
         for key, text in (
             ("train", "Train"),
@@ -4667,7 +4913,7 @@ class MainWindow(QMainWindow):
             self._job_group.addButton(btn)
             job_row.addWidget(btn)
             self.job_buttons[key] = btn
-        self._job_group.buttonClicked.connect(lambda _b: self._refresh_go())
+        self._job_group.buttonClicked.connect(self._on_job_picked)
         hero_layout.addLayout(job_row)
         self.project_label = QLabel("No project yet.")
         self.project_label.setWordWrap(True)
@@ -4841,8 +5087,17 @@ class MainWindow(QMainWindow):
         # rest of the window does not care that they moved.
         dataset_section = CollapsibleSection("Dataset")
         dataset_btns = QHBoxLayout()
-        self.train_pick_dataset_btn = QPushButton("Pick dataset file")
+        # R97: the button also takes a dropped .jsonl file — the
+        # simplest way to pick a file.
+        self.train_pick_dataset_btn = DropButton("Pick dataset file")
+        self.train_pick_dataset_btn.setToolTip(
+            "Pick the .jsonl file of examples to train on, or drop "
+            "the file here."
+        )
         self.train_pick_dataset_btn.clicked.connect(self.pick_dataset)
+        self.train_pick_dataset_btn.file_dropped.connect(
+            self._on_dataset_dropped
+        )
         self.train_sample_btn = QPushButton("Use sample dataset")
         self.train_sample_btn.clicked.connect(self.use_sample_dataset)
         dataset_btns.addWidget(self.train_pick_dataset_btn)
@@ -6060,6 +6315,18 @@ class MainWindow(QMainWindow):
         if slug and slug != self._current_profile:
             self.set_session(slug, None)
 
+    def _on_job_picked(self, button):
+        """A job button was clicked (R93): the group is
+        non-exclusive, so a click on the picked button un-picks it
+        — and Go disarms, because _picked_job is None then. A
+        click on another button unchecks the old pick, so at most
+        one job is ever picked."""
+        if button.isChecked():
+            for other in self.job_buttons.values():
+                if other is not button:
+                    other.setChecked(False)
+        self._refresh_go()
+
     def _picked_job(self) -> str | None:
         """The picked job key (train, sleep, requant, distill), or
         None when no job is picked."""
@@ -6905,9 +7172,17 @@ class MainWindow(QMainWindow):
         else:
             tag, ref = "", model
         # Soft tag check (T12): warn when the tag is not installed
-        # or already used, and let the user proceed anyway.
+        # or already used, and let the user proceed anyway. R87:
+        # a Hugging Face id is checked against the actual weights
+        # the same soft way (a tag, a GGUF file, or a folder with
+        # no model warns; an uncached repo never does).
         warnings = _tag_warnings(self.store, tag)
-        if warnings and not _confirm_tag(self, warnings):
+        base_warnings = []
+        if ref:
+            from .train import base_ref_warnings
+
+            base_warnings = base_ref_warnings(ref)
+        if not _confirm_save_warnings(self, warnings, base_warnings):
             return
         slug = slug_from_model(model)
         base = slug
@@ -8872,6 +9147,26 @@ class MainWindow(QMainWindow):
         )
         if not path:
             return
+        self._set_dataset(path)
+
+    def _on_dataset_dropped(self, path):
+        """A file dropped on Pick dataset file (R97): the same
+        set-and-check as picking it in the dialog. A bad drop is
+        refused in plain words and sets nothing."""
+        refusal = _refuse_bad_dataset_drop(path)
+        if refusal is not None:
+            self._warn(refusal)
+            return
+        self._set_dataset(path)
+
+    def _set_dataset(self, path):
+        """Store one dataset path as the project's dataset, then
+        validate it like the project window's (T45): a valid file
+        reports its example count, a malformed one warns with the
+        bad line. Shared by the file dialog and the drop (R97)."""
+        if not self._current_profile or not self._current_project:
+            self._warn("Pick a project first.")
+            return
         try:
             self.store.update_project(
                 self._current_profile, self._current_project,
@@ -8881,10 +9176,10 @@ class MainWindow(QMainWindow):
             self._warn(str(exc))
             return
         self.refresh_session()
-        # The pick is validated like the project window's (T45):
-        # a valid file reports its example count, a malformed one
-        # warns with the bad line. A picked file always exists, so
-        # "missing" cannot happen here.
+        # A picked file always exists, so "missing" cannot happen
+        # here — but a dropped file could have vanished between
+        # the drop and the check, so the else still says the set
+        # happened.
         from .train import check_dataset
 
         check = check_dataset(
@@ -9735,11 +10030,15 @@ class MainWindow(QMainWindow):
             return
         name = record.get("ollama_name") or f"{profile}-{project}"
         modelfile = record["modelfile"]
-        from .gguf import create_in_ollama
+        from .gguf import SUBPROCESS_TIMEOUT_SECONDS, create_in_ollama
 
         def job(ctx):
             output = create_in_ollama(
                 name, modelfile, should_stop=ctx.is_cancelled,
+                # R82: the timeout is the backstop for a hung
+                # create the user walked away from — Cancel via
+                # should_stop still works alongside it.
+                timeout=SUBPROCESS_TIMEOUT_SECONDS,
             )
             if output:
                 ctx.log(output)

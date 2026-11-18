@@ -222,13 +222,15 @@ def test_menu_bar_has_expected_menus_and_actions(window):
             "Settings...",
             "Trash...",  # T23: deleted things wait here, and are
             # deleted forever here.
+            "Quit",  # R94: with Ctrl+Q.
         ],
         "View": ["Profiles", "Projects"],
         "Help": ["How to Use Stella...", "Chat..."],
     }
     file_menu = menus[0]
     separators = [a for a in file_menu.actions() if a.isSeparator()]
-    assert len(separators) == 1
+    # R94: a second separator, before Quit.
+    assert len(separators) == 2
     # The old Menu button is gone (T19).
     assert not hasattr(window, "menu_button")
     assert not hasattr(window, "menu")
@@ -261,7 +263,7 @@ def test_menu_howto_opens_howto_window(window):
     window._menu_action_howto.trigger()
     assert window._howto_window is not None
     assert window._howto_window.isVisible()
-    assert window._howto_window.topic_list.count() == 17
+    assert window._howto_window.topic_list.count() == 18
 
 
 # -- session --------------------------------------------------------
@@ -555,7 +557,7 @@ def test_settings_window_shows_home_and_defaults(window, seeded):
 
 def test_howto_window_lists_topics_and_shows_content(window):
     win = window.open_howto_window()
-    assert win.topic_list.count() == 17
+    assert win.topic_list.count() == 18
     assert win.topic_list.item(0).text() == "Getting started"
     win.topic_list.setCurrentRow(0)
     assert "Stella" in win.content.toPlainText()
@@ -3593,8 +3595,8 @@ def test_requant_runs_as_a_job_card(window, monkeypatch, qapp):
         deadline += 100
         assert deadline < 5000
     assert window.job_card.title_label.text() == "Making a smaller copy"
-    # The finish moment (T145) keeps the card visible for 250 ms
-    # after the log line, so wait for it to hide.
+    # The finish moment (T145) keeps the card visible for 2.5 s
+    # (R95) after the log line, so wait for it to hide.
     deadline = 0
     while window.job_card.isVisible():
         QTest.qWait(100)
@@ -5257,7 +5259,8 @@ def test_import_preview_no_pick_keeps_local(
 
 def test_job_card_finish_moment_shows_summary_then_hides(window, qapp):
     """T145 Done: the finish moment shows the summary in a gold
-    glow, then hides after a beat."""
+    glow, then hides after a beat. R95: the beat is 2.5 s now —
+    a nine-word summary cannot be read in 250 ms."""
     from PySide6.QtTest import QTest
 
     window._checklist_dismiss()
@@ -5269,7 +5272,15 @@ def test_job_card_finish_moment_shows_summary_then_hides(window, qapp):
     assert card.status_label.text() == "Trained 4 steps."
     assert "#ffc93c" in card.styleSheet()
     assert "#3a3016" in card.styleSheet()
+    # R95: still readable past the old 250 ms flash.
     QTest.qWait(300)
+    assert card.isVisible()
+    # ...and gone once the 2.5 s linger ends.
+    deadline = 0
+    while card.isVisible():
+        QTest.qWait(100)
+        deadline += 100
+        assert deadline < 4000
     assert card.isVisible() is False
     assert card.styleSheet() == ""
 
@@ -5299,7 +5310,15 @@ def test_train_finished_shows_finish_moment(window, qapp):
     assert window.job_card.isVisible()
     assert window.job_card.status_label.text() == "Trained 4 steps."
     assert "#ffc93c" in window.job_card.styleSheet()
+    # R95: the moment lingers 2.5 s now — still up at 300 ms,
+    # gone once the linger ends.
     QTest.qWait(300)
+    assert window.job_card.isVisible()
+    deadline = 0
+    while window.job_card.isVisible():
+        QTest.qWait(100)
+        deadline += 100
+        assert deadline < 4000
     assert window.job_card.isVisible() is False
 
 

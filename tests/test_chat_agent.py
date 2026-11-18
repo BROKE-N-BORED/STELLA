@@ -206,6 +206,9 @@ def test_twelve_call_cap(agent):
     reply = agent.reply("go")
     assert calls["n"] == MAX_TOOL_CALLS
     assert "stopping here" in reply
+    # R99: the cap-hit reply is recorded in the history like any
+    # other reply — the record has no hole where the agent stopped.
+    assert agent._history[-1] == {"role": "assistant", "content": reply}
 
 
 def test_ollama_error_is_plain_words(agent):

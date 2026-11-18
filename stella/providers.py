@@ -400,7 +400,16 @@ def chat(
                 "Custom provider needs its address set. Add it in "
                 "Settings under AI providers."
             )
-        endpoint = base_url.rstrip("/") + "/chat/completions"
+        # R101: a pasted full endpoint URL ends in /chat/completions
+        # already — strip it before appending, or the path doubles
+        # and the call fails. Only the exact trailing segment is
+        # stripped (a base URL that merely contains the string
+        # earlier in the path is left alone); stripping repeats so
+        # an already-doubled paste is fixed too.
+        base = base_url.rstrip("/")
+        while base.endswith("/chat/completions"):
+            base = base[: -len("/chat/completions")]
+        endpoint = base + "/chat/completions"
     else:
         endpoint = info["endpoint"]
     return _openai_chat(

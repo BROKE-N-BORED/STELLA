@@ -579,6 +579,10 @@ After install, `stella` works in a terminal:
 
 `stella sleep-prune <profile> <project> [--keep N]`
 
+`stella delete-checkpoint <profile> <project> <step> [--yes]`
+
+`stella prune-checkpoints <profile> <project> [--keep N] [--yes]`
+
 `stella chat [--provider ollama|groq|gemini|custom] [--model <name>]`
 
 `stella save-key <provider> [--base-url <url>] [--model <name>]`

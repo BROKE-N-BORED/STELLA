@@ -197,13 +197,14 @@ def test_howto_search_narrows_topics(window, qapp):
     qapp.processEvents()
     assert _visible_rows(howto) == _expected_matches("refusal")
     assert "The refusal probe" in _visible_rows(howto)
-    assert len(_visible_rows(howto)) < 17
+    assert len(_visible_rows(howto)) < 18
     howto.close()
 
 
 def test_howto_search_is_case_insensitive_and_clearable(window, qapp):
     """T193: the search ignores case, and clearing it shows all
-    seventeen topics again (R70: four topics added)."""
+    eighteen topics again (R70: four topics added; R98: the
+    Shortcuts topic added)."""
     howto = window.open_howto_window()
     qapp.processEvents()
     howto.search_box.setText("SLEEP")
@@ -211,7 +212,7 @@ def test_howto_search_is_case_insensitive_and_clearable(window, qapp):
     assert _visible_rows(howto) == _expected_matches("sleep")
     howto.search_box.clear()
     qapp.processEvents()
-    assert len(_visible_rows(howto)) == 17
+    assert len(_visible_rows(howto)) == 18
     howto.close()
 
 

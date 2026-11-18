@@ -1,12 +1,14 @@
 """STELLA How to Use index: the built-in guide.
 
-Seventeen topics, plain words, no jargon left unexplained. Every claim
+Eighteen topics, plain words, no jargon left unexplained. Every claim
 here is checked against what Stella actually does: things that do
 not work yet say so in plain words. No em-dashes in this text
 (Stella rule U33) and no bare ampersands (U11).
 """
 
 from __future__ import annotations
+
+from .shortcuts import shortcuts_topic_text
 
 TOPICS: list[tuple[str, str]] = [
     (
@@ -446,8 +448,15 @@ is safe to share.""",
 ]
 
 
+# R98: the Shortcuts topic is generated from the one shortcut
+# registry (stella/shortcuts.py), never hand-written, so the help
+# cannot drift from the keys that actually work. It sits last, just
+# after Troubleshooting.
+TOPICS.append(("Shortcuts", shortcuts_topic_text()))
+
+
 def topic_titles() -> list[str]:
-    """The seventeen topic titles, in order."""
+    """The eighteen topic titles, in order."""
     return [title for title, _ in TOPICS]
 
 

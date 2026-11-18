@@ -2,7 +2,7 @@
 
 **From:** the full-product review of STELLA v0.24.0, 2026-11-15
 (see `docs/review-2026-11-15.md` for the report).
-**Status:** 129 tasks: 71 done, 53 to do, 5 hard-gated. 0 P0. 23 P1, 52 P2, 54 P3.
+**Status:** 129 tasks: 97 done, 27 to do, 5 hard-gated. 0 P0. 23 P1, 52 P2, 54 P3.
 **How to read it:** each task has an ID (R1–R129), a priority, the area,
 the source finding(s) from the nine audits, the evidence (file:line or
 a measured probe), a one-line plain-words description, and what "done"
@@ -1023,7 +1023,7 @@ only proof of a claim the product already makes.
 ## P3 — nice-to-have (R76–R129)
 
 ### R76 — An out-of-memory crash mid-run has no plain-words message
-- **Priority:** P3 · **Area:** Training · **Sources:** A1-F7 · **Status:** not started
+- **Priority:** P3 · **Area:** Training · **Sources:** A1-F7 · **Status:** DONE in 0.28.0
 - **Evidence:** no OOM-specific error path (zero `MemoryError`
   matches in the tree); a mid-run OOM surfaces as raw torch text
   (`stella/gui.py:737`) or a silent death.
@@ -1034,7 +1034,7 @@ only proof of a claim the product already makes.
 - **Done when:** a mid-run OOM shows a plain-words message.
 
 ### R77 — A crash mid-save leaves orphan checkpoint folders nothing can see or delete
-- **Priority:** P3 · **Area:** Training · **Sources:** A1-F8 · **Status:** not started
+- **Priority:** P3 · **Area:** Training · **Sources:** A1-F8 · **Status:** DONE in 0.28.0
 - **Evidence:** proven live: a crash mid-save leaves orphan checkpoint
   dirs invisible to list/prune/GUI, with no reaper and no CLI delete;
   `_save_checkpoint` (`stella/train.py:1894`) writes in place, with no
@@ -1048,7 +1048,7 @@ only proof of a claim the product already makes.
   cleaned or deletable.
 
 ### R78 — Autoconfig ignores model size, disk, and CPU, and can silently change rank/seq between runs
-- **Priority:** P3 · **Area:** Training · **Sources:** A1-F10 · **Status:** not started
+- **Priority:** P3 · **Area:** Training · **Sources:** A1-F10 · **Status:** DONE in 0.28.0
 - **Evidence:** autoconfig ignores model size (`model_params_b`
   accepted, unused), disk, and CPU; auto re-resolve can silently
   change rank/seq between runs (`stella/autoconfig.py:161-178`).
@@ -1060,7 +1060,7 @@ only proof of a claim the product already makes.
   a changed setting is announced.
 
 ### R79 — There is no free-disk check in the training path
-- **Priority:** P3 · **Area:** Training · **Sources:** A1-F11 · **Status:** not started
+- **Priority:** P3 · **Area:** Training · **Sources:** A1-F11 · **Status:** DONE in 0.28.0
 - **Evidence:** free disk is measured but never consumed in the
   training path.
 - **Problem:** a run can start on a disk that cannot hold its
@@ -1071,7 +1071,7 @@ only proof of a claim the product already makes.
   hold it.
 
 ### R80 — Raw error text leaks into the user-facing messages on the GGUF paths
-- **Priority:** P3 · **Area:** GGUF · **Sources:** A2-F10 · **Status:** not started
+- **Priority:** P3 · **Area:** GGUF · **Sources:** A2-F10 · **Status:** DONE in 0.28.0
 - **Evidence:** a raw `({exc})` leak in `ollama.generate`, and a raw
   transformers line in `_hf_load_message`.
 - **Problem:** the user sees library internals instead of plain words.
@@ -1079,7 +1079,7 @@ only proof of a claim the product already makes.
 - **Done when:** neither path shows raw library text.
 
 ### R81 — CLI export never shows the estimate the GUI shows
-- **Priority:** P3 · **Area:** CLI / GGUF · **Sources:** A2-F11 · **Status:** not started
+- **Priority:** P3 · **Area:** CLI / GGUF · **Sources:** A2-F11 · **Status:** DONE in 0.28.0
 - **Evidence:** CLI export never shows the estimate the GUI shows.
 - **Problem:** a CLI user exports blind, without the size/time
   estimate the GUI gives.
@@ -1087,7 +1087,7 @@ only proof of a claim the product already makes.
 - **Done when:** CLI export shows the estimate.
 
 ### R82 — `create_in_ollama` is called with no timeout
-- **Priority:** P3 · **Area:** GGUF · **Sources:** A2-F12 · **Status:** not started
+- **Priority:** P3 · **Area:** GGUF · **Sources:** A2-F12 · **Status:** DONE in 0.28.0
 - **Evidence:** `create_in_ollama` is called without a timeout.
 - **Problem:** a hung Ollama create hangs the export forever.
 - **Fix:** give the call a timeout with a plain-words message when it
@@ -1095,7 +1095,7 @@ only proof of a claim the product already makes.
 - **Done when:** a hung Ollama create stops on a timeout and says so.
 
 ### R83 — Export deletes the merged dir before the job lock, and unlinks the GGUF unconditionally
-- **Priority:** P3 · **Area:** GGUF · **Sources:** A2-F13 · **Status:** not started
+- **Priority:** P3 · **Area:** GGUF · **Sources:** A2-F13 · **Status:** DONE in 0.28.0
 - **Evidence:** the merged dir is deleted before the job lock, and the
   GGUF is unlinked unconditionally.
 - **Problem:** the cleanup order can delete work that is still in use,
@@ -1106,7 +1106,7 @@ only proof of a claim the product already makes.
   file.
 
 ### R84 — The `--modelfile` fallback breaks on paths with spaces
-- **Priority:** P3 · **Area:** GGUF · **Sources:** A2-F14 · **Status:** not started
+- **Priority:** P3 · **Area:** GGUF · **Sources:** A2-F14 · **Status:** DONE in 0.28.0
 - **Evidence:** the `--modelfile` fallback breaks on spaced paths.
 - **Problem:** a model file under a path with a space fails to load.
 - **Fix:** quote or pass the path safely in the fallback.
@@ -1114,7 +1114,7 @@ only proof of a claim the product already makes.
   fallback.
 
 ### R85 — Prompts are not stripped of a byte-order mark
-- **Priority:** P3 · **Area:** Distill · **Sources:** A2-F15 · **Status:** not started
+- **Priority:** P3 · **Area:** Distill · **Sources:** A2-F15 · **Status:** DONE in 0.28.0
 - **Evidence:** no BOM strip in prompts.
 - **Problem:** a prompt file saved with a BOM starts with an invisible
   character the model sees.
@@ -1122,14 +1122,14 @@ only proof of a claim the product already makes.
 - **Done when:** a BOM'd prompt file reads clean.
 
 ### R86 — Requant work files can collide by name
-- **Priority:** P3 · **Area:** Requant · **Sources:** A2-F16 · **Status:** not started
+- **Priority:** P3 · **Area:** Requant · **Sources:** A2-F16 · **Status:** DONE in 0.28.0
 - **Evidence:** requant work-file name collisions.
 - **Problem:** two requants can write over each other's work files.
 - **Fix:** make work-file names unique per job.
 - **Done when:** two requants cannot share a work-file name.
 
 ### R87 — `base_ref` is never checked against the actual weights
-- **Priority:** P3 · **Area:** Profiles · **Sources:** A3-F9 · **Status:** not started
+- **Priority:** P3 · **Area:** Profiles · **Sources:** A3-F9 · **Status:** DONE in 0.28.0
 - **Evidence:** T54 residual — `base_ref` is never verified against
   actual weights; the health check covers the tag only.
 - **Problem:** a profile can point at weights that are not what its
@@ -1140,7 +1140,7 @@ only proof of a claim the product already makes.
   check.
 
 ### R88 — `settings_source` is silently lost on a round-trip (auto becomes manual)
-- **Priority:** P3 · **Area:** Profiles · **Sources:** A3-F10 · **Status:** not started
+- **Priority:** P3 · **Area:** Profiles · **Sources:** A3-F10 · **Status:** DONE in 0.28.0
 - **Evidence:** `settings_source` is lost on round-trip (auto →
   manual, silently).
 - **Problem:** a setting that was automatic quietly becomes manual,
@@ -1149,7 +1149,7 @@ only proof of a claim the product already makes.
 - **Done when:** an auto setting stays auto after a round-trip.
 
 ### R89 — The LFM3 template still carries a dead `settings["notes"]` key
-- **Priority:** P3 · **Area:** Profiles · **Sources:** A3-F11 · **Status:** not started
+- **Priority:** P3 · **Area:** Profiles · **Sources:** A3-F11 · **Status:** DONE in 0.28.0
 - **Evidence:** the LFM3 template still carries dead
   `settings["notes"]`.
 - **Problem:** a dead field in the starter template — exactly what the
@@ -1158,14 +1158,14 @@ only proof of a claim the product already makes.
 - **Done when:** the LFM3 template has no dead `settings["notes"]`.
 
 ### R90 — CLI `--purge` has no prompt
-- **Priority:** P3 · **Area:** CLI · **Sources:** A3-F13 · **Status:** not started
+- **Priority:** P3 · **Area:** CLI · **Sources:** A3-F13 · **Status:** DONE in 0.28.0
 - **Evidence:** CLI `--purge` has no prompt.
 - **Problem:** a destructive command runs with no chance to back out.
 - **Fix:** prompt before purging (with a `--yes` escape for scripts).
 - **Done when:** `--purge` asks first.
 
 ### R91 — The trash shows no size and has no auto-purge age
-- **Priority:** P3 · **Area:** Profiles · **Sources:** A3-F14 · **Status:** not started
+- **Priority:** P3 · **Area:** Profiles · **Sources:** A3-F14 · **Status:** DONE in 0.28.0
 - **Evidence:** the trash shows no size, no auto-purge age.
 - **Problem:** the user cannot tell how much disk the trash holds, and
   it grows forever.
@@ -1188,7 +1188,7 @@ only proof of a claim the product already makes.
 - **Done when:** the choice is made and the window follows it.
 
 ### R93 — A picked job cannot be un-picked; Go stays armed
-- **Priority:** P3 · **Area:** GUI · **Sources:** A4-F9 · **Status:** not started
+- **Priority:** P3 · **Area:** GUI · **Sources:** A4-F9 · **Status:** DONE in 0.28.0
 - **Evidence:** once a job button is picked, clicking it again leaves
   it checked, and `setChecked(False)` is ignored — the exclusive
   button group keeps one button checked (probe2.out). The user can
@@ -1199,7 +1199,7 @@ only proof of a claim the product already makes.
 - **Done when:** a picked job can be un-picked and Go disarms.
 
 ### R94 — No Quit in the File menu, no Ctrl+Q
-- **Priority:** P3 · **Area:** GUI · **Sources:** A4-F10 · **Status:** not started
+- **Priority:** P3 · **Area:** GUI · **Sources:** A4-F10 · **Status:** DONE in 0.28.0
 - **Evidence:** the File menu has 12 actions and no Quit/Exit
   (`stella/gui.py:4220-4279`); no `quit` action exists anywhere in
   `gui.py`. Closing works via the window chrome.
@@ -1209,7 +1209,7 @@ only proof of a claim the product already makes.
 - **Done when:** File has Quit and Ctrl+Q closes the app.
 
 ### R95 — The finish moment lasts 250 ms: too brief to read
-- **Priority:** P3 · **Area:** GUI · **Sources:** A4-F11 · **Status:** not started
+- **Priority:** P3 · **Area:** GUI · **Sources:** A4-F11 · **Status:** DONE in 0.28.0
 - **Evidence:** `finish_moment` shows the gold card and hides it on a
   single-shot 250 ms timer (`stella/gui.py:1187-1189, 1281`). Probe6c:
   visible at t=0 and t=+0.1 s, gone by t=+0.3 s. A nine-word summary
@@ -1222,7 +1222,7 @@ only proof of a claim the product already makes.
 - **Done when:** the finish card stays readable for 2–3 s.
 
 ### R96 — How to Use search with no match gives no "nothing found" message
-- **Priority:** P3 · **Area:** GUI · **Sources:** A4-F12 · **Status:** not started
+- **Priority:** P3 · **Area:** GUI · **Sources:** A4-F12 · **Status:** DONE in 0.28.0
 - **Evidence:** searching "zzzznope" leaves zero visible topics and the
   content pane still reads "Pick a topic on the left to read how it
   works." (probe6.out). No feedback that the search matched nothing.
@@ -1233,7 +1233,7 @@ only proof of a claim the product already makes.
 - **Done when:** a no-match search says so.
 
 ### R97 — No drag-and-drop for a dataset file
-- **Priority:** P3 · **Area:** GUI · **Sources:** A4-F13 · **Status:** not started
+- **Priority:** P3 · **Area:** GUI · **Sources:** A4-F13 · **Status:** DONE in 0.28.0
 - **Evidence:** no widget in the GUI accepts drops (no `setAcceptDrops`
   anywhere in `gui.py`). The only paths to set a dataset are Browse
   and the sample dataset button. BNB library entry 027's one face in
@@ -1245,7 +1245,7 @@ only proof of a claim the product already makes.
   the dataset.
 
 ### R98 — No shortcut help: F2-rename and Ctrl+S are undiscoverable
-- **Priority:** P3 · **Area:** GUI · **Sources:** A4-F14 · **Status:** not started
+- **Priority:** P3 · **Area:** GUI · **Sources:** A4-F14 · **Status:** DONE in 0.28.0
 - **Evidence:** shortcuts exist but there is no `?` overlay, no
   central registry, and no Shortcuts topic among the 13 How to Use
   topics — F2 rename is discoverable only via the right-click menu,
@@ -1256,7 +1256,7 @@ only proof of a claim the product already makes.
 - **Done when:** every shortcut is listed somewhere the user can find.
 
 ### R99 — The cap-hit reply is not recorded in the chat history
-- **Priority:** P3 · **Area:** Chat · **Sources:** A5-F10 · **Status:** not started
+- **Priority:** P3 · **Area:** Chat · **Sources:** A5-F10 · **Status:** DONE in 0.28.0
 - **Evidence:** the cap-hit reply is not recorded in history.
 - **Problem:** the conversation's record has a hole where the agent
   stopped.
@@ -1264,7 +1264,7 @@ only proof of a claim the product already makes.
 - **Done when:** a cap-hit reply appears in the history.
 
 ### R100 — "just do it" only matches at the start of a message
-- **Priority:** P3 · **Area:** Chat · **Sources:** A5-F11 · **Status:** not started
+- **Priority:** P3 · **Area:** Chat · **Sources:** A5-F11 · **Status:** DONE in 0.28.0
 - **Evidence:** "just do it" only matches at message start.
 - **Problem:** "ok, just do it" does not trigger the plan-first flow
   the greeting promises.
@@ -1272,7 +1272,7 @@ only proof of a claim the product already makes.
 - **Done when:** "just do it" works wherever it appears in a message.
 
 ### R101 — A custom base URL ending in `/chat/completions` doubles the path
-- **Priority:** P3 · **Area:** Providers · **Sources:** A5-F12 · **Status:** not started
+- **Priority:** P3 · **Area:** Providers · **Sources:** A5-F12 · **Status:** DONE in 0.28.0
 - **Evidence:** a custom base URL ending in `/chat/completions`
   doubles the path.
 - **Problem:** a user who pastes the full endpoint URL gets a doubled
@@ -1282,7 +1282,7 @@ only proof of a claim the product already makes.
 - **Done when:** a full endpoint URL works as a custom base URL.
 
 ### R102 — The chat-window model buttons are Ollama-only
-- **Priority:** P3 · **Area:** Chat · **Sources:** A5-F13 · **Status:** not started
+- **Priority:** P3 · **Area:** Chat · **Sources:** A5-F13 · **Status:** DONE in 0.28.0
 - **Evidence:** the chat-window model buttons are Ollama-only.
 - **Problem:** the click-to-pick path — the one a 5-year-old would
   use — does not offer cloud models.

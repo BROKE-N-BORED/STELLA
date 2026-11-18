@@ -1,3 +1,69 @@
+# STELLA v0.28.0 — Test Report
+
+Verified 2026-11-18 by the coordinator from a FRESH UNZIP of
+stella-v0.28.zip (1,202,323 bytes, SHA-256
+3430a9d2f3bb87a09cb6944a14cd007d08db7072faac3421c5056b95b9ec54f3),
+not from the builders' claims. Python 3.12.3, PySide6 offscreen Qt,
+forge-v2-testenv; TMPDIR under the workspace (STELLA has no
+QFileSystemWatcher, so this is safe).
+
+## Suite: 1856 passed, 65 skipped (1925 collected)
+
+The single-process full run OOMs on this 6 GB VM, so the suite ran
+in 4 chunks from the same fresh unzip: non-GUI 1479 passed + 65
+skipped + 4 failed, test_gui.py in 3 chunks (130 + 124 + 123
+passed, zero failures). Counts reconcile exactly to the 1925
+collected. All 4 failures were the coordinator's own merge errors,
+fixed in place and re-verified green from a second fresh unzip of
+the rebuilt zip (103 passed: all 101 test_v28.py + both gitignore
+tests):
+
+- test_dropping_jsonl_on_pick_dataset_sets_it and
+  test_dropping_jsonl_on_project_dataset_field: NameError — the
+  merged test_v28.py was missing B's `shutil` import (the drop
+  tests copy the sample dataset). One import added.
+- test_gitignore_covers_receipt_venv_and_pycache and
+  test_gitignore_covers_providers_json: the merge repo's scratch
+  .gitignore (3 lines) leaked into the zip instead of the
+  product .gitignore. The product file was restored in the merge
+  tree before the rebuild; the zip now carries it (verified by
+  diff). The push manifest excludes .gitignore as usual, and the
+  live tree always had the product file.
+- No load flakes hit in this run.
+
+## CLI smoke: green
+
+`stella-cli --version` reports 0.28.0; --help lists the new
+`delete-checkpoint` and `prune-checkpoints` commands.
+
+## GUI drive: green
+
+drive_gui.py offscreen: window opens, job buttons Train / Sleep /
+Make smaller / Teach a small model, Go, Export GGUF, Run refusal
+probe. Screenshots eyeballed clean — and the menu shot visibly
+proves R94: Quit with Ctrl+Q at the bottom of the File menu,
+after a separator.
+
+## Sweeps
+
+Em-dash sweep of non-docstring string literals: 0 hits. Secrets
+grep: clean. Zip modes: all scripts 0o100755, all plain files
+0o100644, file-type bits present; all entries deflated.
+
+## Merge notes
+
+Two conflicts, both test files: tests/test_v27.py (both builders
+removed the version pins — kept A's section header, the NOTE line
+was shared) and tests/test_v28.py (add/add — combined: A's file
+as base for the stronger version test, B's helpers + slice tests
+appended; B's duplicate version tests dropped). The merge caught
+one duplicate-definition slip (B's version tests sat between its
+helpers and its R93 marker, so the first extraction kept them)
+and the two defects above. No merge-interaction defects in
+product code.
+
+---
+
 # STELLA v0.27.0 — Test Report
 
 Verified 2026-11-17 by the coordinator from a FRESH UNZIP of
