@@ -549,10 +549,15 @@ def test_sleep_status_tool(agent, store, seeded):
 
 
 def test_download_weights_no_repo(agent, store, seeded):
+    """v0.30.0: the no-repo answer names the bridge candidate and
+    asks, instead of telling the user to set a field. Nothing is
+    stored until the user confirms."""
     result = agent.call_tool(
         "download_weights", {"profile": "lfm3-tool"}
     )
-    assert "no Hugging Face repo set" in result
+    assert "LiquidAI/LFM3-1.7B" in result
+    assert "Base ref" not in result
+    assert store.get_profile("lfm3-tool")["base_ref"] == "lfm3:1.7b"
 
 
 def test_download_weights_already_ready(agent, store, seeded, monkeypatch):

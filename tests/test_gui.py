@@ -1111,13 +1111,27 @@ def test_start_sleep_without_deps_logs_hint(window, monkeypatch):
 # -- downloads ------------------------------------------------------
 
 
-def test_start_download_no_repo_warns(window, monkeypatch):
+def test_start_download_no_repo_offers_bridge(window, monkeypatch):
+    """v0.30.0: in the no-repo state the download offers the bridge
+    repo instead of warning. Answering No leaves the profile
+    untouched and starts nothing."""
+    from PySide6.QtWidgets import QMessageBox
+
     warnings = []
     monkeypatch.setattr(window, "_warn", warnings.append)
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.No
+    )
+    started = []
+    monkeypatch.setattr(
+        window.download_manager, "start", started.append
+    )
     _select_session(window)
     window.start_download()
-    assert warnings
-    assert "No Hugging Face repo set" in warnings[0]
+    assert warnings == []
+    assert started == []
+    assert window.store.get_profile("lfm3-tool")["base_ref"] == "lfm3:1.7b"
+    assert "No Hugging Face repo set" in window.statusBar().currentMessage()
 
 
 def test_start_download_no_hub_warns(window, monkeypatch, tmp_path):
@@ -3789,9 +3803,15 @@ def test_profile_row_shows_health_badge(window, monkeypatch, qapp, seed_models):
     assert badge_color() == QColor("#4caf50")
 
 
-def test_download_fix_button_opens_profile_window(window, qapp):
-    """T79: in the no-repo state the fix button opens the profile
-    window, where Base ref gets set."""
+def test_download_fix_button_opens_profile_window(window, qapp, monkeypatch):
+    """T79 + v0.30.0: in the no-repo state the fix button offers the
+    bridge repo first; declining the offer opens the profile
+    window, where the repo can be typed by hand."""
+    from PySide6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.No
+    )
     _select_session(window)
     window._checklist_dismiss()
     assert window.download_fix_btn.isVisible()

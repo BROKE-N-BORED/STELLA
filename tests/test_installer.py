@@ -1354,6 +1354,101 @@ def test_training_install_falls_back_when_no_report(tmp_path):
     assert "run bash install-training.sh again" in out
 
 
+def _make_no_index_failing_venv(tree, report_json, direct_ok=True):
+    """A fake .venv/bin/python for the v0.30.0 fallback test:
+    pip --dry-run writes the canned report; the --no-index
+    install fails (as it did on the real PC when pip could not
+    parse a %2B wheel name); the direct install succeeds — or
+    fails, when direct_ok is False. Everything else runs the
+    real test python."""
+    bindir = tree / ".venv" / "bin"
+    bindir.mkdir(parents=True, exist_ok=True)
+    direct_exit = "0" if direct_ok else "1"
+    wrapper = bindir / "python"
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        "# Fake venv python for the v0.30.0 fallback test.\n"
+        'if [ "$1" = "-m" ] && [ "$2" = "pip" ]; then\n'
+        '  prev=""\n'
+        '  report=""\n'
+        "  no_index=0\n"
+        '  for arg in "$@"; do\n'
+        '    if [ "$prev" = "--report" ]; then report="$arg"; fi\n'
+        '    if [ "$arg" = "--no-index" ]; then no_index=1; fi\n'
+        '    prev="$arg"\n'
+        "  done\n"
+        '  if [ -n "$report" ]; then\n'
+        "    cat > \"$report\" <<'R62_REPORT_EOF'\n"
+        + report_json
+        + "\nR62_REPORT_EOF\n"
+        "    exit 0\n"
+        "  fi\n"
+        '  if [ "$no_index" = "1" ]; then\n'
+        "    exit 1\n"
+        "  fi\n"
+        f"  exit {direct_exit}\n"
+        "fi\n"
+        f'exec "{REAL_PYTHON}" "$@"\n'
+    )
+    wrapper.chmod(0o755)
+
+
+def test_training_install_falls_back_when_local_install_fails(
+    tmp_path,
+):
+    """v0.30.0: when the --no-index install of the fetched wheels
+    fails, install-training.sh falls through to the direct
+    download instead of dying — re-running would repeat the
+    identical failure, since the fetched wheels are already
+    cached. The run ends at the import check (no real torch),
+    which proves the fallback ran."""
+    tree = copy_tree(tmp_path)
+    home = make_home(tmp_path)
+    wheels = tmp_path / "wheels"
+    env = {"STELLA_WHEEL_DIR": str(wheels)}
+    with _ResumeWheelServer() as server:
+        _make_no_index_failing_venv(tree, server.report_json())
+        res = run_script(
+            tree, home, "install-training.sh", env_extra=env,
+        )
+        assert res.returncode == 1
+        out = res.stdout + res.stderr
+        assert "downloading them directly instead" in out
+        assert "cannot be imported" in out
+        assert "training packages download failed" not in out
+        assert (
+            wheels / "torch-2.15.0-cp312-cp312-manylinux.whl"
+        ).read_bytes() == b"T" * 4096
+        assert (
+            wheels / "peft-0.21.2-py3-none-any.whl"
+        ).read_bytes() == b"P" * 2048
+
+
+def test_training_install_errors_when_both_install_paths_fail(
+    tmp_path,
+):
+    """v0.30.0: the "download failed" error shows only when BOTH
+    install paths fail — the local install and the direct
+    download after it."""
+    tree = copy_tree(tmp_path)
+    home = make_home(tmp_path)
+    wheels = tmp_path / "wheels"
+    env = {"STELLA_WHEEL_DIR": str(wheels)}
+    with _ResumeWheelServer() as server:
+        _make_no_index_failing_venv(
+            tree, server.report_json(), direct_ok=False
+        )
+        res = run_script(
+            tree, home, "install-training.sh", env_extra=env,
+        )
+        assert res.returncode == 1
+        out = res.stdout + res.stderr
+        assert "downloading them directly instead" in out
+        assert "training packages download failed" in out
+        assert "run bash install-training.sh again" in out
+        assert "cannot be imported" not in out
+
+
 # -- R63: click-only uninstall --------------------------------------
 
 

@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 from datetime import datetime
@@ -125,6 +126,7 @@ from .model import (
 )
 from .model_info import describe_model, fit_verdict, fits_this_pc
 from .ollama import MODEL_CACHE, SHOW_CACHE, ollama_url
+from .ollama_bridge import suggest_hf_repos
 from .requant import DEFAULT_QUANT, KNOWN_QUANTS
 from .provision import is_hf_repo_id
 from .style import (
@@ -678,6 +680,46 @@ class NewProfileDialog(QDialog):
             )
         else:
             self.name_note.setText("")
+
+
+class BridgePickDialog(QDialog):
+    """Pick one Hugging Face repo (v0.30.0): the bridge found more
+    than one candidate for this model's Ollama tag, so the user
+    picks which one to use. One button per candidate — one tap
+    each, no list, no pre-selection (U6) — plus Cancel. The
+    chosen repo id lands in ``self.chosen``; None when cancelled.
+    """
+
+    def __init__(self, candidates, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Stella")
+        self.chosen: str | None = None
+        self._buttons: list[QPushButton] = []
+        layout = QVBoxLayout(self)
+        label = QLabel(
+            "This model could be one of these on Hugging Face. "
+            "Pick the one to use:"
+        )
+        label.setWordWrap(True)
+        layout.addWidget(label)
+        for candidate in candidates:
+            button = QPushButton(
+                f"{candidate['repo']} ({candidate['source']})"
+            )
+            button.clicked.connect(
+                lambda _checked=False, repo=candidate["repo"]: (
+                    self._pick(repo)
+                )
+            )
+            layout.addWidget(button)
+            self._buttons.append(button)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        layout.addWidget(cancel)
+
+    def _pick(self, repo: str):
+        self.chosen = repo
+        self.accept()
 
 
 class ModelListWorker(QThread):
@@ -1606,7 +1648,7 @@ class ProfileWindow(QDialog):
                 "Used for dreaming and the refusal probe."
             ),
         )
-        form.addRow("Base ref", self.base_edit)
+        form.addRow("Hugging Face repo", self.base_edit)
         form.addRow(
             "",
             _help_label(
@@ -2049,8 +2091,8 @@ class ProfileWindow(QDialog):
         for dep in p.get("dependencies") or []:
             self.deps_list.addItem(str(dep))
         self.dep_remove_btn.setEnabled(False)
-        # The Base ref field shows a repo, never a tag as if it
-        # were one (T79): a stored value that is not a Hugging
+        # The Hugging Face repo field shows a repo, never a tag as
+        # if it were one (T79): a stored value that is not a Hugging
         # Face repo id (no slash) shows blank, with the placeholder
         # saying what belongs here. Saving passes base_ref only
         # when the field changed (T54) — a blank field the user
@@ -4944,13 +4986,14 @@ class MainWindow(QMainWindow):
         self.download_cancel_btn = QPushButton("Cancel")
         self.download_cancel_btn.clicked.connect(self.cancel_download)
         self.download_cancel_btn.setEnabled(False)
-        # The fix button (T79): when there is no repo to download
-        # from, this button — not a label — opens the profile
-        # window, where Base ref gets set. Visible only then.
+        # The fix button (T79, v0.30.0): when there is no repo to
+        # download from, this button — not a label — offers the
+        # Hugging Face repo the bridge knows for the model, and
+        # starts the download on a pick. A decline or an unknown
+        # tag opens the profile window instead, where the repo can
+        # be typed by hand. Visible only then.
         self.download_fix_btn = QPushButton("Set the model source...")
-        self.download_fix_btn.clicked.connect(
-            self.open_current_profile_window
-        )
+        self.download_fix_btn.clicked.connect(self._on_fix_download)
         self.download_fix_btn.setVisible(False)
         dl_btns.addWidget(self.download_btn)
         dl_btns.addWidget(self.download_cancel_btn)
@@ -6366,8 +6409,8 @@ class MainWindow(QMainWindow):
             return
         running = self.download_manager.is_running()
         # Download is honest (T79): disabled when there is no repo
-        # to download from, and the fix button — which opens the
-        # profile window, where Base ref gets set — shows instead.
+        # to download from, and the fix button — which offers the
+        # bridge repo, or opens the profile window — shows instead.
         self.download_btn.setEnabled(
             status["state"] != "no-repo" and not running
         )
@@ -6996,6 +7039,139 @@ class MainWindow(QMainWindow):
             self.stat_epoch.setText("Epoch: not started")
 
     # -- downloads --------------------------------------------------
+    def _offer_bridge_repo(self, slug) -> str | None:
+        """Offer the Hugging Face repo the bridge knows for a
+        profile whose base is an Ollama tag (v0.30.0): the download
+        used to dead-end here with jargon nobody could act on. One candidate gets a Yes/No question naming
+        the repo and where it comes from; several get a pick-one
+        dialog; an unknown tag gets a plain-words message with no
+        jargon. Returns the repo id (already stored on the profile)
+        when the user picks one, else None. Nothing is ever set
+        without the user's say-so."""
+        try:
+            profile = self.store.get_profile(slug)
+        except StellaError as exc:
+            self._warn(str(exc))
+            return None
+        tag = (profile.get("ollama_tag") or "").strip()
+        candidates = suggest_hf_repos(tag)
+        if not candidates:
+            self._warn(
+                "Stella doesn't know where this model's training "
+                "files live on Hugging Face yet. Find the model on "
+                "huggingface.co and set the Hugging Face repo in the "
+                "profile window, or pick a different model."
+            )
+            return None
+        if len(candidates) == 1:
+            candidate = candidates[0]
+            answer = QMessageBox.question(
+                self,
+                "Stella",
+                f"This model lives on Hugging Face as "
+                f"{candidate['repo']} ({candidate['source']}). "
+                "Use that and download it?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if answer != QMessageBox.Yes:
+                self._say(
+                    "No Hugging Face repo set, so nothing downloaded."
+                )
+                return None
+            repo = candidate["repo"]
+        else:
+            dialog = BridgePickDialog(candidates, self)
+            if dialog.exec() != QDialog.Accepted or not dialog.chosen:
+                self._say(
+                    "No Hugging Face repo set, so nothing downloaded."
+                )
+                return None
+            repo = dialog.chosen
+        try:
+            self.store.update_profile(slug, base_ref=repo)
+        except StellaError as exc:
+            self._warn(str(exc))
+            return None
+        return repo
+
+    def _on_fix_download(self):
+        """T79 + v0.30.0: the \"Set the model source...\" button in
+        the no-repo state. Offer the bridge repo first — a pick
+        starts the download at once. A decline, a cancel, or an
+        unknown tag opens the profile window as before, where the
+        repo can be typed by hand."""
+        slug = self._current_profile
+        if not slug:
+            return
+        if self._offer_bridge_repo(slug) is not None:
+            self.start_download(slug)
+        else:
+            self.open_current_profile_window()
+
+    def _check_base_repo_match(self, slug, repo):
+        """Mismatch guard (v0.30.0): warn when the stored repo is a
+        valid Hugging Face id but not the one the bridge knows for
+        this profile's model tag -- the old jargon message invited
+        typing its example repo into the wrong profile. Returns the
+        repo to download (the stored one, or the bridge's when the
+        user picks the switch), or None when the user dismissed the
+        warning without choosing. A warning, never a block: keeping
+        the stored repo is always allowed, and a tag the bridge does
+        not know never warns at all."""
+        try:
+            profile = self.store.get_profile(slug)
+        except StellaError as exc:
+            self._warn(str(exc))
+            return None
+        tag = (profile.get("ollama_tag") or "").strip()
+        candidates = suggest_hf_repos(tag)
+        if not candidates:
+            return repo
+        if repo.lower() in [c["repo"].lower() for c in candidates]:
+            return repo
+        # The offer: prefer the candidate carrying the tag's size
+        # hint ("qwen3.5:4b-q4_K_M" is a 4B model, so the 4B repo,
+        # not the first candidate, which is the 2B one). No hint
+        # or no match falls back to the first candidate.
+        candidate = candidates[0]["repo"]
+        size = re.search(r"(\d+(?:\.\d+)?)b", tag.lower())
+        if size:
+            hint = size.group(1) + "b"
+            for known in candidates:
+                if hint in known["repo"].lower():
+                    candidate = known["repo"]
+                    break
+        box = QMessageBox(self)
+        box.setWindowTitle("Stella")
+        box.setIcon(QMessageBox.Warning)
+        box.setText(
+            "This profile's training files are set to %s, but this "
+            "model usually comes from %s." % (repo, candidate)
+        )
+        box.setInformativeText(
+            "Use the usual repo instead, or keep the one set?"
+        )
+        use_btn = box.addButton(
+            "Use %s instead" % candidate, QMessageBox.AcceptRole
+        )
+        keep_btn = box.addButton(
+            "Keep %s" % repo, QMessageBox.RejectRole
+        )
+        box.setDefaultButton(keep_btn)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked == use_btn:
+            try:
+                self.store.update_profile(slug, base_ref=candidate)
+            except StellaError as exc:
+                self._warn(str(exc))
+                return None
+            return candidate
+        if clicked == keep_btn:
+            return repo
+        return None
+
     def start_download(self, profile=None):
         slug = profile or self._current_profile
         if not slug:
@@ -7014,12 +7190,40 @@ class MainWindow(QMainWindow):
             self._refresh_download_row()
             return
         if status["state"] == "no-repo":
-            self._warn(
-                "No Hugging Face repo set for this profile. Open the "
-                "profile and set Base ref to a repo like "
-                "LiquidAI/LFM3-1.7B."
-            )
+            # v0.30.0: offer the bridge repo instead of dead-ending
+            # with jargon. A pick stores the repo and the download
+            # starts below — the user never presses the button
+            # twice. The status is re-read: a repo whose weights
+            # are already on disk is ready, not a download.
+            if self._offer_bridge_repo(slug) is None:
+                return
+            try:
+                status = provision.weights_status(self.store, slug)
+            except StellaError as exc:
+                self._warn(str(exc))
+                return
+            if status["state"] == "ready":
+                self._say("Model already downloaded.")
+                self._refresh_download_row()
+                return
+        # v0.30.0 mismatch guard: a stored repo that is valid but
+        # not the bridge's for this model's tag is probably the
+        # wrong model's weights. Warn once; a switch re-reads the
+        # status for the new repo (it may already be downloaded).
+        # _weights_offer shares this path: it calls start_download.
+        repo = self._check_base_repo_match(slug, status["repo"])
+        if repo is None:
             return
+        if repo != status["repo"]:
+            try:
+                status = provision.weights_status(self.store, slug)
+            except StellaError as exc:
+                self._warn(str(exc))
+                return
+            if status["state"] == "ready":
+                self._say("Model already downloaded.")
+                self._refresh_download_row()
+                return
         if not provision.hub_available():
             self._warn(
                 "The download tool is not installed. Install "
@@ -7098,12 +7302,18 @@ class MainWindow(QMainWindow):
         if status["state"] == "ready":
             return True
         if status["state"] == "no-repo":
-            self._warn(
-                "This profile has no Hugging Face repo set. Open the "
-                "profile and set Base ref to a repo like "
-                "LiquidAI/LFM3-1.7B, then download the model."
-            )
-            return False
+            # v0.30.0: offer the bridge repo, then fall through to
+            # the "Download the model first?" question below — the
+            # download logic lives in one place, here.
+            if self._offer_bridge_repo(profile) is None:
+                return False
+            try:
+                status = provision.weights_status(self.store, profile)
+            except StellaError as exc:
+                self._warn(str(exc))
+                return False
+            if status["state"] == "ready":
+                return True
         answer = QMessageBox.question(
             self,
             "Download the model first?",

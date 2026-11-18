@@ -36,6 +36,7 @@ from .gguf import export_gguf
 from .howto import topic_text, topic_titles
 from .model import StellaError, Store, slug_from_model
 from .ollama import OllamaError, chat_stream, list_models
+from .ollama_bridge import suggest_hf_repos
 from .probe import load_probe_results, probe_gate, probe_project
 from .providers import ProviderError, make_chat_fn, make_chat_stream_fn
 from .provision import (
@@ -170,7 +171,10 @@ TOOL_HELP = {
     "start_training": (
         'start_training {"profile": "lfm3-tool", "project": "tool-calls"}: '
         "train the project. Takes hours on CPU. Add "
-        '"resume": true to pick up a paused run.'
+        '"resume": true to pick up a paused run. When the profile '
+        "has no Hugging Face repo set, the tool suggests one. Ask "
+        "the user, then call again with \"confirm\": true and "
+        '"repo": "the repo name" once they say yes.'
     ),
     "training_status": (
         'training_status {"profile": "lfm3-tool", "project": "tool-calls"}: '
@@ -199,7 +203,10 @@ TOOL_HELP = {
     ),
     "download_weights": (
         'download_weights {"profile": "lfm3-tool"}: download the base '
-        "model weights from Hugging Face."
+        "model weights from Hugging Face. When the profile has no "
+        "Hugging Face repo set, the tool suggests one. Ask the "
+        'user, then call again with "confirm": true and "repo": '
+        '"the repo name" once they say yes.'
     ),
     "distill": (
         'distill {"profile": "lfm3-tool", "project": "tool-calls", '
@@ -1094,6 +1101,57 @@ class ChatAgent:
             "(20 small tool-call examples). Ready to train when you are."
         )
 
+    def _bridge_no_repo(self, profile: str, args: dict, after: str,
+                        after_pick: str):
+        """The no-repo answer for the chat tools (v0.30.0): the
+        bridge's Hugging Face candidate(s) for this profile's
+        Ollama tag, in text form. Returns None when the call
+        already carries the user's confirmation (\"confirm\": true
+        plus a \"repo\" naming one of the candidates) — the repo is
+        stored on the profile and the caller proceeds. Otherwise
+        returns the message to show: the suggestion and the ask,
+        or the honest unknown-tag answer. A repo that is not a
+        bridge candidate is never stored from here, so a made-up
+        name cannot slip in. ``after`` is what happens once the
+        user says yes to the one candidate; ``after_pick`` is the
+        same for the pick-one case, where the user names a repo
+        instead of just saying yes."""
+        data = self.store.get_profile(profile)
+        tag = (data.get("ollama_tag") or "").strip()
+        candidates = suggest_hf_repos(tag)
+        if not candidates:
+            return (
+                "Stella doesn't know where this model's training "
+                "files live on Hugging Face yet. Find the model on "
+                "huggingface.co and set the Hugging Face repo in the "
+                "profile window, or pick a different model."
+            )
+        names = [c["repo"] for c in candidates]
+        if args.get("confirm") and (args.get("repo") or "").strip():
+            repo = args["repo"].strip()
+            if repo not in names:
+                return (
+                    f"{repo!r} is not one of the repos I suggested "
+                    f"for this model ({', '.join(names)}). Pick one "
+                    "of those, or set a different repo in the "
+                    "profile window."
+                )
+            self.store.update_profile(profile, base_ref=repo)
+            return None
+        if len(candidates) == 1:
+            candidate = candidates[0]
+            return (
+                "This model lives on Hugging Face as "
+                f"{candidate['repo']} ({candidate['source']}). {after}"
+            )
+        lines = ["This model could be one of these on Hugging Face:"]
+        for candidate in candidates:
+            lines.append(
+                f"- {candidate['repo']} ({candidate['source']})"
+            )
+        lines.append(after_pick)
+        return " ".join(lines)
+
     def _tool_start_training(self, args: dict) -> str:
         session = self._need_session(args)
         if isinstance(session, str):
@@ -1109,10 +1167,22 @@ class ChatAgent:
             )
         status = weights_status(self.store, profile)
         if status["state"] == "no-repo":
-            return (
-                f"Profile {profile!r} has no Hugging Face repo set. "
-                "Set Base ref to a repo like LiquidAI/LFM3-1.7B first."
+            # v0.30.0: offer the bridge repo in text form. A
+            # confirmed pick stores the repo and falls through to
+            # the weights check below (training still needs the
+            # download first); anything else is the message to show.
+            answer = self._bridge_no_repo(
+                profile,
+                args,
+                "Say yes and I will use it for this profile. "
+                "Training still needs the weights downloaded first.",
+                "Tell me which one and I will use it for this "
+                "profile. Training still needs the weights "
+                "downloaded first.",
             )
+            if answer is not None:
+                return answer
+            status = weights_status(self.store, profile)
         if status["state"] != "ready":
             return (
                 "The base weights are not downloaded yet. Say download "
@@ -1343,10 +1413,19 @@ class ChatAgent:
             return "Tell me which profile to download the weights for."
         status = weights_status(self.store, profile)
         if status["state"] == "no-repo":
-            return (
-                f"Profile {profile!r} has no Hugging Face repo set. "
-                "Set Base ref to a repo like LiquidAI/LFM3-1.7B first."
+            # v0.30.0: offer the bridge repo in text form. A
+            # confirmed pick stores the repo and the download runs
+            # below; anything else is the message to show.
+            answer = self._bridge_no_repo(
+                profile,
+                args,
+                "Say yes and I will use it and download the weights.",
+                "Tell me which one and I will use it and download "
+                "the weights.",
             )
+            if answer is not None:
+                return answer
+            status = weights_status(self.store, profile)
         if status["state"] == "ready":
             return (
                 f"The weights for {profile!r} are already downloaded "

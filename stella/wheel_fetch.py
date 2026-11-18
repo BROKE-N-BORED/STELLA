@@ -19,6 +19,13 @@ this runs. A wheel is downloaded to `<name>.part` and renamed to
 its final name only when complete and hash-checked, so a partial
 file is never mistaken for a finished wheel.
 
+v0.30.0: the file name is URL-decoded before saving — pip's
+report spells torch's version with %2B, and a file saved under
+the encoded name is invisible to pip's --find-links. A wheel
+saved under the old encoded name is renamed into place when it
+matches its hash (the twin rescue in fetch_file), never
+re-downloaded.
+
 Exit codes from main(), which install-training.sh relies on:
 0 = every wheel fetched; 1 = a download failed (the partial files
 stay, so a re-run resumes — the script must NOT fall back to a
@@ -38,7 +45,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 # Bytes per read while streaming a wheel down.
 CHUNK_BYTES = 1024 * 1024
@@ -81,12 +88,25 @@ def _check_hash(path: Path, expected: str | None) -> bool:
     return _sha256_file(path) == expected.lower()
 
 
+def _raw_file_name(url: str) -> str:
+    """The last path segment exactly as the URL spells it
+    (percent-escapes kept) — the name a wheel was saved under
+    before the v0.30.0 unquoting fix."""
+    return Path(urlparse(url).path).name
+
+
 def _file_name(url: str) -> str:
     """The wheel file name from its URL. Only the last path
-    segment is kept, so a hostile URL cannot escape the wheel
-    dir with ../ or an absolute path."""
-    name = Path(urlparse(url).path).name
-    if not name or name in (".", ".."):
+    segment is kept, and it is URL-decoded — pip's report spells
+    torch's version with %2B (2.15.0%2Bcpu), and a file saved
+    under the encoded name is invisible to pip's --find-links,
+    which cannot parse %2B as a version. The unquoting happens
+    AFTER taking the segment, and the decoded name is still
+    rejected when it is empty, "." or "..", or contains "/":
+    unquoting before the split would let a hostile URL smuggle
+    "../" past the traversal guard."""
+    name = unquote(_raw_file_name(url))
+    if not name or name in (".", "..") or "/" in name:
         raise CannotFetchError(
             f"the wheel URL {url!r} names no file to download"
         )
@@ -196,6 +216,21 @@ def fetch_file(
         # A finished-looking file with the wrong hash is worse
         # than no file: drop it and fetch again.
         dest.unlink()
+    # v0.30.0 rescue: a wheel saved before the unquoting fix
+    # keeps its percent-encoded name (torch-2.15.0%2Bcpu-...whl).
+    # When the decoded name is missing but that twin is here and
+    # matches its hash, rename it into place instead of
+    # downloading the wheel again — a re-download of the torch
+    # wheel is the better part of a gigabyte.
+    twin = dest_dir / _raw_file_name(url)
+    if (
+        twin != dest
+        and twin.is_file()
+        and _check_hash(twin, expected_sha256)
+    ):
+        os.replace(twin, dest)
+        _print(f"Renamed {twin.name} to {name}.")
+        return dest
     last_error: Exception | None = None
     for attempt in range(MAX_ATTEMPTS):
         have = part.stat().st_size if part.is_file() else 0

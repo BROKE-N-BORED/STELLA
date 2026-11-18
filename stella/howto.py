@@ -93,9 +93,11 @@ LiquidAI/LFM3-1.7B when you make the profile.
 You can also pick a model you already have in Ollama. Those show
 up in the list when you make a profile. Note: an Ollama model is
 for chatting, not for training. Training needs the Hugging Face
-version of the same model, which is what Base ref points to. If
-you picked an Ollama model and want to train it, open the profile
-and set Base ref to its Hugging Face name.
+version of the same model, which is what the Hugging Face repo
+in the profile points to. If you picked an Ollama model and want
+to train it, press Download model: Stella offers the Hugging
+Face repo it found for that model, and downloads it when you
+say yes.
 
 Bigger models need more memory. This PC has 8 GB. Models around
 1.5 to 2 billion parameters fit. An 8 billion parameter model does
@@ -107,15 +109,16 @@ not fit, and Stella will refuse rather than freeze your PC.""",
 already have in Ollama. Training needs the Hugging Face version
 of a model, and Ollama only knows its own tag (like
 qwen3.5:4b), not where the weights came from. Bridge looks the
-tag up and tells you the Hugging Face name to put in Base ref,
-so the profile you picked from Ollama can be trained.
+tag up and tells you the Hugging Face name for it.
 
-It runs from the command line: stella bridge followed by the
-tag. The answer is a short report: the Hugging Face repo when
-Bridge is sure, or its best guess with how sure it is, plus
-what to check when it cannot tell. Copy the repo name it gives
-into the profile's Base ref, then Download model pulls the
-weights the usual way.
+You rarely need to run it by hand: when you press Download
+model on a profile picked from Ollama, Stella offers the
+Hugging Face repo it found and downloads it when you say yes.
+
+It also runs from the command line: stella bridge followed by
+the tag. The answer is a short report: the Hugging Face repo
+when Bridge is sure, or its best guess with how sure it is,
+plus what to check when it cannot tell.
 
 Honest limits: Bridge matches by name, so it can guess wrong
 for a tag it has never seen, and it cannot help with a model
@@ -138,15 +141,17 @@ Role. Only matters if Code Forge uses this profile as a seat
 Ollama tag. The model as Ollama knows it on this PC. Used for
 dreaming: the sleep phase asks that model to write practice
 examples. The refusal probe does not use it.
-Base ref. Where training loads the base model from: a Hugging
-Face name like LiquidAI/LFM3-1.7B. Needed before you train.
+Hugging Face repo. Where training loads the base model from: a
+Hugging Face name like LiquidAI/LFM3-1.7B. Needed before you
+train.
 
 The main window has the Download model button, next to the
 model picker. It pulls the base weights with a progress bar,
-and a Cancel button while it runs. If no Base ref is set, the
-button is greyed out and a "Set the model source..." button
-shows instead: it opens the profile window, where Base ref
-gets set.""",
+and a Cancel button while it runs. If no Hugging Face repo is
+set, the button is greyed out and a "Set the model source..."
+button shows instead: it offers the Hugging Face repo Stella
+found for the model, or opens the profile window so you can
+type one.""",
     ),
     (
         "Projects",
@@ -435,8 +440,9 @@ panel, or double-click Install Stella Training in the Stella
 folder. It downloads about 2 GB.
 
 Weights missing. Open the profile and press Download model. If
-Base ref is empty, set it to the Hugging Face name first, for
-example LiquidAI/LFM3-1.7B.
+Stella does not know the model's Hugging Face repo yet, it says
+so: find the model on huggingface.co and set the Hugging Face
+repo in the profile window, for example LiquidAI/LFM3-1.7B.
 
 Not enough disk. Model weights are gigabytes. Free space, then
 download again. The download picks up where it left off.

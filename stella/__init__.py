@@ -1,4 +1,4 @@
-"""STELLA v0.29.0: fine-tune models on your own PC.
+"""STELLA v0.30.0: fine-tune models on your own PC.
 
 Train a small model on your own data, sleep on it, probe it, and
 export it — through the window or the command line. (R127: the

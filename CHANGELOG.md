@@ -1,5 +1,56 @@
 # Changelog
 
+## v0.30.0 — 2026-11-18
+
+A real-PC defect Joshua hit minutes after the v0.29.0 release:
+pressing "Get its weights" on a profile picked from Ollama
+dead-ended with "No Hugging Face repo set for this profile. Open
+the profile and set Base ref..." — jargon he rightly called out
+("This shit should pull from huggingface automatically"). The
+Ollama bridge already knew the answer and nothing used it. Now
+every "no repo" wall offers it: one candidate gets a Yes/No
+question naming the repo and where it comes from, and Yes stores
+it and starts the download at once; several get a pick-one
+dialog; an unknown tag gets plain words. The chat tools offer the
+same bridge in text form with a confirm round-trip, and the words
+"Base ref" no longer appear in any user-visible string.
+
+- The download, the train pre-check, and the "Set the model
+  source..." button all offer the bridge repo on a no-repo
+  profile, and a pick starts the download immediately.
+- The chat's download_weights and start_training tools suggest
+  the bridge repo and ask; a call with "confirm": true and a
+  "repo" naming a suggested candidate stores it and proceeds. A
+  repo the bridge did not suggest is refused, never stored.
+- The profile window's field is now labelled "Hugging Face repo",
+  and the How to Use topics say the same. The storage key stays
+  base_ref.
+- A mismatch guard in the download: when the stored repo is a
+  valid id but not the bridge's for the profile's model (Joshua
+  typed the old message's LFM3 example into his Granite profile),
+  the download warns once, names both repos, and offers "Use the
+  usual repo instead" or "Keep the one set". A warning, never a
+  block; a tag the bridge does not know never warns.
+
+A second real-PC defect, found the same day running
+install-training.sh: the training install downloaded every wheel,
+then failed at the install step with "Could not find a version
+that satisfies the requirement torch==2.15.0+cpu". The cause was
+the wheel file name: pip's report spells torch's version with
+%2B, and the fetch saved the wheel under that encoded name,
+which pip's --find-links cannot parse as a version.
+
+- The wheel fetch now URL-decodes the file name before saving,
+  so torch lands as torch-2.15.0+cpu-...whl. The traversal guard
+  still holds (decoding happens after taking the last path
+  segment; a decoded slash is rejected).
+- A wheel already saved under the old encoded name is renamed
+  into place when it matches its hash — never re-downloaded.
+- When the local-wheel install fails, install-training.sh now
+  falls through to the direct download instead of dying with
+  "run it again" (a re-run would repeat the identical failure).
+  The download-failed error only shows when both paths fail.
+
 ## v0.29.0 — 2026-11-18
 
 The last P3 batch of the 2026-11-15 full-product review

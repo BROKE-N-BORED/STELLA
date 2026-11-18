@@ -9,6 +9,7 @@ network is used.
 
 import hashlib
 import json
+import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -18,6 +19,7 @@ import pytest
 from stella.wheel_fetch import (
     CannotFetchError,
     WheelFetchError,
+    _file_name,
     fetch_file,
     fetch_wheels,
     wheels_from_report,
@@ -417,3 +419,138 @@ def test_fetch_wheels_resumes_after_a_cut_download(
     assert resumed_at == partial_size
     served_second_run = sum(entry[2] for entry in wheel_server.log)
     assert served_second_run < len(WHEEL_A) + len(WHEEL_B)
+
+
+# -- v0.30.0: percent-encoded wheel names -----------------------------
+# A real-PC defect: pip's --dry-run --report spells torch's version
+# with %2B (torch-2.15.0%2Bcpu-...whl), and the fetch saved the
+# wheel under that encoded name. pip's --find-links cannot parse
+# %2B as a version, so it ignored the file and the install failed
+# with "no versions" after a full download. The file name is now
+# URL-decoded before saving, and a wheel saved under the old
+# encoded name is renamed into place when it matches its hash.
+
+
+# PEP 427 wheel file name: distribution-version-python-abi-platform.
+WHEEL_NAME_RE = re.compile(
+    r"[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?-"
+    r"[A-Za-z0-9_.!+]+-"
+    r"[A-Za-z0-9_.]+-[A-Za-z0-9_.]+-[A-Za-z0-9_.]+\.whl"
+)
+
+ENCODED_TORCH = "torch-2.15.0%2Bcpu-cp312-cp312-manylinux.whl"
+DECODED_TORCH = "torch-2.15.0+cpu-cp312-cp312-manylinux.whl"
+
+
+def test_file_name_decodes_percent_escapes():
+    """v0.30.0: the file name from a %2B URL carries a literal +,
+    so pip can parse it as a version."""
+    assert _file_name(
+        "https://download-r2.pytorch.org/whl/cpu/" + ENCODED_TORCH
+    ) == DECODED_TORCH
+    assert _file_name(
+        "https://example.com/pkg-1.0%2Babc-py3-none-any.whl"
+    ) == "pkg-1.0+abc-py3-none-any.whl"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.com/%2E%2E%2Fevil.whl",
+        "https://example.com/a%2Fb.whl",
+        "https://example.com/%2E%2E",
+        "https://example.com/foo%2F..%2Fbar.whl",
+        "https://example.com/%2Fetc%2Fpasswd",
+    ],
+)
+def test_file_name_rejects_smuggled_traversal(url):
+    """v0.30.0: unquoting happens after taking the segment, so a
+    hostile URL cannot smuggle ../ or a slash into the file name
+    via percent-escapes — the traversal guard still holds."""
+    with pytest.raises(CannotFetchError):
+        _file_name(url)
+
+
+def test_wheels_from_report_decodes_names(wheel_server):
+    """v0.30.0: a report entry with a %2B URL yields a decoded
+    wheel name (the name pip --find-links must see)."""
+    report = {
+        "install": [
+            {
+                "download_info": {
+                    "url": _url(wheel_server, ENCODED_TORCH),
+                    "archive_info": {
+                        "hashes": {"sha256": _sha(WHEEL_A)}
+                    },
+                },
+            },
+        ],
+    }
+    wheels = wheels_from_report(report)
+    assert [w["name"] for w in wheels] == [DECODED_TORCH]
+    assert wheels[0]["url"].endswith(ENCODED_TORCH)
+
+
+def test_fetch_decodes_percent_escapes_in_wheel_name(
+    wheel_server, tmp_path, no_retry
+):
+    """v0.30.0: a wheel fetched from a %2B URL is saved under
+    its decoded name — a valid wheel file name pip can install
+    from — and no %2B file is left behind."""
+    wheel_server.files[ENCODED_TORCH] = WHEEL_A
+    dest = fetch_file(
+        _url(wheel_server, ENCODED_TORCH),
+        tmp_path,
+        expected_sha256=_sha(WHEEL_A),
+        _print=_quiet,
+    )
+    assert dest.name == DECODED_TORCH
+    assert WHEEL_NAME_RE.fullmatch(dest.name) is not None
+    assert dest.read_bytes() == WHEEL_A
+    assert not (tmp_path / ENCODED_TORCH).exists()
+    assert not (tmp_path / (DECODED_TORCH + ".part")).exists()
+
+
+def test_fetch_renames_percent_encoded_twin(
+    wheel_server, tmp_path, no_retry
+):
+    """v0.30.0: a wheel saved before the fix keeps its encoded
+    name in the cache. When the decoded name is missing but the
+    twin is here and matches its hash, the fetch renames it into
+    place — no re-download (the server sees no request at all)."""
+    wheel_server.files[ENCODED_TORCH] = WHEEL_A
+    wheel_dir = tmp_path / "wheels"
+    wheel_dir.mkdir()
+    (wheel_dir / ENCODED_TORCH).write_bytes(WHEEL_A)
+    dest = fetch_file(
+        _url(wheel_server, ENCODED_TORCH),
+        wheel_dir,
+        expected_sha256=_sha(WHEEL_A),
+        _print=_quiet,
+    )
+    assert dest.name == DECODED_TORCH
+    assert dest.read_bytes() == WHEEL_A
+    assert not (wheel_dir / ENCODED_TORCH).exists()
+    assert wheel_server.log == []
+
+
+def test_fetch_twin_with_bad_hash_downloads_again(
+    wheel_server, tmp_path, no_retry
+):
+    """v0.30.0: the twin rescue trusts the hash, not the name —
+    a twin with the wrong bytes is left alone and the wheel is
+    fetched fresh."""
+    wheel_server.files[ENCODED_TORCH] = WHEEL_A
+    wheel_dir = tmp_path / "wheels"
+    wheel_dir.mkdir()
+    (wheel_dir / ENCODED_TORCH).write_bytes(b"corrupt, not a wheel")
+    dest = fetch_file(
+        _url(wheel_server, ENCODED_TORCH),
+        wheel_dir,
+        expected_sha256=_sha(WHEEL_A),
+        _print=_quiet,
+    )
+    assert dest.name == DECODED_TORCH
+    assert dest.read_bytes() == WHEEL_A
+    assert len(wheel_server.log) == 1
+    assert wheel_server.log[0][3] == 200

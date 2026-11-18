@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from stella.model import STELLA_VERSION, StellaError, Store
+from stella.model import StellaError, Store
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -64,19 +64,7 @@ def window(qapp, seeded, settings):
 
 
 # -- Version --------------------------------------------------------
-
-
-def test_version_is_0_29_0(home):
-    """The version is 0.29.0 everywhere the CLI reports it."""
-    assert STELLA_VERSION == "0.29.0"
-    res = _run_cli_subprocess(home, "--version")
-    assert res.returncode == 0
-    assert "0.29.0" in res.stdout
-
-
-def test_window_title_carries_version(window):
-    """The window title carries STELLA 0.29.0."""
-    assert "0.29.0" in window.windowTitle()
+# (moved to test_v30.py — the version is 0.30.0 now)
 
 
 # -- R103: resume / dest documented in TOOL_HELP ----------------------
@@ -887,7 +875,7 @@ def test_cli_debug_report(home):
     reports = sorted((home / "logs").glob("debug-report-stella-*.txt"))
     assert len(reports) == 1
     text = reports[0].read_text(encoding="utf-8")
-    assert "DEBUG REPORT: stella 0.29.0" in text
+    assert "DEBUG REPORT: stella 0.30.0" in text
     assert str(home) in text  # the home setting, as the GUI sets it
     res = _run_cli_subprocess(home, "debug-report", "--json")
     assert res.returncode == 0

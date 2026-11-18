@@ -95,10 +95,13 @@ if "$DIR/.venv/bin/python" -m pip install --quiet --timeout 120 --retries 10 --d
     if "$DIR/.venv/bin/python" -m pip install --quiet --timeout 120 --retries 10 --no-cache-dir --no-index --find-links "$WHEELS" -r "$DIR/requirements-train.txt"; then
       TRAINING_INSTALLED=1
     else
-      echo "ERROR: training packages download failed. Check your connection" >&2
-      echo "and disk space, then run bash install-training.sh again." >&2
-      rm -f "$REPORT"
-      exit 1
+      # v0.30.0: the local wheels could not be installed (a real-PC
+      # failure: pip could not parse a %2B wheel name, so it saw no
+      # versions at all). Fall through to the direct download
+      # instead of dying: re-running would repeat the identical
+      # failure, since the fetched wheels are already cached. The
+      # "download failed" error below only shows when BOTH paths fail.
+      echo "Installing from the downloaded wheels failed, so downloading them directly instead."
     fi
   elif [ "$FETCH_RC" -eq 1 ]; then
     # A download failed partway: the partial wheels stay in the

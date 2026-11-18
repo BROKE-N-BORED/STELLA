@@ -1,3 +1,120 @@
+# STELLA v0.30.0 — Test Report
+
+Measured 2026-11-18 by the builder from a fresh unzip of the
+release zip. Python 3.12.3, PySide6 offscreen Qt,
+forge-v2-testenv; TMPDIR a sibling of the tree. Two real-PC
+defects in one version: the bridge fix (no-repo walls offer
+the Hugging Face repo) and the wheel fix (the %2B torch
+filename + the install-training.sh fallback).
+
+## Suite: 1963 passed, 67 skipped (2031 collected)
+
+The single-process full run OOMs on this 6 GB VM, so the suite
+ran in 12 pieces from the fresh unzip: 9 non-GUI pieces (1586
+passed, 67 skipped) + test_gui.py in 3 chunks (130 + 124 + 123
+passed). Counts reconcile exactly to the 2031 collected (1997
+in v0.29.0 + 34 net new: 24 in tests/test_v30.py including the
+2 version pins moved from test_v29.py, 10 in
+tests/test_wheel_fetch.py, 2 in tests/test_installer.py).
+
+One failure appeared in the run and is a load flake, not a
+regression: tests/test_installer.py::
+test_uninstall_leaves_a_newer_install_alone was killed by
+pytest-timeout (>300s) while waiting on subprocess I/O, in a
+piece that ran 9:12 under heavy load. It passes 3/3 solo in
+about 2.5s each, and v0.30.0 touches nothing under it
+(uninstall.sh and the uninstall logic are unchanged). The two
+CLI failures from the pre-wheel-fix verification run
+(test_cli_train_ctrl_c_pauses, the requant JSON-sweep timeout)
+did not reproduce in this run: test_cli.py passed 251/251.
+
+The 67 skips are the v0.29.0 skips unchanged (65 training-stack
+skips — no torch in forge-v2-testenv — plus the 2 tool skips
+for desktop-file-validate / shellcheck, neither installed in
+the sandbox).
+
+Environment notes: verification ran through the system-wide
+EPERM write storm (2026-11-18, recorded in AGENTS.md) — file
+writes intermittently fail with "Operation not permitted" in
+bursts, which makes pytest runs redirected to a file produce
+empty logs and exit 120. The suite ran with output captured
+into shell variables through pipes (never redirected to a
+file), in 12 small pieces so each finishes inside a calm
+window, with storm-aware retries (a piece is valid only when
+its output carries a pytest summary line and no storm
+keywords). Every piece was valid on attempt 1 in the final
+run. A runtime restart killed the first chain mid-GUI0; the
+three GUI chunks were re-run cleanly afterwards (all valid on
+attempt 1). Zip extraction for verification used the `unzip`
+CLI, never Python's zipfile.extractall (which ignores stored
+Unix modes and made 8 installer tests fail in an earlier
+attempt).
+
+The `malloc_consolidate(): unaligned fastbin chunk detected`
+post-run line did not reproduce in any piece — exit code 0
+throughout.
+
+## CLI smoke: green
+
+`stella-cli --version` reports 0.30.0. `stella-cli bridge
+lfm3:1.7b` suggests LiquidAI/LFM3-1.7B. `stella-cli distill
+--help` shows --timeout (default 300). `stella-cli doctor`
+runs and names its problems (the sandbox has no install
+receipt, as in v0.29.0).
+
+## GUI drive: green
+
+drive_gui.py offscreen: the window opens, the session is set,
+5 screenshots saved with real sizes. The profile window shows
+the renamed "Hugging Face repo" label with its plain-words
+help line; the main window shows "No Hugging Face repo set."
+in plain words (no "Base ref" anywhere on screen). The
+profile window's repo field shows the example repo as a
+placeholder when the stored value is a tag, not a repo id
+(pre-existing T79 behavior, unchanged).
+
+## Sweeps
+
+Em-dash: the suite's visible-text pins all pass; howto.py
+carries 0 em-dashes. "Base ref": zero occurrences in stella/,
+README.md, data/, and the shell scripts (code identifiers keep
+the base_ref name; historical developer docs under docs/ keep
+the wording). Secrets grep: clean. Zip modes: 0o100755 for
+scripts, 0o100644 for plain files, with file-type bits
+throughout; repair_launcher.py ships 0o100755 (its exec bit is
+set in the tree), the other launcher .py files 0o100644
+(invoked via python3, no exec bit needed). testzip clean, no
+self-inclusion.
+
+## The wheel fix, verified against the real failure
+
+The defect was a filename: pip's report spells torch's version
+with %2B, the fetch saved the wheel under that encoded name,
+and pip's --find-links could not parse it as a version. The
+new tests fetch a wheel whose URL contains %2B and assert the
+saved name has `+` and parses as a valid wheel name; a
+pre-placed encoded twin with a matching hash is renamed into
+place with no re-download (the fake server's log stays empty);
+a twin with a bad hash is left alone and the wheel is fetched
+fresh; and the script tests prove the --no-index failure falls
+through to the direct download (and that the download-failed
+error only shows when both paths fail). The traversal guard
+still holds: five hostile URLs with encoded slashes/dots are
+all refused.
+
+## Merge notes
+
+No merge: v0.30.0 was built in one isolated copy and merged
+into the live tree by rsync (diff-clean, no --delete). The
+bridge map is untouched (no new repos, no guessing unknown
+tags). Known gap, by design: the mismatch guard cannot catch
+a Granite profile carrying the wrong repo, because Granite is
+not in the bridge map — Joshua's Granite profile still has
+LiquidAI/LFM3-1.7B typed into it and needs a hand fix in the
+profile window.
+
+---
+
 # STELLA v0.29.0 — Test Report
 
 Measured 2026-11-18 by the coordinator from a fresh unzip of the

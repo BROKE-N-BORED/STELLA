@@ -382,9 +382,9 @@ slow on a Ryzen 3 — hours for a real run — and that is expected.
   model learns to write the answer, not to predict the question.
   A bundled sample (`sample-tool-calls.jsonl`, 20 synthetic Forge
   tool-call traces) is in the Train panel for the proof run.
-- **Base model**: training loads the base from the profile's Base
-  ref — a Hugging Face repo like `LiquidAI/LFM3-1.7B`, or a local
-  folder of weights — never from the Ollama tag. The Base ref
+- **Base model**: training loads the base from the profile's
+  Hugging Face repo, like `LiquidAI/LFM3-1.7B`, or a local
+  folder of weights — never from the Ollama tag. The repo
   usually follows the tag when it changes, and only differs when
   the training weights live somewhere else.
 - **RAM guard**: before loading anything, Stella estimates the run
