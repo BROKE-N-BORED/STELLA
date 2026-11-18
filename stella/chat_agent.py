@@ -37,7 +37,7 @@ from .howto import topic_text, topic_titles
 from .model import StellaError, Store, slug_from_model
 from .ollama import OllamaError, chat_stream, list_models
 from .probe import load_probe_results, probe_gate, probe_project
-from .providers import ProviderError, make_chat_fn
+from .providers import ProviderError, make_chat_fn, make_chat_stream_fn
 from .provision import (
     format_size,
     hub_available,
@@ -169,7 +169,8 @@ TOOL_HELP = {
     ),
     "start_training": (
         'start_training {"profile": "lfm3-tool", "project": "tool-calls"}: '
-        "train the project. Takes hours on CPU."
+        "train the project. Takes hours on CPU. Add "
+        '"resume": true to pick up a paused run.'
     ),
     "training_status": (
         'training_status {"profile": "lfm3-tool", "project": "tool-calls"}: '
@@ -181,7 +182,8 @@ TOOL_HELP = {
     ),
     "export_gguf": (
         'export_gguf {"profile": "lfm3-tool", "project": "tool-calls"}: '
-        "make a GGUF file and an Ollama model from the trained project."
+        "make a GGUF file and an Ollama model from the trained project. "
+        'Add "dest": "/path" to choose where the GGUF file goes.'
     ),
     "list_checkpoints": (
         'list_checkpoints {"profile": "lfm3-tool", "project": "tool-calls"}: '
@@ -492,9 +494,10 @@ class ChatAgent:
         # ProviderError when the chat runs, never here.
         self._default_chat_fn = chat_fn is None
         self._chat_fn = chat_fn or make_chat_fn(self.provider, store.home)
-        # Streaming (T76): a supplied stream_fn (tests) is kept;
-        # otherwise Ollama streams and cloud providers answer in one
-        # go. Recomputed on every provider switch.
+        # Streaming (T76, R104): a supplied stream_fn (tests) is
+        # kept; otherwise Ollama streams JSON lines and cloud
+        # providers stream SSE, through the same call shape.
+        # Recomputed on every provider switch.
         self._explicit_stream_fn = stream_fn is not None
         self._stream_fn = stream_fn
         self._refresh_stream_fn()
@@ -520,15 +523,30 @@ class ChatAgent:
         self._stream_buf = ""
         self._stream_suppressed = False
         self._streamed_plain = ""
+        # Token counts (R106): the counts from the reply in
+        # progress, added up across its model calls (a turn with
+        # tool calls makes several). {} until a cloud call reports
+        # counts; local Ollama reports none.
+        self.last_usage: dict = {}
 
     def _refresh_stream_fn(self) -> None:
-        """The streaming call for the current provider (T76)."""
+        """The streaming call for the current provider (T76, R104)."""
         if self._explicit_stream_fn:
             return
-        if self._default_chat_fn and (self.provider or "ollama") == "ollama":
+        if not self._default_chat_fn:
+            self._stream_fn = None
+            return
+        provider = self.provider or "ollama"
+        if provider == "ollama":
             self._stream_fn = chat_stream
         else:
-            self._stream_fn = None
+            # R104: a cloud provider streams SSE through the same
+            # call shape as Ollama's chat_stream, so the _model_call
+            # bookkeeping below sees cloud chunks exactly as
+            # Ollama ones — no double-print in the window.
+            self._stream_fn = make_chat_stream_fn(
+                provider, self.store.home
+            )
 
     # -- control ----------------------------------------------------
     def set_model(self, model: str) -> None:
@@ -675,6 +693,35 @@ class ChatAgent:
         return "\n".join(lines)
 
     # -- streaming (T76) --------------------------------------------
+    def _add_usage(self, fn) -> None:
+        """Add one call's token counts to the reply's total (R106).
+        The provider-bound functions carry `last_usage` after each
+        call; a plain function (Ollama, a test fake) carries none
+        and adds nothing."""
+        usage = getattr(fn, "last_usage", None)
+        if not isinstance(usage, dict):
+            return
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            value = usage.get(key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                self.last_usage[key] = self.last_usage.get(key, 0) + value
+
+    def last_usage_text(self) -> str:
+        """The reply's token count in plain words (R106), or ""
+        when no cloud call reported counts (local Ollama, or a
+        reply that made no model call)."""
+        total = self.last_usage.get("total_tokens")
+        if not isinstance(total, int):
+            return ""
+        prompt = self.last_usage.get("prompt_tokens")
+        completion = self.last_usage.get("completion_tokens")
+        if isinstance(prompt, int) and isinstance(completion, int):
+            return (
+                f"That reply used {total} tokens "
+                f"({prompt} sent, {completion} back)."
+            )
+        return f"That reply used {total} tokens."
+
     def _model_call(self, messages: list[dict]) -> str:
         """One model call, streaming when the window is listening.
 
@@ -695,10 +742,13 @@ class ChatAgent:
             self._flush_stream()
             self._last_call_streamed = True
             self.last_streamed_plain = self._streamed_plain.strip()
+            self._add_usage(self._stream_fn)
             return text
         self._last_call_streamed = False
         self.last_streamed_plain = ""
-        return self._chat_fn(self.model, messages)
+        text = self._chat_fn(self.model, messages)
+        self._add_usage(self._chat_fn)
+        return text
 
     def _on_stream_token(self, token: str) -> None:
         if self._stream_suppressed:
@@ -742,6 +792,9 @@ class ChatAgent:
         """One user message in, one plain-words reply out."""
         self._cancelled = False
         self.last_streamed_plain = ""
+        # R106: the token count is per reply — a new turn starts
+        # from zero, and _model_call adds each of its calls.
+        self.last_usage = {}
         cleaned = user_text.strip().lower()
         if self._pending_plan is not None:
             if _is_approval(cleaned):

@@ -108,6 +108,17 @@
     stella doctor [--check]               check the install and repair
                                           what a move broke (--check
                                           only reports, without fixing)
+    stella mark-ready <profile> <project>
+                                          mark a project ready to train
+    stella notes <profile> <project> [--set <text>]
+                                          read a project's notes, or
+                                          write them with --set
+    stella probe-results <profile> <project>
+                                          show the saved refusal-probe
+                                          results (does not re-run it)
+    stella howto [topic]                  read a How to Use topic, or
+                                          list the topics
+    stella debug-report                   write a debug report file
 
 Reads STELLA_HOME for the home dir (default ~/.stella).
 
@@ -171,6 +182,10 @@ JSON_COMMANDS = frozenset({
     "rename-project", "delete-project", "update-project",
     "clone-profile", "clone-project",
     "save-key", "list-keys", "remove-key",
+    # R112: the new read/write commands print a structured result
+    # too. howto is not here: it prints guide text, so --json is
+    # refused for it like the other text-only commands.
+    "mark-ready", "notes", "probe-results", "debug-report",
 })
 
 
@@ -539,12 +554,19 @@ def cmd_pull_weights(args) -> int:
             file=sys.stderr,
         )
         return 1
-    print(f"Pulling weights for {repo}...")
     quiet = _is_quiet(args)
+    announced: list[bool] = []
 
     def _show(line, **kwargs):
         # run_download speaks in PROGRESS / DONE / ERROR lines
         # (the GUI parses them); the terminal gets plain words.
+        # R111(d): the "Pulling weights..." line prints only when
+        # a pull actually starts — on the first progress or done
+        # signal — so a bad repo shows only its error, not a
+        # progress line for a download that never began.
+        if line.startswith(("PROGRESS ", "DONE ")) and not announced:
+            announced.append(True)
+            print(f"Pulling weights for {repo}...")
         if line.startswith("DONE "):
             print(f"Downloaded to {line[5:]}.")
         elif line.startswith("ERROR "):
@@ -1111,19 +1133,77 @@ def _settings_from_args(args) -> dict:
     return settings
 
 
+# R107: what each training-setting flag does, in plain words, with
+# the range the validators enforce (SETTING_RULES in model.py) and
+# the default (DEFAULT_SETTINGS). The help says it first, so the
+# user does not have to trip the error to learn it. The ranges are
+# written as "low to high" so the test can pin them against the
+# rules table; --seed's range is the whole 32-bit span, so its
+# help says "any whole number" instead of the numbers.
+SETTING_HELP = {
+    "rank": (
+        "LoRA rank: how big the adapter is (1 to 64, default 8). "
+        "A bigger rank can learn more, but uses more RAM."
+    ),
+    "epochs": (
+        "Epochs: how many times training reads the whole dataset "
+        "(1 to 100, default 3). More epochs take longer."
+    ),
+    "learning_rate": (
+        "Learning rate: how big each training step is "
+        "(0 to 1, default 0.0002). Too big and training jumps "
+        "around; too small and it barely learns."
+    ),
+    "batch_size": (
+        "Batch size: how many examples each training step reads "
+        "at once (1 to 32, default 1). Bigger batches use more RAM."
+    ),
+    "grad_accum": (
+        "Gradient accumulation: how many steps pile up before the "
+        "model updates (1 to 64, default 8). Acts like a bigger "
+        "batch without the RAM."
+    ),
+    "max_seq_len": (
+        "Max sequence length: the longest example training reads, "
+        "in tokens (128 to 32768, default 1024). Longer examples "
+        "are cut off."
+    ),
+    "checkpoint_steps": (
+        "Checkpoint steps: save a checkpoint every N steps "
+        "(0 to 10000, default 50). 0 means no checkpoints during "
+        "the run."
+    ),
+    "val_fraction": (
+        "Validation fraction: how much of the dataset is held back "
+        "to check training (0 to 0.5, default 0.1). 0 means no "
+        "checking."
+    ),
+    "warmup_steps": (
+        "Warmup steps: gentle steps before full training starts "
+        "(0 to 1000, default 5)."
+    ),
+    "seed": (
+        "Seed: the random starting point, any whole number "
+        "(default 42). The same seed gives the same shuffle."
+    ),
+}
+
+
 def _add_setting_flags(parser) -> None:
     """Add the training-setting flags to a subcommand parser."""
     for flag, key, kind in SETTING_FLAGS:
         parser.add_argument(
             flag, dest=key, type=kind, default=None,
-            help=f"training setting: {key}",
+            help=SETTING_HELP[key],
         )
     # R28: --method stays a real flag so `--method full` gets the
     # plain-words refusal in _settings_from_args instead of
-    # argparse's "unrecognized arguments" error.
+    # argparse's "unrecognized arguments" error. R107: the help
+    # names the values — lora only.
     parser.add_argument(
         "--method", dest="method", type=str, default=None,
-        help="training setting: method (lora only)",
+        help="Training method: lora only. Stella always trains "
+        "with LoRA on this PC.",
     )
 
 
@@ -2144,6 +2224,13 @@ def cmd_chat(args) -> int:
         if text == "/quit":
             return 0
         print(f"Stella: {agent.reply(text)}")
+        # R106: a cloud reply says what it used, in tokens. Local
+        # Ollama reports no counts, so nothing shows for it.
+        usage_fn = getattr(agent, "last_usage_text", None)
+        if callable(usage_fn):
+            usage_text = usage_fn() or ""
+            if usage_text:
+                print(usage_text)
         print()
     return 0
 
@@ -2320,6 +2407,166 @@ def cmd_remove_key(args) -> int:
         print(f"Removed the {display} key.")
     else:
         print(f"No {display} key was saved.")
+    return 0
+
+
+def cmd_mark_ready(args) -> int:
+    """Mark a project ready to train (R112): the CLI twin of the
+    Project window's Mark ready button. Status is informational
+    only — training never gates on it — so this is a display
+    change, not a workflow gate."""
+    store = _store()
+    data = store.update_project(args.profile, args.name, status="ready")
+    if _as_json(args):
+        _print_json(data)
+        return 0
+    print(
+        f"Marked project {data['name']!r} in profile "
+        f"{args.profile!r} ready."
+    )
+    return 0
+
+
+def cmd_notes(args) -> int:
+    """Read (or write) a project's notes (R112): the CLI twin of
+    the Project window's notes area. Reads by default; --set
+    writes through write_notes, so the rotating notes.md.1 backup
+    still happens."""
+    store = _store()
+    if getattr(args, "set", None) is not None:
+        store.write_notes(args.profile, args.name, args.set)
+        if _as_json(args):
+            _print_json({
+                "profile": args.profile,
+                "project": args.name,
+                "notes": args.set,
+            })
+            return 0
+        print(
+            f"Saved notes for project {args.name!r} in profile "
+            f"{args.profile!r}."
+        )
+        return 0
+    # Read: the project must exist — read_notes returns "" for a
+    # missing project too, so check first, or a typo reads as an
+    # empty notebook.
+    store.get_project(args.profile, args.name)
+    notes = store.read_notes(args.profile, args.name)
+    if _as_json(args):
+        _print_json({
+            "profile": args.profile,
+            "project": args.name,
+            "notes": notes,
+        })
+        return 0
+    if notes:
+        print(notes, end="" if notes.endswith("\n") else "\n")
+    else:
+        print(f"No notes for project {args.name!r} yet.")
+    return 0
+
+
+def cmd_probe_results(args) -> int:
+    """Show the saved refusal-probe results (R112): reads
+    probe_results.json and pretty-prints it — never re-runs the
+    probe. Fails plainly when no results file exists yet."""
+    from .probe import load_probe_results, probe_gate
+
+    store = _store()
+    store.get_project(args.profile, args.name)
+    result = load_probe_results(store, args.profile, args.name)
+    if result is None:
+        raise StellaError(
+            f"no probe results for project {args.name!r} in profile "
+            f"{args.profile!r} yet. Run the probe first: stella "
+            f"probe {args.profile} {args.name}"
+        )
+    if _as_json(args):
+        _print_json(result)
+        return 0
+    before = result.get("before") or {}
+    after = result.get("after") or {}
+    print(
+        f"Refusals: {before.get('refusals', 0)}/"
+        f"{before.get('total', 0)} before, "
+        f"{after.get('refusals', 0)}/{after.get('total', 0)} after "
+        f"(change {result.get('delta', 0):+.0%})."
+    )
+    if result.get("probe_set"):
+        print(
+            f"Probe set: {result['probe_set']} "
+            f"({before.get('total', 0)} prompts)."
+        )
+    if result.get("probe_set_note"):
+        print(f"Note: {result['probe_set_note']}")
+    if result.get("mode", "gate") == "informational":
+        print(
+            "Informational only: this probe does not pass or fail "
+            "anything."
+        )
+    else:
+        _passed, verdict = probe_gate(result)
+        print(verdict)
+    return 0
+
+
+def cmd_howto(args) -> int:
+    """Print a How to Use topic (R112): the guide, on the
+    terminal. No topic lists the topics. A topic name matches
+    case-insensitively, so `stella howto training` finds
+    Training."""
+    from .howto import topic_text, topic_titles
+
+    topic = (args.topic or "").strip()
+    if not topic:
+        print("How to Use topics:")
+        for title in topic_titles():
+            print(f"  {title}")
+        print("Read one with: stella howto <topic>")
+        return 0
+    body = topic_text(topic)
+    if body is None:
+        for title in topic_titles():
+            if title.lower() == topic.lower():
+                body = topic_text(title)
+                break
+    if body is None:
+        raise StellaError(
+            f"no How to Use topic called {topic!r}. Run stella "
+            "howto to list the topics."
+        )
+    print(body)
+    return 0
+
+
+def cmd_debug_report(args) -> int:
+    """Write the debug report (R112): the same report the
+    Settings window writes — same logger, same settings, same
+    services and dependencies — from the terminal."""
+    from .debug_log import DebugLogger, check_ollama
+    from .ollama import ollama_url
+    from .providers import provider_presence
+
+    store = _store()
+    log = DebugLogger(
+        "stella", STELLA_VERSION, log_dir=str(store.home / "logs")
+    )
+    log.set_setting("home", str(store.home))
+    log.set_setting("chat_providers", provider_presence(store.home))
+    log.register_service("ollama", lambda: check_ollama(ollama_url()))
+    for dep in (
+        "PySide6",
+        "torch",
+        "transformers",
+        "peft",
+        "huggingface_hub",
+    ):
+        log.register_dependency(dep)
+    path = log.generate_report()
+    if _as_json(args):
+        _print_json({"report": str(path)})
+        return 0
+    print(f"Debug report written to:\n{path}")
     return 0
 
 
@@ -2760,10 +3007,15 @@ def build_parser() -> argparse.ArgumentParser:
                    help="start from a project template (e.g. "
                    "lfm3-tool-format): its dataset, settings, and "
                    "mode. Explicit flags win over the template.")
+    # R110: "Mode", like the window says (T71) — the product
+    # name never appears in a visible string. The mode is a
+    # label stored with the project; it does not change training
+    # (audit-7: a morph run and a compress run train identically).
     p.add_argument("--metamorph", default=None,
                    choices=["morph", "compress", "both"],
-                   help="MetaMorphAi mode for this project "
-                   "(default morph)")
+                   help="Mode for this project: morph, compress, "
+                   "or both (default morph). A label stored with "
+                   "the project; it does not change training.")
     p.add_argument("--metamorph-notes", default=None,
                    help="why this metamorph mode (shown with the "
                    "project)")
@@ -2875,9 +3127,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="display name shown in the window")
     p.add_argument("--dataset", default=None,
                    help="dataset file for this project (.jsonl)")
+    # R110: "Mode", like the window says (T71) — see
+    # create-project above.
     p.add_argument("--metamorph", default=None,
                    choices=["morph", "compress", "both"],
-                   help="MetaMorphAi mode for this project")
+                   help="Mode for this project: morph, compress, "
+                   "or both. A label stored with the project; it "
+                   "does not change training.")
     p.add_argument("--metamorph-notes", default=None,
                    help="why this metamorph mode (shown with the "
                    "project)")
@@ -2974,7 +3230,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("project", help="project name, e.g. tool-calls")
     p.add_argument("dir", help="folder to write the GGUF into")
     p.add_argument("--quant", default="Q4_K_M",
-                   help="llama.cpp quant type (default Q4_K_M)")
+                   help="llama.cpp quant type (default Q4_K_M; common values "
+                   "Q4_K_M, Q5_K_M, Q8_0, Q2_K; any other value "
+                   "is refused with the full list)")
     p.add_argument("--from-checkpoint", type=int, default=None,
                    help="export from checkpoints/step-N instead of the "
                    "final adapter")
@@ -3134,7 +3392,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("tag", help="installed Ollama tag, e.g. qwen3.5:4b")
     p.add_argument("--quant", default="Q4_K_M",
-                   help="llama.cpp quant type (default Q4_K_M)")
+                   help="llama.cpp quant type (default Q4_K_M; common values "
+                   "Q4_K_M, Q5_K_M, Q8_0, Q2_K; any other value "
+                   "is refused with the full list)")
     p.add_argument("--as", dest="as_tag", default=None,
                    help="name for the smaller model "
                    "(default: the old tag plus the quant)")
@@ -3193,6 +3453,65 @@ def build_parser() -> argparse.ArgumentParser:
                    help="seconds to wait for each answer "
                    "(default 300)")
     p.set_defaults(func=cmd_distill)
+
+    # -- R112: mark-ready, notes, probe-results, howto,
+    # debug-report. Prune is deliberately not here: R77 covers
+    # it, and it is already done (prune-checkpoints, sleep-prune).
+    p = _cmd(
+        "mark-ready",
+        "mark a project ready to train",
+        "examples:\n  stella mark-ready lfm3-tool tool-calls",
+    )
+    p.add_argument("profile", help="profile name, e.g. lfm3-tool")
+    p.add_argument("name", help="project name, e.g. tool-calls")
+    p.set_defaults(func=cmd_mark_ready)
+
+    p = _cmd(
+        "notes",
+        "read a project's notes (or write them with --set)",
+        "examples:\n"
+        "  stella notes lfm3-tool tool-calls\n"
+        "  stella notes lfm3-tool tool-calls --set "
+        "\"first run looked good\"",
+    )
+    p.add_argument("profile", help="profile name, e.g. lfm3-tool")
+    p.add_argument("name", help="project name, e.g. tool-calls")
+    p.add_argument(
+        "--set", dest="set", default=None,
+        help="write this text as the project's notes (the old "
+        "notes are kept as notes.md.1). Leave it out to read.",
+    )
+    p.set_defaults(func=cmd_notes)
+
+    p = _cmd(
+        "probe-results",
+        "show the saved refusal-probe results (does not re-run it)",
+        "examples:\n  stella probe-results lfm3-tool tool-calls",
+    )
+    p.add_argument("profile", help="profile name, e.g. lfm3-tool")
+    p.add_argument("name", help="project name, e.g. tool-calls")
+    p.set_defaults(func=cmd_probe_results)
+
+    p = _cmd(
+        "howto",
+        "read a How to Use topic (or list the topics)",
+        "examples:\n"
+        "  stella howto\n"
+        "  stella howto Training",
+    )
+    p.add_argument(
+        "topic", nargs="?", default=None,
+        help="topic title, e.g. Training (leave it out to list "
+        "the topics)",
+    )
+    p.set_defaults(func=cmd_howto)
+
+    p = _cmd(
+        "debug-report",
+        "write a debug report file",
+        "examples:\n  stella debug-report",
+    )
+    p.set_defaults(func=cmd_debug_report)
     return parser
 
 
@@ -3215,12 +3534,23 @@ def _silence_library_warnings() -> None:
     The GUI entry point (gui.main) calls this too, so a probe or
     merge loading an adapter does not print the peft notice into
     the window's stderr either.
+
+    R111(b): the huggingface_hub "unauthenticated requests"
+    advisory is silenced here too, but not with filterwarnings.
+    Probed in huggingface_hub 2.4.0: the Hub sends the advisory
+    as an X-HF-Warning response header, and the library logs it
+    with logger.warning on its own root logger (a StreamHandler
+    on stderr, level WARNING). No warnings filter can catch a
+    logging call, so the logger's level goes to ERROR instead, and
+    real hub errors still show.
     """
+    import logging
     import os
     import warnings
 
     os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
     os.environ.setdefault("TQDM_DISABLE", "1")
+    logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
     warnings.filterwarnings(
         "ignore", message=".*torch_dtype.*is deprecated.*"
     )
@@ -3286,6 +3616,15 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return args.func(args)
     except StellaError as exc:
+        # R108: a --json failure still prints a JSON error document
+        # on stdout (matching verify's ok field shape), so a script
+        # reading stdout gets JSON instead of silence — probe
+        # --json against a missing adapter used to print nothing.
+        # The stderr line and exit 1 stay; only the missing
+        # document is added. Probe's gate-fail 3 is untouched: it
+        # returns 3 from cmd_probe, not through here.
+        if _as_json(args):
+            _print_json({"ok": False, "error": str(exc)})
         print(f"stella: {exc}", file=sys.stderr)
         return 1
     except Exception as exc:

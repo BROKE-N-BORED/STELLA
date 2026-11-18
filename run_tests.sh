@@ -16,9 +16,12 @@ if [ ! -x "$DIR/.venv/bin/python" ]; then
 fi
 PY="$DIR/.venv/bin/python"
 
-if ! "$PY" -m pytest --version >/dev/null 2>&1; then
-  echo "Installing pytest into the Stella venv for the test run..."
-  "$PY" -m pip install --quiet --timeout 120 --retries 10 pytest
+# R128: pytest-timeout supplies the per-test timeout in pytest.ini —
+# without the plugin the timeout would silently do nothing, so it is
+# installed wherever pytest is (here and both CI jobs).
+if ! "$PY" -m pytest --version >/dev/null 2>&1 || ! "$PY" -c "import pytest_timeout" 2>/dev/null; then
+  echo "Installing pytest and pytest-timeout into the Stella venv for the test run..."
+  "$PY" -m pip install --quiet --timeout 120 --retries 10 pytest pytest-timeout
 fi
 
 # The GUI tests need PySide6. The installed venv already has it; a

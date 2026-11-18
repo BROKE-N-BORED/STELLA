@@ -12,7 +12,7 @@ set -euo pipefail
 if [ "${1:-}" = "--help" ]; then
   echo "Usage: bash install.sh [--help]"
   echo "Installs Stella: a private .venv with PySide6, the app-menu"
-  echo "launcher, and the 'stella' command. No training packages —"
+  echo "launcher, and the 'stella' command. No training packages -"
   echo "run bash install-training.sh for those."
   exit 0
 fi
@@ -35,9 +35,13 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 1
 fi
 
-# The receipt records a COMPLETE install (T139): drop any stale one
-# up front, so a failed install leaves no receipt behind (T63).
-rm -f "$DIR/.stella-install-receipt"
+# The receipt records a COMPLETE install (T139): it is replaced
+# atomically at the end of a successful install, never dropped up
+# front (R117) — a failed re-install used to delete the previous
+# good receipt before the preflight, leaving the doctor to report
+# "no install receipt" for a complete install. A failed FRESH
+# install still leaves no receipt behind (T63): none exists to
+# keep, and the receipt is only written on success.
 
 # Disk-space preflight (T133): the base install needs about 500 MB
 # (a ~90 MB wheel, ~259 MB installed, plus headroom). Refuse plainly
@@ -172,7 +176,11 @@ for size in 16 22 24 32 48 64 128 256 512; do
 done
 [ -f "$DIR/assets/stella.png" ] || ICON_MISSING=1
 if [ "$ICON_MISSING" -eq 1 ]; then
-  if ! "$DIR/.venv/bin/python" "$DIR/render_icon.py" >/dev/null 2>&1; then
+  # R118: offscreen, exactly as the QApplication check above —
+  # the render creates a QGuiApplication, which fails where
+  # there is no display without it.
+  if ! QT_QPA_PLATFORM=offscreen "$DIR/.venv/bin/python" \
+      "$DIR/render_icon.py" >/dev/null 2>&1; then
     echo "WARNING: could not render the app icon from assets/stella.svg." >&2
   fi
 fi
@@ -201,17 +209,34 @@ fi
 # NOT from Icon=, so a quoted Icon= shows the generic gear icon.
 "$DIR/.venv/bin/python" -m stella.install desktop "$DIR" "$HOME" "$ICON_MODE"
 
+# The real desktop folder (R119): `xdg-user-dir DESKTOP` names a
+# localized desktop (~/Bureau, ~/Schreibtisch); ~/Desktop is the
+# fallback when the tool is absent or answers nothing. The dir
+# may not exist — then no copy lands, as before.
+resolve_desktop_dir() {
+  local dir=""
+  if command -v xdg-user-dir >/dev/null 2>&1; then
+    dir="$(xdg-user-dir DESKTOP 2>/dev/null || true)"
+  fi
+  if [ -n "$dir" ]; then
+    printf '%s' "$dir"
+  else
+    printf '%s' "$HOME/Desktop"
+  fi
+}
+DESKTOP_DIR="$(resolve_desktop_dir)"
+
 # Desktop copy for double-click launch from the desktop too.
 # Cinnamon/Nemo refuse to launch an untrusted .desktop file, so the
 # copy is made executable AND marked trusted. The copy is claimed
 # in the success message only when it actually landed (T136).
 DESKTOP_OK=0
-if [ -d "$HOME/Desktop" ]; then
-  if cp "$HOME/.local/share/applications/stella.desktop" "$HOME/Desktop/Stella.desktop" 2>/dev/null; then
+if [ -d "$DESKTOP_DIR" ]; then
+  if cp "$HOME/.local/share/applications/stella.desktop" "$DESKTOP_DIR/Stella.desktop" 2>/dev/null; then
     DESKTOP_OK=1
-    chmod +x "$HOME/Desktop/Stella.desktop" 2>/dev/null || true
+    chmod +x "$DESKTOP_DIR/Stella.desktop" 2>/dev/null || true
     if command -v gio >/dev/null 2>&1; then
-      gio set "$HOME/Desktop/Stella.desktop" metadata::trusted true 2>/dev/null || true
+      gio set "$DESKTOP_DIR/Stella.desktop" metadata::trusted true 2>/dev/null || true
     fi
   fi
 fi
@@ -220,16 +245,16 @@ fi
 # install is click-only — double-click the icon, no terminal.
 # Same trust treatment as the Stella icon above.
 # The tree copy's Exec resolves the launcher next to the .desktop
-# file (%k) — on the Desktop that folder is ~/Desktop, where the
-# launcher is not, so the v0.25.0 Desktop copy failed on
+# file (%k) — on the Desktop that folder is the desktop folder
+# itself, where the launcher is not, so the v0.25.0 Desktop copy failed on
 # double-click (python3 could not open the file). The Desktop copy
 # therefore names this install's launcher by absolute path; the
 # tree copy keeps the portable %k form. The icon is claimed only
 # when the copy landed AND the Exec line was rewritten.
 TRAIN_DESKTOP_OK=0
-if [ -d "$HOME/Desktop" ] && [ -f "$DIR/Install Training Stella.desktop" ]; then
-  if cp "$DIR/Install Training Stella.desktop" "$HOME/Desktop/Install Stella Training.desktop" 2>/dev/null; then
-    if "$DIR/.venv/bin/python" - "$HOME/Desktop/Install Stella Training.desktop" "$DIR/install_training_launcher.py" <<'PYEOF' 2>/dev/null; then
+if [ -d "$DESKTOP_DIR" ] && [ -f "$DIR/Install Training Stella.desktop" ]; then
+  if cp "$DIR/Install Training Stella.desktop" "$DESKTOP_DIR/Install Stella Training.desktop" 2>/dev/null; then
+    if "$DIR/.venv/bin/python" - "$DESKTOP_DIR/Install Stella Training.desktop" "$DIR/install_training_launcher.py" <<'PYEOF' 2>/dev/null; then
 import sys
 desktop_file, launcher = sys.argv[1], sys.argv[2]
 lines = open(desktop_file).read().splitlines()
@@ -243,9 +268,9 @@ PYEOF
     else
       echo "WARNING: could not point the desktop training icon at this install." >&2
     fi
-    chmod +x "$HOME/Desktop/Install Stella Training.desktop" 2>/dev/null || true
+    chmod +x "$DESKTOP_DIR/Install Stella Training.desktop" 2>/dev/null || true
     if command -v gio >/dev/null 2>&1; then
-      gio set "$HOME/Desktop/Install Stella Training.desktop" metadata::trusted true 2>/dev/null || true
+      gio set "$DESKTOP_DIR/Install Stella Training.desktop" metadata::trusted true 2>/dev/null || true
     fi
   fi
 fi

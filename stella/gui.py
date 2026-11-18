@@ -136,12 +136,15 @@ from .style import (
     set_reduced_motion,
 )
 from .providers import (
+    CORRUPT_PROVIDERS_MESSAGE,
     PROVIDERS,
     get_custom_config,
     has_key,
     load_providers,
     provider_presence,
+    providers_corrupt,
     remove_key,
+    reset_corrupt_providers,
     save_key,
     stale_list_notes,
     test_connection,
@@ -2297,6 +2300,15 @@ class ProjectWindow(QDialog):
                 "paused, done, failed, or exported."
             ),
         )
+        # R113: the settings live on the terminal since T16
+        # removed the form — the window says so, with the exact
+        # command, instead of leaving the user hunting. Disclosure
+        # only: no settings controls come back here. The example
+        # flag is --seed: the T16 pins forbid the setting names
+        # (rank, epochs, learning rate) in any visible string, so
+        # the example names a setting those pins do not cover.
+        self._settings_note = _help_label("")
+        form.addRow("Training settings", self._settings_note)
         details.content_layout.addLayout(form)
         layout.addWidget(details)
         self.details_section = details
@@ -2478,6 +2490,12 @@ class ProjectWindow(QDialog):
             self._update_title()
 
     def _load_inner(self):
+        # R113: the disclosure follows renames (retarget reloads).
+        self._settings_note.setText(
+            "Training settings are changed from the terminal: "
+            f"stella update-project {self._profile} {self._project} "
+            "--seed 7"
+        )
         try:
             p = self._main.store.get_project(self._profile, self._project)
             notes = self._main.store.read_notes(self._profile, self._project)
@@ -2943,6 +2961,24 @@ class SettingsWindow(QDialog):
         self._load_chat_models()
 
         providers = section("AI providers")
+        # R105: a damaged providers.json says so here, with a
+        # reset that backs the file up first — it never reads as
+        # "no keys" any more. Hidden while the file is fine.
+        self._corrupt_label = QLabel(CORRUPT_PROVIDERS_MESSAGE)
+        self._corrupt_label.setWordWrap(True)
+        self._corrupt_reset_btn = QPushButton("Reset the keys file")
+        self._corrupt_reset_btn.setToolTip(
+            "The damaged file is kept as a backup, and every saved "
+            "key will need saving again."
+        )
+        self._corrupt_reset_btn.clicked.connect(
+            self._on_reset_corrupt_providers
+        )
+        corrupt = providers_corrupt(self._main.store.home)
+        self._corrupt_label.setVisible(corrupt)
+        self._corrupt_reset_btn.setVisible(corrupt)
+        providers.addWidget(self._corrupt_label)
+        providers.addWidget(self._corrupt_reset_btn)
         self._key_fields: dict[str, QLineEdit] = {}
         self._key_status: dict[str, QLabel] = {}
         self._provider_buttons: dict[str, dict[str, QPushButton]] = {}
@@ -3015,7 +3051,7 @@ class SettingsWindow(QDialog):
 
         # Tab walks the window in visual order (T82).
         chain: list = [
-            refresh_btn, self.chat_combo,
+            refresh_btn, self.chat_combo, self._corrupt_reset_btn,
         ]
         for pid in ("groq", "gemini"):
             chain.append(self._key_fields[pid])
@@ -3135,6 +3171,37 @@ class SettingsWindow(QDialog):
             return
         self._key_fields[pid].clear()
         status.setText("Saved.")
+        # R105: saving a key replaced the damaged file (backed up
+        # first by save_key), so the notice no longer applies.
+        self._corrupt_label.setVisible(False)
+        self._corrupt_reset_btn.setVisible(False)
+        self._load_chat_models()
+
+    def _on_reset_corrupt_providers(self):
+        """Reset the damaged keys file (R105): the damaged file is
+        backed up first, then removed. Asked first — resetting
+        forgets every saved key — and the default answer is No."""
+        answer = QMessageBox.question(
+            self, "Stella",
+            "Reset the saved provider keys file? The damaged file "
+            "is kept as a backup, but every saved key will need "
+            "saving again.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        backup = reset_corrupt_providers(self._main.store.home)
+        self._corrupt_reset_btn.setVisible(False)
+        for status in self._key_status.values():
+            status.setText("No key saved.")
+        if backup is not None:
+            self._corrupt_label.setText(
+                f"The damaged file was kept as {backup.name}. Save "
+                "your keys again below."
+            )
+            self._corrupt_label.setVisible(True)
+        else:
+            self._corrupt_label.setVisible(False)
         self._load_chat_models()
 
     def _on_provider_test(self, pid):
@@ -3824,6 +3891,14 @@ class ChatWindow(QDialog):
             self.messages.append("")
         else:
             self._append("Stella", text)
+        # R106: a cloud reply says what it used, in tokens. Local
+        # Ollama reports no counts, so nothing shows for it.
+        usage_text = ""
+        usage_fn = getattr(self._agent, "last_usage_text", None)
+        if callable(usage_fn):
+            usage_text = usage_fn() or ""
+        if usage_text:
+            self._append_plain(usage_text)
         self._streaming = False
         self.send_btn.setEnabled(True)
         self.cancel_btn.setEnabled(False)
@@ -6068,11 +6143,16 @@ class MainWindow(QMainWindow):
             )
             dataset = proj.get("dataset_ref") or "not set yet"
             # No training settings here (T16): the backend picks
-            # them, and the user never sees them.
+            # them, and the user never sees them. R113 discloses
+            # where they live (the exact terminal command) while
+            # the values stay hidden.
             self.session_summary.setText(
                 f"Model: {model}\n"
                 f"Dataset: {dataset}\n"
-                f"Status: {proj.get('status', 'draft')}."
+                f"Status: {proj.get('status', 'draft')}.\n"
+                "Training settings are changed from the terminal: "
+                f"stella update-project {self._current_profile} "
+                f"{self._current_project} --seed 7"
             )
             self.project_label.setText(
                 f"Project: {proj.get('display_name') or self._current_project}"

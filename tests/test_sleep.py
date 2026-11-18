@@ -84,6 +84,25 @@ def test_sleep_manifest_round_trip(tmp_path):
     manifest = load_sleep_manifest(store, "p", "proj")
     assert manifest["slept_hashes"] == []
     assert manifest["cycles"] == []
+
+
+def test_fresh_sleep_manifest_carries_the_real_version(tmp_path):
+    # R124: the manifest's stella_version used to be the
+    # manifest-format version "0.3" — a hand-reading user would
+    # misread which Stella wrote it. It carries the real version
+    # now, and the format version keeps its own key.
+    from stella.model import STELLA_VERSION
+    from stella.sleep import SLEEP_VERSION
+
+    store = Store(tmp_path / "home")
+    store.create_profile("p")
+    store.create_project("p", "proj")
+    manifest = load_sleep_manifest(store, "p", "proj")
+    assert manifest["stella_version"] == STELLA_VERSION
+    assert manifest["sleep_version"] == SLEEP_VERSION
+    save_sleep_manifest(store, "p", "proj", manifest)
+    again = load_sleep_manifest(store, "p", "proj")
+    assert again["stella_version"] == STELLA_VERSION
     manifest["slept_hashes"] = ["abc"]
     manifest["cycles"] = [{"cycle": 1, "status": "OK"}]
     save_sleep_manifest(store, "p", "proj", manifest)
@@ -395,6 +414,100 @@ def test_dream_rows_ollama_down_returns_skip():
     assert rows == []
     assert reason is not None
     assert "skipped" in reason
+
+
+def test_dream_skip_reason_has_no_space_before_the_period():
+    # R123: the skip reason used to read "(...) . Dreaming
+    # skipped" — a space before the period, user-visible in the
+    # CLI and the GUI log.
+    _, reason = dream_rows(
+        _seed_examples(), model_tag="tiny:1b", count=3,
+        ollama_url="http://127.0.0.1:9",
+    )
+    assert reason is not None
+    assert ". Dreaming skipped" in reason
+    assert " . Dreaming skipped" not in reason
+
+
+def test_dream_rows_reads_streamed_chunks():
+    # R126: a real Ollama answers /api/generate with stream:true
+    # as newline-delimited JSON chunks, not one object — the
+    # dreamer must join the chunked "response" pieces.
+    lines = [json.dumps(DREAMED_VALID[0]), json.dumps(DREAMED_VALID[1])]
+    chunks = ["\n".join(lines)[:40], "\n".join(lines)[40:]]
+
+    class StreamingOllama(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", 0))
+            self.rfile.read(length)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            for piece in chunks:
+                body = json.dumps({"response": piece}).encode()
+                self.wfile.write(body + b"\n")
+                self.wfile.flush()
+            self.wfile.write(json.dumps(
+                {"response": "", "done": True}).encode() + b"\n")
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), StreamingOllama)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}"
+        rows, reason = dream_rows(
+            _seed_examples(), model_tag="tiny:1b", count=5,
+            ollama_url=url,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert reason is None
+    assert len(rows) == 2
+    assert rows[0]["messages"][-1]["content"] == "4."
+    assert rows[1]["messages"][-1]["content"] == "Madrid."
+
+
+def test_dream_rows_gives_up_on_a_silent_peer():
+    # R126: a peer that accepts the connection and never answers
+    # used to stall the full 120s generation budget. Streaming
+    # with a silence budget abandons it after the silence window
+    # instead — the dream is skipped well before 120s, while a
+    # slow-but-answering model keeps its full budget. The test
+    # passes a short silence window so the suite does not wait
+    # out the 30s default.
+    import time
+
+    class SilentOllama(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", 0))
+            self.rfile.read(length)
+            # Accept, then never answer: longer than the test
+            # could ever wait, so only the silence budget ends it.
+            time.sleep(120)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), SilentOllama)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}"
+        start = time.monotonic()
+        rows, reason = dream_rows(
+            _seed_examples(), model_tag="tiny:1b", count=3,
+            ollama_url=url, silence_timeout=2,
+        )
+        elapsed = time.monotonic() - start
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert rows == []
+    assert reason is not None
+    assert "Dreaming skipped" in reason
+    assert elapsed < 30, f"silent peer stalled {elapsed:.1f}s"
 
 
 def test_dream_rows_no_tag_returns_skip():

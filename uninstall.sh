@@ -80,13 +80,37 @@ remove_launcher_if_ours() { # $1 = file, $2 = plain name, $3 = marker (default $
     echo "The $name does not point at this install, so it was left alone."
   fi
 }
+# The real desktop folder (R119): `xdg-user-dir DESKTOP` names a
+# localized desktop (~/Bureau, ~/Schreibtisch); ~/Desktop is the
+# fallback when the tool is absent or answers nothing. Removal
+# tries BOTH dirs: an icon installed on a localized desktop lives
+# in the resolved dir, while an older install only ever used
+# ~/Desktop — checking both leaves neither behind.
+resolve_desktop_dir() {
+  local dir=""
+  if command -v xdg-user-dir >/dev/null 2>&1; then
+    dir="$(xdg-user-dir DESKTOP 2>/dev/null || true)"
+  fi
+  if [ -n "$dir" ]; then
+    printf '%s' "$dir"
+  else
+    printf '%s' "$HOME/Desktop"
+  fi
+}
+DESKTOP_DIR="$(resolve_desktop_dir)"
 remove_launcher_if_ours "$HOME/.local/share/applications/stella.desktop" "menu launcher"
-remove_launcher_if_ours "$HOME/Desktop/Stella.desktop" "desktop icon"
+remove_launcher_if_ours "$DESKTOP_DIR/Stella.desktop" "desktop icon"
+if [ "$DESKTOP_DIR" != "$HOME/Desktop" ]; then
+  remove_launcher_if_ours "$HOME/Desktop/Stella.desktop" "desktop icon"
+fi
 # The desktop training icon (v0.27.0 form names this install's
 # launcher by absolute path, so ownership is checkable; the
 # v0.25.0 %k form names no install and is left alone — litter
 # beats breaking another install's icon).
-remove_launcher_if_ours "$HOME/Desktop/Install Stella Training.desktop" "desktop training icon" "$DIR/install_training_launcher.py"
+remove_launcher_if_ours "$DESKTOP_DIR/Install Stella Training.desktop" "desktop training icon" "$DIR/install_training_launcher.py"
+if [ "$DESKTOP_DIR" != "$HOME/Desktop" ]; then
+  remove_launcher_if_ours "$HOME/Desktop/Install Stella Training.desktop" "desktop training icon" "$DIR/install_training_launcher.py"
+fi
 if [ -e "$HOME/.local/bin/stella" ] || [ -L "$HOME/.local/bin/stella" ]; then
   link_target="$(readlink -f "$HOME/.local/bin/stella" 2>/dev/null || true)"
   if [ "$link_target" = "$DIR/stella-cli" ]; then
@@ -97,21 +121,31 @@ if [ -e "$HOME/.local/bin/stella" ] || [ -L "$HOME/.local/bin/stella" ]; then
 fi
 
 # Menu icons (hicolor theme, T138). The shared remover also refreshes
-# the icon cache when the tool is available.
-if [ -x "$DIR/.venv/bin/python" ]; then
-  "$DIR/.venv/bin/python" -c "
-import sys; sys.path.insert(0, '$DIR')
-from stella import install as _i
-from pathlib import Path as _P
-_i.remove_hicolor_icons(_P.home())
-" 2>/dev/null || true
-else
+# the icon cache when the tool is available. The manual loop is a
+# REAL fallback (R115): it runs when there is no venv python AND
+# when the python remover fails (a damaged venv used to swallow
+# its failure with `|| true` and leave the icons behind). The
+# python call itself stays silenced — a damaged venv's traceback
+# is noise — but its exit code decides.
+remove_hicolor_icons_manual() {
   for size in 16 22 24 32 48 64 128 256 512; do
     rm -f "$HOME/.local/share/icons/hicolor/${size}x${size}/apps/stella.png"
   done
   if command -v gtk-update-icon-cache >/dev/null 2>&1; then
     gtk-update-icon-cache -f -t "$HOME/.local/share/icons/hicolor" >/dev/null 2>&1 || true
   fi
+}
+if [ -x "$DIR/.venv/bin/python" ]; then
+  if ! "$DIR/.venv/bin/python" -c "
+import sys; sys.path.insert(0, '$DIR')
+from stella import install as _i
+from pathlib import Path as _P
+_i.remove_hicolor_icons(_P.home())
+" 2>/dev/null; then
+    remove_hicolor_icons_manual
+  fi
+else
+  remove_hicolor_icons_manual
 fi
 
 if command -v update-desktop-database >/dev/null 2>&1; then
@@ -120,6 +154,41 @@ fi
 
 rm -rf "$DIR/.venv"
 rm -f "$DIR/.stella-install-receipt"
+
+# Pip cache (R116): the training install downloads about 2 GB of
+# wheels, and pip keeps them in ~/.cache/pip after the venv is
+# gone. The cache is shared with anything else using pip, so this
+# is an OFFER, never a silent delete — and a non-interactive run
+# keeps it (default No, like the data prompt above; --yes asks
+# nothing at all). The venv is already gone by here, so the
+# removal is a plain rm of the cache dir, not `pip cache purge`.
+# STELLA_UNINSTALL_PIP_CACHE_MIN_KB overrides the "worth asking
+# about" threshold (tests use it); the default is 100 MB.
+if [ "$YES" -eq 0 ] && [ -d "$HOME/.cache/pip" ]; then
+  PIP_CACHE_MIN_KB="${STELLA_UNINSTALL_PIP_CACHE_MIN_KB:-102400}"
+  case "$PIP_CACHE_MIN_KB" in
+    ''|*[!0-9]*) PIP_CACHE_MIN_KB="102400" ;;
+  esac
+  PIP_CACHE_KB="$(du -sk "$HOME/.cache/pip" 2>/dev/null | cut -f1)"
+  case "$PIP_CACHE_KB" in
+    ''|*[!0-9]*) PIP_CACHE_KB="0" ;;
+  esac
+  if [ "$PIP_CACHE_KB" -ge "$PIP_CACHE_MIN_KB" ]; then
+    if [ "$PIP_CACHE_KB" -ge 1048576 ]; then
+      PIP_CACHE_SIZE="about $((PIP_CACHE_KB / 1048576)) GB"
+    else
+      PIP_CACHE_SIZE="about $((PIP_CACHE_KB / 1024)) MB"
+    fi
+    printf "Stella's downloads left %s in the pip cache. Remove it? [y/N] " "$PIP_CACHE_SIZE"
+    read -r pip_answer || pip_answer=""
+    case "$pip_answer" in
+      y|Y|yes|YES)
+        rm -rf "$HOME/.cache/pip"
+        echo "Removed the pip cache."
+        ;;
+    esac
+  fi
+fi
 
 if [ "$REMOVE_DATA" -eq 1 ]; then
   rm -rf "$HOME/.stella"

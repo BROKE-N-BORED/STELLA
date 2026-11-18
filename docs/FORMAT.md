@@ -13,6 +13,9 @@ read it and so later versions never drift into two formats.
                           # run. Ships a placeholder note until then —
                           # Stella never pretends weights exist.
       checkpoints/        # copied from the project, if any exist
+      dataset/            # the training data file, present when the
+                          # export bundles the dataset
+                          # (--bundle-dataset / T59)
       probe_results.json  # refusal-probe before/after, if run
       sleep/              # sleep cycles (adapters, manifest, replay
                           # reports), if any were run
@@ -60,7 +63,7 @@ An unknown `kind` is refused as not a Stella export.
 
 ```json
 {
-  "stella_version": "0.18.0",
+  "stella_version": "0.29.0",
   "format": 1,
   "kind": "stella-export",
   "exported_at": "2026-11-14T11:00:00Z",
@@ -73,8 +76,10 @@ An unknown `kind` is refused as not a Stella export.
     "processor": "",
     "config": {},
     "dependencies": [],
+    "governing_seat": "",
     "created": "2026-11-12T09:00:00Z",
-    "updated": "2026-11-14T10:00:00Z"
+    "updated": "2026-11-14T10:00:00Z",
+    "last_used": "2026-11-14T09:30:00Z"
   },
   "project": {
     "name": "tool-calls",
@@ -120,7 +125,13 @@ An unknown `kind` is refused as not a Stella export.
   the hostname of the machine that made the package, shown in the
   import preview when present. `profile.last_used` (v0.21.0,
   T165) is when a training run last started under the profile,
-  restored on import like the other stamps.
+  restored on import like the other stamps — it appears only
+  when set, so a profile that has never trained carries no
+  `last_used` at all. `profile.governing_seat` (v0.22.0, T116)
+  is the governing-seat marker: the seat name when the profile
+  is bound to a governing seat, empty otherwise. It is always
+  written, so an exported and re-imported profile keeps its
+  binding (and its pre-train warning).
 - `files` (v0.18.0, T104) lists every file in the package except
   `manifest.json` itself, each with its size in bytes and its
   SHA-256 hex digest — the adapter, checkpoints, notes, probe

@@ -730,6 +730,21 @@ def test_two_probe_runs_are_distinguishable(tmp_path, monkeypatch):
     assert first["prompts_version"] == second["prompts_version"]
 
 
+def test_prompts_version_is_3_for_the_per_role_battery(tmp_path, monkeypatch):
+    # R122: v0.22 replaced the battery with per-role sets (T174)
+    # but the version stayed 2, so two result files could share a
+    # version with different prompt sets. The constant is 3 now,
+    # and a fresh probe result records it.
+    assert PROMPTS_VERSION == 3
+    store = _probe_store(tmp_path)
+    result = _run_fake_probe(store, monkeypatch)
+    assert result["prompts_version"] == 3
+    saved = json.loads(
+        (store.project_dir("tiny", "proof") / "probe_results.json").read_text()
+    )
+    assert saved["prompts_version"] == 3
+
+
 # -- T90: governing seats get the gate, everyone else informs ---------
 
 
@@ -749,6 +764,11 @@ def test_is_governing_profile():
     assert is_governing_profile({"role": "utility"}) is False
     assert is_governing_profile({"role": "all-rounder"}) is False
     assert is_governing_profile({"role": "judge"}) is False
+    # R125: whole words only — a seat name inside another word
+    # ("breakfast" holds "fast", "screwdriver" holds "driver")
+    # does not gate.
+    assert is_governing_profile({"role": "breakfast"}) is False
+    assert is_governing_profile({"role": "screwdriver"}) is False
     assert is_governing_profile({"role": ""}) is False
     assert is_governing_profile({}) is False
 

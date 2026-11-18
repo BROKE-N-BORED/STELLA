@@ -1,3 +1,84 @@
+# STELLA v0.29.0 — Test Report
+
+Measured 2026-11-18 by the coordinator from a fresh unzip of the
+release zip. Python 3.12.3, PySide6 offscreen Qt,
+forge-v2-testenv; TMPDIR a sibling of the tree.
+
+## Suite: 1930 passed, 67 skipped (1997 collected)
+
+The single-process full run OOMs on this 6 GB VM, so the suite ran
+in 4 chunks from the fresh unzip: non-GUI 1553 passed + 67 skipped,
+test_gui.py in 3 chunks (130 + 124 + 123 passed). Counts reconcile
+exactly to the 1997 collected (1925 in v0.28.0 + 72 new across the
+two halves: 40 in tests/test_v29.py from the chat/CLI half, 24
+from the installer half, plus parametrised CLI cases for the five
+new commands). Zero failures in the completed runs.
+
+The 67 skips are the v0.28.0 training-stack skips (65 — no torch in
+forge-v2-testenv) plus 2 new ones: the tests that run
+desktop-file-validate / shellcheck when the tools are installed
+(R120/R121), and neither tool is installed in the sandbox.
+
+Environment note: the first GUI chunk 01/02 runs timed out at the
+40-minute cap with load-flake failures (the box had ~400 MB free
+with another thread's Ollama test running). Clean verbose re-runs
+passed 124 and 123 with zero failures, no code change between the
+runs — the timeouts were load, not a merge defect (same pattern as
+the v0.24.0 verification flakes).
+
+Slowest single test: 11.68s (test_stylesheet_is_stellas_own_look),
+measured by builder B; the pytest-timeout value in pytest.ini
+(R128) is 300s — ~25x with room for a loaded machine. The timeout
+mechanism was verified with deliberately hung tests (plain and
+GUI): both failed by timeout in ~5s.
+
+The `malloc_consolidate(): unaligned fastbin chunk detected`
+post-run line from the v0.3 report did NOT reproduce in any chunk
+run — no teardown abort, exit code 0 throughout.
+
+## CLI smoke: green
+
+`stella-cli --version` reports 0.29.0. All five new commands
+(mark-ready, notes, probe-results, howto, debug-report) are
+present with help; `howto` lists its topics with Getting started
+first.
+
+## GUI drive: green
+
+drive_gui.py offscreen: the window opens, the session is set,
+5 screenshots saved. The main window screenshot is clean; the
+session summary shows the R113 disclosure line live ("Training
+settings are changed from the terminal: stella update-project
+lfm3-tool tool-calls --seed 7").
+
+## Sweeps
+
+Em-dash: the suite's visible-text pins all pass
+(test_no_em_dash_in_visible_text, test_no_em_dash_in_any_topic,
+test_no_em_dash_in_tool_text, test_no_em_dash_in_provider_text,
+test_chat_window_has_no_em_dash); howto.py carries 0 em-dashes.
+Secrets grep: clean. Shellcheck 0.10.0 over *.sh + stella-cli:
+clean; desktop-file-validate 0.27 over all four .desktop files
+including the new Repair Stella entry: clean (both run from
+fetched tools — neither is installed in the sandbox). Zip modes:
+0o100755/0o100644 with file-type bits throughout; the launcher
+.py files ship 0o100644 as in v0.28.0 (invoked via python3, no
+exec bit needed).
+
+## Merge notes
+
+No merge-interaction defects: the two halves touched disjoint
+files except README.md (hand-merged: A's five new commands +
+B's pre-install icon note and Repair Stella lead). One fix in
+place at merge: a pre-existing em-dash in install.sh's --help
+echo (user-visible output) replaced with a hyphen; no test
+pinned the string. R113's disclosure uses --seed 7 as the
+example flag: the task's --rank 16 example violates three
+pinned T16 tests that forbid rank/epochs wording on screen,
+and relaxing them would re-decide T16.
+
+---
+
 # STELLA v0.28.0 — Test Report
 
 Verified 2026-11-18 by the coordinator from a FRESH UNZIP of

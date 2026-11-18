@@ -254,6 +254,15 @@ That sets up Stella's own Python environment, puts **Stella** in the
 app menu with its ✨ sparkles icon, and puts a **Stella** icon on the desktop.
 After that, just click it — no terminal needed to run Stella.
 
+One thing to know before you install: the **Install Stella** file
+itself shows a plain generic icon until Stella is installed. That
+is a limit of the desktop file format, not a missing file: the
+icon name only resolves once the icons are installed, and the
+format has no spec-compliant way to point at an icon inside the
+unzipped folder before then. The generic icon is accepted. Once
+installed, Stella shows its sparkles icon in the menu and on the
+desktop.
+
 To launch from a terminal instead:
 
 `bash run.sh`
@@ -278,7 +287,9 @@ idempotent and just refreshes the install.
 Everything the installer writes points at the folder it ran from,
 so moving the folder leaves a dead menu entry and a dead `stella`
 command (the window itself still runs from the new location with
-`bash run.sh`). Fix it from a terminal inside the moved folder:
+`bash run.sh`). Fix it by double-clicking **Repair Stella** in the
+moved folder, no terminal needed. Or from a terminal inside the
+moved folder:
 
 `bash stella-cli doctor`
 
@@ -600,6 +611,16 @@ After install, `stella` works in a terminal:
 `stella distill <profile> <project> --teacher <tag> --prompts <file> [--timeout 300]`
 
 `stella doctor [--check]`
+
+`stella mark-ready <profile> <project>`
+
+`stella notes <profile> <project> [--set <text>]`
+
+`stella probe-results <profile> <project>`
+
+`stella howto [topic]`
+
+`stella debug-report`
 
 Global flags, available on every command: `--json` prints a
 structured result for scripts (on the list, show, probe,

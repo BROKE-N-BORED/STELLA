@@ -1,5 +1,94 @@
 # Changelog
 
+## v0.29.0 — 2026-11-18
+
+The last P3 batch of the 2026-11-15 full-product review
+(R103–R129): cloud chat that streams and shows what it cost,
+five new CLI commands, a click-only doctor, a pytest config
+with timeouts, and the docs refreshed to match the real
+layout. That closes the list: 124 of 129 tasks done, the
+remaining 5 needing Joshua's PC. Full record:
+docs/stella-review-task-list-2026-11-15.md.
+
+- R103 — The chat tool help now documents the `resume` and
+  `dest` arguments, so the agent's options can be learned
+  from the help instead of guessed.
+- R104 — Cloud chat replies stream in as they arrive (Groq,
+  Gemini, custom) instead of arriving all at once after a
+  long silence.
+- R105 — A damaged providers.json now says so in plain words
+  and offers to reset it (with a backup first) instead of
+  silently pretending no keys are saved.
+- R106 — Cloud chat shows what each reply used in tokens
+  ("That reply used 16 tokens (12 sent, 4 back)"), in the
+  window and on the terminal.
+- R107 — Every training-setting flag's help now says what it
+  does, its range, and its default; --method names its values.
+- R108 — `probe --json` prints a JSON error object on
+  failure, like `verify` does, so scripts get JSON on every
+  path.
+- R109 — The stella-cli header comment no longer lists
+  commands (it had gone stale twice); it points at --help
+  instead.
+- R110 — CLI help says "Mode" like the GUI does; the word
+  "MetaMorphAi" no longer appears in CLI help.
+- R111 — Four small CLI fixes: delete errors name the
+  profile; the HF Hub advisory no longer leaks onto a dry
+  run; the doubled "rough" is gone; the pull-weights line
+  prints only when a pull starts.
+- R112 — Five new CLI commands: mark-ready, notes (read or
+  --set), probe-results, howto, and debug-report.
+- R113 — The window now says in plain words that training
+  settings are changed from the terminal, with the exact
+  command, in the project panel, the session summary, and
+  the How to Use Training topic.
+- R114 — The README records that the installer file itself
+  shows a generic icon before install (a limit of the
+  desktop file format, no spec-compliant fix) — accepted,
+  not a missing file.
+- R115 — Uninstall's manual icon removal now runs as a real
+  fallback when the venv-branch remover fails, instead of
+  silently leaving icons behind.
+- R116 — Uninstall offers to clear the pip cache (about 2 GB
+  after a training install), naming the size, default No.
+- R117 — A failed re-install no longer deletes the previous
+  good install receipt; the receipt is only replaced by a
+  successful install.
+- R118 — The icon render runs with
+  QT_QPA_PLATFORM=offscreen, so icons render on a
+  display-less run.
+- R119 — The desktop icon lands on the real desktop folder
+  (via xdg-user-dir DESKTOP, ~/Desktop fallback), and
+  uninstall removes it from there too.
+- R120 — CI runs desktop-file-validate and shellcheck in a
+  lint job and runs on a weekly schedule.
+- R121 — The doctor runs by clicking: a new "Repair Stella"
+  desktop entry, no terminal needed, and it works even with
+  the venv deleted.
+- R122 — PROMPTS_VERSION is 3, matching the per-role prompt
+  battery from v0.22.
+- R123 — The dream-skip string typo is fixed ("(...) .
+  Dreaming skipped" lost its stray space).
+- R124 — A new sleep manifest carries the real Stella
+  version; the manifest-format version lives under its own
+  sleep_version key.
+- R125 — The probe gate matches whole words now, so
+  "breakfast" and "screwdriver" no longer trip it.
+- R126 — Dreaming gives up early on a silent Ollama (30 s
+  silence budget) instead of stalling the full 120 s; the
+  120 s generation budget for a slow-but-answering model is
+  unchanged.
+- R127 — TEST-REPORT.md carries the real suite counts, and
+  the package docstring no longer says v0.8.0 (the
+  versioned feature list is dropped; the changelog is the
+  version record).
+- R128 — A pytest.ini sets a 300 s per-test timeout and a
+  gui marker, so one hung test cannot hold CI for six
+  hours; pytest-timeout is wired into run_tests.sh and CI.
+- R129 — FORMAT.md matches the current store: example
+  version 0.29.0, governing_seat and last_used in the
+  profile block, dataset/ in the layout.
+
 ## v0.28.0 — 2026-11-18
 
 The first P3 batch of the 2026-11-15 full-product review

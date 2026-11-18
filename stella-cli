@@ -1,14 +1,8 @@
 #!/usr/bin/env bash
 # STELLA command line — run with: bash stella-cli <command>
-#   bash stella-cli profiles
-#   bash stella-cli projects <profile>
-#   bash stella-cli export <profile> <project> <dir>
-#   bash stella-cli import <export-dir>
-#   bash stella-cli create-profile <name> --tag <ollama-tag> --role <role>
-#   bash stella-cli create-project <profile> <name>
-#   bash stella-cli train <profile> <project>
-#   bash stella-cli export-gguf <profile> <project> <dir>
-#   bash stella-cli probe <profile> <project>
+# Run `bash stella-cli --help` for the command list. (R109: the
+# list used to live here and went stale twice — the parser's
+# --help is the list now, so it cannot drift again.)
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"

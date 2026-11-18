@@ -30,7 +30,7 @@ from pathlib import Path
 
 from .autoconfig import compute_settings, measure_pc
 
-STELLA_VERSION = "0.28.0"
+STELLA_VERSION = "0.29.0"
 
 # Slug: lowercase letters, digits, dash, underscore. Must start alnum.
 # No dots, no slashes — a slug can never climb out of its directory.
@@ -1384,7 +1384,7 @@ class Store:
         src = self.project_dir(profile, project)
         dst = self.project_dir(profile, new_slug)
         if not (src / "project.json").exists():
-            raise StellaError(f"no project named {project!r}")
+            raise StellaError(f"no project named {project!r} in profile {profile!r}")
         if (dst / "project.json").exists():
             raise StellaError(f"project {new_slug!r} already exists")
         data = self.get_project(profile, project)
@@ -1402,7 +1402,7 @@ class Store:
         checkpoints and notes intact. Returns the trash path."""
         pdir = self.project_dir(profile, project)
         if not (pdir / "project.json").exists():
-            raise StellaError(f"no project named {project!r}")
+            raise StellaError(f"no project named {project!r} in profile {profile!r}")
         return self._move_to_trash(
             pdir,
             f"{validate_slug(profile, 'profile name')}-"
@@ -1414,7 +1414,7 @@ class Store:
         the CLI's permanent removal. The project must exist."""
         pdir = self.project_dir(profile, project)
         if not (pdir / "project.json").exists():
-            raise StellaError(f"no project named {project!r}")
+            raise StellaError(f"no project named {project!r} in profile {profile!r}")
         self._destroy_project(profile, project)
 
     def clone_project(
@@ -1497,7 +1497,7 @@ class Store:
     def write_notes(self, profile: str, project: str, text: str) -> None:
         pdir = self.project_dir(profile, project)
         if not (pdir / "project.json").exists():
-            raise StellaError(f"no project named {project!r}")
+            raise StellaError(f"no project named {project!r} in profile {profile!r}")
         notes = pdir / "notes.md"
         # The rotating single backup (T119): the previous version
         # is kept as notes.md.1, so a mistaken save loses nothing.

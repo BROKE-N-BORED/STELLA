@@ -15,6 +15,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+# R128: the whole file is the GUI suite — run it (or skip it) as a
+# group with `-m gui` / `-m "not gui"`.
+pytestmark = pytest.mark.gui
+
 
 @pytest.fixture()
 def window(qapp, seeded, settings):

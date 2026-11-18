@@ -1625,7 +1625,9 @@ def format_estimate(estimate: dict) -> str:
         f"{estimate['val_examples']} held out to validate).",
         f"Disk: about {_fmt_disk(estimate['disk_bytes'])} "
         "(checkpoints plus the adapter plus the merged weights).",
-        f"Time: {estimate['time_note']} on this PC (rough).",
+        # R111(c): the time note already says "roughly" — the
+        # doubled "(rough)" hedge is dropped.
+        f"Time: {estimate['time_note']} on this PC.",
     ]
     if not estimate["fits"]:
         if available is not None and available < RAM_LIMIT_BYTES:

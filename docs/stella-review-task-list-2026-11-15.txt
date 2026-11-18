@@ -1,6 +1,6 @@
 STELLA - task list from the full review, 2026-11-15
 
-129 tasks: 97 done, 27 to do, 5 gated. 0 urgent. 23 important, 52 correctness and polish, 54 nice to have.
+129 tasks: 124 done, 0 to do, 5 gated. 0 urgent. 23 important, 52 correctness and polish, 54 nice to have.
 The 5 marked (needs your PC) can only be done on your machine.
 Full detail for every task - evidence, what to fix, what done looks like -
 is in stella-review-task-list-2026-11-15.md in this same folder.
@@ -115,30 +115,30 @@ R99. The cap-hit reply is not recorded in the chat history [DONE]
 R100. "just do it" only matches at the start of a message [DONE]
 R101. A custom base URL ending in /chat/completions doubles the path [DONE]
 R102. The chat-window model buttons are Ollama-only [DONE]
-R103. The resume / dest tool arguments are accepted but undocumented
-R104. Cloud providers never stream
-R105. A corrupt providers.json silently reads as "no keys"
-R106. No cloud cost or usage visibility for cloud chat
-R107. The setting-flag help says nothing useful
-R108. probe --json prints no JSON on failure
-R109. The stella-cli comment lists 9 of 31 commands
-R110. CLI help says "MetaMorphAi mode" while the GUI follows the no-metamorph-words rule
-R111. Small CLI inconsistencies: delete errors, a stray advisory, doubled "rough", a progress line before its failure
-R112. No CLI for mark-ready/status, notes, viewing probe results, How to Use, or a debug report
-R113. Training settings are CLI-only since the GUI form was deleted, and the window never says so
-R114. The installer file itself shows a generic icon before install
-R115. The uninstall icon-removal fallback never runs on a venv-branch failure
-R116. Uninstall leaves about 2 GB of pip cache behind
-R117. An early-failing re-install deletes the previous good receipt
-R118. The icon render lacks QT_QPA_PLATFORM=offscreen
-R119. The desktop copy only tries ~/Desktop
-R120. CI never runs desktop-file-validate or shellcheck, and has no scheduled runs
-R121. No click-only doctor
-R122. PROMPTS_VERSION is still 2 after the v0.22 battery change
-R123. A typo in the dream-skip string
-R124. The sleep manifest's stella_version is "0.3"
-R125. Substring over-gating: "breakfast" and "screwdriver" gate the probe
-R126. Dreaming can stall the full 120 s on a hung Ollama
-R127. TEST-REPORT.md is stale and the __init__.py docstring still says v0.8.0
-R128. No pytest config file: no timeouts, no markers
-R129. FORMAT.md refresh: the example shows 0.18.0 and omits governing_seat and dataset/
+R103. The resume / dest tool arguments are accepted but undocumented [DONE]
+R104. Cloud providers never stream [DONE]
+R105. A corrupt providers.json silently reads as "no keys" [DONE]
+R106. No cloud cost or usage visibility for cloud chat [DONE]
+R107. The setting-flag help says nothing useful [DONE]
+R108. probe --json prints no JSON on failure [DONE]
+R109. The stella-cli comment lists 9 of 31 commands [DONE]
+R110. CLI help says "MetaMorphAi mode" while the GUI follows the no-metamorph-words rule [DONE]
+R111. Small CLI inconsistencies: delete errors, a stray advisory, doubled "rough", a progress line before its failure [DONE]
+R112. No CLI for mark-ready/status, notes, viewing probe results, How to Use, or a debug report [DONE]
+R113. Training settings are CLI-only since the GUI form was deleted, and the window never says so [DONE]
+R114. The installer file itself shows a generic icon before install [DONE]
+R115. The uninstall icon-removal fallback never runs on a venv-branch failure [DONE]
+R116. Uninstall leaves about 2 GB of pip cache behind [DONE]
+R117. An early-failing re-install deletes the previous good receipt [DONE]
+R118. The icon render lacks QT_QPA_PLATFORM=offscreen [DONE]
+R119. The desktop copy only tries ~/Desktop [DONE]
+R120. CI never runs desktop-file-validate or shellcheck, and has no scheduled runs [DONE]
+R121. No click-only doctor [DONE]
+R122. PROMPTS_VERSION is still 2 after the v0.22 battery change [DONE]
+R123. A typo in the dream-skip string [DONE]
+R124. The sleep manifest's stella_version is "0.3" [DONE]
+R125. Substring over-gating: "breakfast" and "screwdriver" gate the probe [DONE]
+R126. Dreaming can stall the full 120 s on a hung Ollama [DONE]
+R127. TEST-REPORT.md is stale and the __init__.py docstring still says v0.8.0 [DONE]
+R128. No pytest config file: no timeouts, no markers [DONE]
+R129. FORMAT.md refresh: the example shows 0.18.0 and omits governing_seat and dataset/ [DONE]

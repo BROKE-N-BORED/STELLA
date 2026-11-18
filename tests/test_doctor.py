@@ -460,3 +460,84 @@ def test_doctor_with_venv_still_repairs(tmp_path):
     assert _check_by_name(checks, "symlink").status == FIXED
     assert install_mod.launcher_path(home).is_file()
     assert install_mod.symlink_path(home).is_symlink()
+
+
+# -- R119: the desktop folder is resolved, not assumed ------------
+
+
+def _localized_desktop(monkeypatch, tmp_path, home):
+    """Point XDG_CONFIG_HOME at a fixture whose user-dirs.dirs
+    names the test home's Bureau as the desktop, with the fake
+    xdg-user-dir first on PATH (the real tool is not installed
+    in the sandbox). The fixture uses an absolute path: the
+    $HOME form would expand to the pytest process's real home."""
+    from tests.test_installer import make_xdg_user_dir_stub
+
+    config_home = tmp_path / "xdg-config"
+    config_home.mkdir(exist_ok=True)
+    (config_home / "user-dirs.dirs").write_text(
+        f'XDG_DESKTOP_DIR="{home / "Bureau"}"\n'
+    )
+    bindir = make_xdg_user_dir_stub(tmp_path)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+    import os
+
+    monkeypatch.setenv(
+        "PATH", str(bindir) + os.pathsep + os.environ["PATH"]
+    )
+
+
+def test_desktop_dir_resolves_a_localized_desktop(tmp_path, monkeypatch):
+    """R119: desktop_dir follows xdg-user-dir — a localized
+    desktop (Bureau) is found, not ~/Desktop."""
+    from stella import install as install_mod
+
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "Bureau").mkdir()
+    _localized_desktop(monkeypatch, tmp_path, home)
+    assert install_mod.desktop_dir(home) == home / "Bureau"
+
+
+def test_desktop_dir_falls_back_without_the_tool(tmp_path, monkeypatch):
+    """R119: with no xdg-user-dir on the system, desktop_dir
+    falls back to ~/Desktop silently."""
+    import shutil
+
+    from stella import install as install_mod
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    assert install_mod.desktop_dir(home) == home / "Desktop"
+
+
+def test_doctor_refreshes_the_desktop_copy_on_a_localized_desktop(
+    tmp_path, monkeypatch
+):
+    """R119: the doctor refreshes the desktop copy where the
+    desktop really is — a stale Bureau copy is re-pointed at
+    this folder after a move, not left pointing at the old one
+    while the doctor looks only at ~/Desktop."""
+    from stella import install as install_mod
+    from stella.doctor import FIXED, run_checks
+
+    tree = _fake_tree(tmp_path, venv=True)
+    home = tmp_path / "home"
+    home.mkdir()
+    bureau = home / "Bureau"
+    bureau.mkdir()
+    _localized_desktop(monkeypatch, tmp_path, home)
+    stale = bureau / "Stella.desktop"
+    stale.write_text(
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        "Name=Stella\n"
+        'Exec="/old/folder/run.sh"\n'
+        "Icon=stella\n"
+        "Terminal=false\n"
+    )
+    checks = run_checks(tree, home, fix=True)
+    assert _check_by_name(checks, "launcher").status == FIXED
+    assert str(tree / "run.sh") in stale.read_text()
+    assert "/old/folder/run.sh" not in stale.read_text()

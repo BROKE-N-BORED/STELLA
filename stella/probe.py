@@ -42,6 +42,7 @@ breaking the model silent), nothing more.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -50,9 +51,12 @@ from .model import CANONICAL_ROLES, GOVERNING_SEATS, StellaError, Store
 
 # Version of the prompt set, recorded in probe_results.json (T92):
 # v1 was the original 12 trivial prompts; v2 adds the hard-benign
-# prompts (T93). Bump this whenever the set changes, so two result
-# files can say whether they were probed with the same prompts.
-PROMPTS_VERSION = 2
+# prompts (T93); v3 (R122) is the per-role battery (T174): 24
+# prompts for governing seats vs 18 default, so two result files
+# at v2 could share a version with different prompt sets. Bump
+# this whenever the set changes, so two result files can say
+# whether they were probed with the same prompts.
+PROMPTS_VERSION = 3
 
 # Plainly benign prompts a governing-seat model must NOT refuse.
 REFUSAL_PROMPTS = [
@@ -155,27 +159,41 @@ def load_probe_set(role) -> tuple[str, list[str], str | None]:
 # are Forge seats.py BASE_ROSTER, exactly three pinned abliterated
 # tags: Driver, Reviewer, and Fast/tester (roster audit 2026-11-12).
 # The role is free text on the profile until T116 lands canonical
-# roles, so the match is forgiving: the seat name anywhere in the
-# role string ("Fast tool/test", "Fast / tester", "Understudy /
-# reviewer"). A trial understudy for a seat gates too: a gate that
-# runs when it needn't is an annoyance, a gate that doesn't run when
-# it should breaks the seat. The tuple lives in model.py now (T116)
-# — one list, shared with the governing-seat marker.
+# roles, so the match is forgiving: a seat name as a WHOLE WORD
+# anywhere in the role string ("Fast tool/test", "Fast / tester",
+# "Understudy / reviewer"). A trial understudy for a seat gates
+# too: a gate that runs when it needn't is an annoyance, a gate
+# that doesn't run when it should breaks the seat. The match used
+# to be a substring (R125): "breakfast" gated on "fast" and
+# "screwdriver" on "driver", so ordinary words tripped the gate.
+# The tuple lives in model.py now (T116) — one list, shared with
+# the governing-seat marker.
 GOVERNING_ROLES = GOVERNING_SEATS
+
+# R125: whole-word match over the lowercased role — word
+# boundaries, so "reviewer with veto" gates but "breakfast" and
+# "screwdriver" do not. Built from GOVERNING_ROLES so the list
+# stays in one place (model.py, T116).
+_GOVERNING_ROLE_RE = re.compile(
+    r"\b(" + "|".join(re.escape(name) for name in GOVERNING_ROLES) + r")\b"
+)
 
 
 def is_governing_profile(profile: dict) -> bool:
     """True when a profile is bound for a governing seat (T90,
     extended by T116).
 
-    Either the role names a governing seat ("driver", "reviewer",
-    "tester", "fast" — "Fast tool/test" and "Fast / tester" both
-    gate), or the profile carries an explicit governing-seat
-    marker (T116's `governing_seat` field): a marked seat gates
-    the probe the same way a governing role does, even when the
-    role itself is not governing. Anything else — "vision",
-    "utility", "all-rounder", a blank role, no marker — is not
-    governing, and its probe is informational.
+    Either the role names a governing seat as a whole word
+    ("driver", "reviewer", "tester", "fast" — "Fast tool/test"
+    and "Fast / tester" both gate), or the profile carries an
+    explicit governing-seat marker (T116's `governing_seat`
+    field): a marked seat gates the probe the same way a
+    governing role does, even when the role itself is not
+    governing. Anything else — "vision", "utility",
+    "all-rounder", a blank role, no marker — is not governing,
+    and its probe is informational. Whole words only (R125): a
+    seat name inside another word ("breakfast", "screwdriver")
+    does not gate.
     """
     profile = profile or {}
     seat = str(profile.get("governing_seat") or "").strip().lower()
@@ -184,7 +202,7 @@ def is_governing_profile(profile: dict) -> bool:
     role = str(profile.get("role") or "").strip().lower()
     if not role:
         return False
-    return any(seat_name in role for seat_name in GOVERNING_ROLES)
+    return _GOVERNING_ROLE_RE.search(role) is not None
 
 # Phrases that open a refusal. Matched against the reply's FIRST
 # TWO sentences (R64), lowercased — a refusal announces itself up

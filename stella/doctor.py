@@ -219,7 +219,7 @@ def _fix_launcher(tree: Path, home: Path) -> Check:
               str(install_mod.launcher_path(home).parent)])
     # The desktop copy is a copy of the launcher: refresh it too
     # when one exists, so it stops pointing at the old folder.
-    desktop_copy = home / "Desktop" / "Stella.desktop"
+    desktop_copy = install_mod.desktop_dir(home) / "Stella.desktop"
     if desktop_copy.is_file():
         try:
             shutil.copyfile(install_mod.launcher_path(home), desktop_copy)

@@ -2,7 +2,7 @@
 
 **From:** the full-product review of STELLA v0.24.0, 2026-11-15
 (see `docs/review-2026-11-15.md` for the report).
-**Status:** 129 tasks: 97 done, 27 to do, 5 hard-gated. 0 P0. 23 P1, 52 P2, 54 P3.
+**Status:** 129 tasks: 124 done, 0 to do, 5 hard-gated. 0 P0. 23 P1, 52 P2, 54 P3.
 **How to read it:** each task has an ID (R1–R129), a priority, the area,
 the source finding(s) from the nine audits, the evidence (file:line or
 a measured probe), a one-line plain-words description, and what "done"
@@ -1290,7 +1290,7 @@ only proof of a claim the product already makes.
 - **Done when:** the chat window's buttons include the cloud models.
 
 ### R103 — The `resume` / `dest` tool arguments are accepted but undocumented
-- **Priority:** P3 · **Area:** Chat · **Sources:** A5-F14 · **Status:** not started
+- **Priority:** P3 · **Area:** Chat · **Sources:** A5-F14 · **Status:** DONE in 0.29.0
 - **Evidence:** `resume` / `dest` tool args are accepted but
   undocumented.
 - **Problem:** the agent can be given arguments nobody can learn about.
@@ -1299,7 +1299,7 @@ only proof of a claim the product already makes.
   are.
 
 ### R104 — Cloud providers never stream
-- **Priority:** P3 · **Area:** Chat · **Sources:** A5-F15 · **Status:** not started
+- **Priority:** P3 · **Area:** Chat · **Sources:** A5-F15 · **Status:** DONE in 0.29.0
 - **Evidence:** cloud providers never stream.
 - **Problem:** cloud chat answers arrive all at once after a long
   silence, instead of appearing as they come.
@@ -1307,7 +1307,7 @@ only proof of a claim the product already makes.
 - **Done when:** cloud chat replies stream.
 
 ### R105 — A corrupt `providers.json` silently reads as "no keys"
-- **Priority:** P3 · **Area:** Providers · **Sources:** A5-F16 · **Status:** not started
+- **Priority:** P3 · **Area:** Providers · **Sources:** A5-F16 · **Status:** DONE in 0.29.0
 - **Evidence:** a corrupt `providers.json` silently reads as "no
   keys".
 - **Problem:** a user with saved keys is told they have none, with no
@@ -1318,7 +1318,7 @@ only proof of a claim the product already makes.
   message.
 
 ### R106 — No cloud cost or usage visibility for cloud chat
-- **Priority:** P3 · **Area:** Providers · **Sources:** M8-COST · **Status:** not started
+- **Priority:** P3 · **Area:** Providers · **Sources:** M8-COST · **Status:** DONE in 0.29.0
 - **Evidence:** there is no cost/usage visibility for cloud chat
   anywhere. Note: the free tier still exists on the remaining
   self-serve Groq models (rate-capped); the gap is that the user
@@ -1330,14 +1330,14 @@ only proof of a claim the product already makes.
 - **Done when:** a cloud chat shows what it used.
 
 ### R107 — The setting-flag help says nothing useful
-- **Priority:** P3 · **Area:** CLI · **Sources:** A6-W8 · **Status:** not started
+- **Priority:** P3 · **Area:** CLI · **Sources:** A6-W8 · **Status:** DONE in 0.29.0
 - **Evidence:** content-free setting-flag help.
 - **Problem:** the help for a flag does not say what the flag does.
 - **Fix:** write real help text for the setting flags.
 - **Done when:** every setting flag's help says what it does.
 
 ### R108 — `probe --json` prints no JSON on failure
-- **Priority:** P3 · **Area:** CLI · **Sources:** A6-W9 · **Status:** not started
+- **Priority:** P3 · **Area:** CLI · **Sources:** A6-W9 · **Status:** DONE in 0.29.0
 - **Evidence:** `probe --json` prints no JSON on failure (unlike
   `verify`).
 - **Problem:** a script asking for JSON gets nothing on the failure
@@ -1346,7 +1346,7 @@ only proof of a claim the product already makes.
 - **Done when:** `probe --json` prints JSON on failure too.
 
 ### R109 — The `stella-cli` comment lists 9 of 31 commands
-- **Priority:** P3 · **Area:** CLI · **Sources:** A6-W10 · **Status:** not started
+- **Priority:** P3 · **Area:** CLI · **Sources:** A6-W10 · **Status:** DONE in 0.29.0
 - **Evidence:** the `stella-cli` comment lists 9 of 31 commands.
 - **Problem:** a stale comment misleads anyone reading the code.
 - **Fix:** update the comment to list all 31 commands (or drop the
@@ -1354,7 +1354,7 @@ only proof of a claim the product already makes.
 - **Done when:** the comment matches the command list.
 
 ### R110 — CLI help says "MetaMorphAi mode" while the GUI follows the no-metamorph-words rule
-- **Priority:** P3 · **Area:** CLI · **Sources:** A6-W11 · **Status:** not started
+- **Priority:** P3 · **Area:** CLI · **Sources:** A6-W11 · **Status:** DONE in 0.29.0
 - **Evidence:** CLI help says "MetaMorphAi mode" vs the GUI's T71
   no-metamorph-words rule.
 - **Problem:** the two surfaces use different words for the same thing.
@@ -1363,7 +1363,7 @@ only proof of a claim the product already makes.
 - **Done when:** CLI help and the GUI use the same words.
 
 ### R111 — Small CLI inconsistencies: delete errors, a stray advisory, doubled "rough", a progress line before its failure
-- **Priority:** P3 · **Area:** CLI · **Sources:** A6-W12 · **Status:** not started
+- **Priority:** P3 · **Area:** CLI · **Sources:** A6-W12 · **Status:** DONE in 0.29.0
 - **Evidence:** delete errors omit the profile; a HF Hub advisory
   appears on dry-run stderr; "roughly minutes … (rough)"; a
   `pull-weights` progress line prints before its failure.
@@ -1374,7 +1374,7 @@ only proof of a claim the product already makes.
 - **Done when:** all four are fixed.
 
 ### R112 — No CLI for mark-ready/status, notes, viewing probe results, How to Use, or a debug report
-- **Priority:** P3 · **Area:** CLI · **Sources:** A6-PARITY · **Status:** not started
+- **Priority:** P3 · **Area:** CLI · **Sources:** A6-PARITY · **Status:** DONE in 0.29.0
 - **Evidence:** no CLI for mark-ready/status, notes, view probe
   results, howto, or debug report. Prune is deliberately excluded
   from this bundle — it is covered by R77.
@@ -1384,7 +1384,7 @@ only proof of a claim the product already makes.
 - **Done when:** all five work from the CLI. (Prune: see R77.)
 
 ### R113 — Training settings are CLI-only since the GUI form was deleted, and the window never says so
-- **Priority:** P3 · **Area:** CLI / GUI · **Sources:** A6-DISCLOSURE · **Status:** not started
+- **Priority:** P3 · **Area:** CLI / GUI · **Sources:** A6-DISCLOSURE · **Status:** DONE in 0.29.0
 - **Evidence:** training settings are CLI-only since T16 deleted the
   GUI form, and the window never says so.
 - **Problem:** a user who wants to change a training setting cannot
@@ -1395,7 +1395,7 @@ only proof of a claim the product already makes.
   live.
 
 ### R114 — The installer file itself shows a generic icon before install
-- **Priority:** P3 · **Area:** Installer · **Sources:** A7-F11 · **Status:** not started
+- **Priority:** P3 · **Area:** Installer · **Sources:** A7-F11 · **Status:** DONE in 0.29.0
 - **Evidence:** the installer file itself shows a generic icon
   pre-install (`Icon=stella` is unresolvable before install). No clean
   spec-compliant fix is known — this may be accept-and-document.
@@ -1406,7 +1406,7 @@ only proof of a claim the product already makes.
   documented.
 
 ### R115 — The uninstall icon-removal fallback never runs on a venv-branch failure
-- **Priority:** P3 · **Area:** Uninstaller · **Sources:** A7-F12 · **Status:** not started
+- **Priority:** P3 · **Area:** Uninstaller · **Sources:** A7-F12 · **Status:** DONE in 0.29.0
 - **Evidence:** the uninstall icon-removal fallback never runs on a
   venv-branch failure.
 - **Problem:** a failed uninstall branch leaves the icon behind with
@@ -1415,7 +1415,7 @@ only proof of a claim the product already makes.
 - **Done when:** the icon is removed even when the venv branch fails.
 
 ### R116 — Uninstall leaves about 2 GB of pip cache behind
-- **Priority:** P3 · **Area:** Uninstaller · **Sources:** A7-F13 · **Status:** not started
+- **Priority:** P3 · **Area:** Uninstaller · **Sources:** A7-F13 · **Status:** DONE in 0.29.0
 - **Evidence:** uninstall leaves ~2 GB of pip cache.
 - **Problem:** removing Stella leaves 2 GB of cache the user never
   asked to keep.
@@ -1423,7 +1423,7 @@ only proof of a claim the product already makes.
 - **Done when:** uninstall offers to clear the pip cache.
 
 ### R117 — An early-failing re-install deletes the previous good receipt
-- **Priority:** P3 · **Area:** Installer · **Sources:** A7-F14 · **Status:** not started
+- **Priority:** P3 · **Area:** Installer · **Sources:** A7-F14 · **Status:** DONE in 0.29.0
 - **Evidence:** an early-failing re-install deletes the previous good
   receipt.
 - **Problem:** a failed re-install destroys the record of the good
@@ -1432,14 +1432,14 @@ only proof of a claim the product already makes.
 - **Done when:** a failed re-install leaves the old receipt alone.
 
 ### R118 — The icon render lacks `QT_QPA_PLATFORM=offscreen`
-- **Priority:** P3 · **Area:** Installer · **Sources:** A7-F15 · **Status:** not started
+- **Priority:** P3 · **Area:** Installer · **Sources:** A7-F15 · **Status:** DONE in 0.29.0
 - **Evidence:** the icon render lacks `QT_QPA_PLATFORM=offscreen`.
 - **Problem:** the icon render can fail where there is no display.
 - **Fix:** set `QT_QPA_PLATFORM=offscreen` for the icon render.
 - **Done when:** the icon renders without a display.
 
 ### R119 — The desktop copy only tries `~/Desktop`
-- **Priority:** P3 · **Area:** Installer · **Sources:** A7-F16 · **Status:** not started
+- **Priority:** P3 · **Area:** Installer · **Sources:** A7-F16 · **Status:** DONE in 0.29.0
 - **Evidence:** the desktop copy only tries `~/Desktop`.
 - **Problem:** on a system whose desktop folder is elsewhere, the icon
   lands in the wrong place or not at all.
@@ -1448,7 +1448,7 @@ only proof of a claim the product already makes.
 - **Done when:** the desktop icon lands on the real desktop folder.
 
 ### R120 — CI never runs desktop-file-validate or shellcheck, and has no scheduled runs
-- **Priority:** P3 · **Area:** CI · **Sources:** A7-F17, A9-CI · **Status:** not started
+- **Priority:** P3 · **Area:** CI · **Sources:** A7-F17, A9-CI · **Status:** DONE in 0.29.0
 - **Evidence:** CI never runs desktop-file-validate or shellcheck
   (T64's "validates clean" is unverified anywhere); CI only fires on
   push/PR — there are no scheduled runs.
@@ -1459,7 +1459,7 @@ only proof of a claim the product already makes.
 - **Done when:** CI runs both checks and runs on a schedule.
 
 ### R121 — No click-only doctor
-- **Priority:** P3 · **Area:** Doctor · **Sources:** A7-F18 · **Status:** not started
+- **Priority:** P3 · **Area:** Doctor · **Sources:** A7-F18 · **Status:** DONE in 0.29.0
 - **Evidence:** no click-only doctor exists (mitigated: re-running the
   installer.desktop in the moved folder does repair).
 - **Problem:** the repair tool needs the terminal, like the training
@@ -1469,7 +1469,7 @@ only proof of a claim the product already makes.
 - **Done when:** the doctor can be run by clicking.
 
 ### R122 — `PROMPTS_VERSION` is still 2 after the v0.22 battery change
-- **Priority:** P3 · **Area:** Probe · **Sources:** A8-12 · **Status:** not started
+- **Priority:** P3 · **Area:** Probe · **Sources:** A8-12 · **Status:** DONE in 0.29.0
 - **Evidence:** `PROMPTS_VERSION` is still 2 after the v0.22 battery
   change.
 - **Problem:** the version number does not match the battery it
@@ -1478,7 +1478,7 @@ only proof of a claim the product already makes.
 - **Done when:** the version matches the battery.
 
 ### R123 — A typo in the dream-skip string
-- **Priority:** P3 · **Area:** Sleep · **Sources:** A8-13 · **Status:** not started
+- **Priority:** P3 · **Area:** Sleep · **Sources:** A8-13 · **Status:** DONE in 0.29.0
 - **Evidence:** a dream-skip string typo (`" (...). Dreaming
   skipped"`).
 - **Problem:** a typo in a user-facing string.
@@ -1486,14 +1486,14 @@ only proof of a claim the product already makes.
 - **Done when:** the string reads correctly.
 
 ### R124 — The sleep manifest's `stella_version` is "0.3"
-- **Priority:** P3 · **Area:** Sleep · **Sources:** A8-14 · **Status:** not started
+- **Priority:** P3 · **Area:** Sleep · **Sources:** A8-14 · **Status:** DONE in 0.29.0
 - **Evidence:** the sleep manifest `stella_version` is `"0.3"`.
 - **Problem:** the manifest claims a version from long ago.
 - **Fix:** write the real version into the sleep manifest.
 - **Done when:** a new sleep manifest carries the real version.
 
 ### R125 — Substring over-gating: "breakfast" and "screwdriver" gate the probe
-- **Priority:** P3 · **Area:** Probe · **Sources:** A8-16 · **Status:** not started
+- **Priority:** P3 · **Area:** Probe · **Sources:** A8-16 · **Status:** DONE in 0.29.0
 - **Evidence:** substring over-gating (`breakfast` / `screwdriver`
   gate).
 - **Problem:** ordinary words trip the gate because they contain a
@@ -1503,7 +1503,7 @@ only proof of a claim the product already makes.
 - **Done when:** "breakfast" and "screwdriver" no longer gate.
 
 ### R126 — Dreaming can stall the full 120 s on a hung Ollama
-- **Priority:** P3 · **Area:** Sleep · **Sources:** A8-20 · **Status:** not started
+- **Priority:** P3 · **Area:** Sleep · **Sources:** A8-20 · **Status:** DONE in 0.29.0
 - **Evidence:** dreaming can stall the full 120 s on a hung Ollama.
 - **Problem:** a hung Ollama stalls a sleep cycle for two full minutes
   with nothing to show for it.
@@ -1512,7 +1512,7 @@ only proof of a claim the product already makes.
   120 s.
 
 ### R127 — TEST-REPORT.md is stale and the `__init__.py` docstring still says v0.8.0
-- **Priority:** P3 · **Area:** Tests / docs · **Sources:** A9-9 · **Status:** not started
+- **Priority:** P3 · **Area:** Tests / docs · **Sources:** A9-9 · **Status:** DONE in 0.29.0
 - **Evidence:** TEST-REPORT.md is stale (120 passed / 22 skipped vs
   the real 1462 items); `__init__.py`'s docstring still says v0.8.0.
 - **Problem:** the test report and the package docstring describe an
@@ -1522,7 +1522,7 @@ only proof of a claim the product already makes.
 - **Done when:** both match the current suite and version.
 
 ### R128 — No pytest config file: no timeouts, no markers
-- **Priority:** P3 · **Area:** Tests · **Sources:** A9-10 · **Status:** not started
+- **Priority:** P3 · **Area:** Tests · **Sources:** A9-10 · **Status:** DONE in 0.29.0
 - **Evidence:** no pytest config file (no timeouts/markers); a hung
   test could hang CI to its 6 h default.
 - **Problem:** one hung test can hold CI for six hours.
@@ -1531,7 +1531,7 @@ only proof of a claim the product already makes.
 - **Done when:** a hung test times out instead of holding CI.
 
 ### R129 — FORMAT.md refresh: the example shows 0.18.0 and omits `governing_seat` and `dataset/`
-- **Priority:** P3 · **Area:** Docs · **Sources:** A8-15, A3-F12 · **Status:** not started
+- **Priority:** P3 · **Area:** Docs · **Sources:** A8-15, A3-F12 · **Status:** DONE in 0.29.0
 - **Evidence:** FORMAT.md's example shows 0.18.0 and omits
   `governing_seat`; the layout omits `dataset/`.
 - **Problem:** the format doc describes an old layout.

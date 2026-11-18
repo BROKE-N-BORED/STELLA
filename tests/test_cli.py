@@ -35,6 +35,7 @@ ALL_COMMANDS = [
     "pull-weights", "bridge",
     "clone-profile", "clone-project",
     "save-key", "list-keys", "remove-key",
+    "mark-ready", "notes", "probe-results", "howto", "debug-report",
 ]
 
 
@@ -2566,6 +2567,11 @@ def _json_sweep_args(command, tmp_path):
         "prune-checkpoints": ["p1", "proj"],
         "list-keys": [],
         "remove-key": ["groq"],
+        "mark-ready": ["p1", "proj"],
+        "notes": ["p1", "proj"],
+        "probe-results": ["p1", "proj"],
+        "howto": [],
+        "debug-report": [],
     }[command]
 
 

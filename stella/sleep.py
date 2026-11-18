@@ -57,6 +57,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -87,9 +88,21 @@ MAX_DREAMED_PER_CALL = 10
 DEFAULT_THRESHOLD = 0.10
 
 # Ollama generation budget for one dream call. A local CPU model is
-# slow; 120s lets a small model finish, and a timeout still fails
-# fast into "dreaming skipped" instead of hanging the cycle.
+# slow; 120s is the TOTAL budget for one call, not a fast fail —
+# a slow-but-answering model may use all of it. What fails fast
+# (R126) is a DEAD peer: the call streams, and if no chunk arrives
+# within DREAM_SILENCE_SECONDS the dream is abandoned as skipped
+# instead of waiting out the whole budget. Do not cut the 120s
+# number to "fix" a stall: that budget is what lets a small CPU
+# model finish dreaming at all.
 DREAM_TIMEOUT_SECONDS = 120.0
+
+# Silence budget inside one dream call (R126): give up when the
+# peer sends nothing for this long. A generating model streams
+# tokens continuously, so 30s of silence means the peer is hung,
+# not slow — while the first token of a cold model load can take
+# several seconds, well inside this.
+DREAM_SILENCE_SECONDS = 30.0
 
 SLEEP_VERSION = "0.3"
 
@@ -109,7 +122,11 @@ def _atomic_write_json(path: Path, data: dict) -> None:
 
 def _empty_manifest() -> dict:
     return {
-        "stella_version": SLEEP_VERSION,
+        # R124: stella_version is the Stella that wrote this
+        # manifest (it used to carry SLEEP_VERSION, "0.3" — the
+        # manifest-format version, which now has its own key).
+        "stella_version": STELLA_VERSION,
+        "sleep_version": SLEEP_VERSION,
         "slept_hashes": [],
         "dreamed_hashes": [],
         "old_val_rows": [],
@@ -423,10 +440,26 @@ def _dream_prompt(seeds: list[dict], count: int) -> str:
 
 
 def _ollama_generate(
-    model_tag: str, prompt: str, url: str | None, timeout: float
+    model_tag: str,
+    prompt: str,
+    url: str | None,
+    timeout: float,
+    silence_timeout: float = DREAM_SILENCE_SECONDS,
 ) -> str:
-    """One /api/generate call, no streaming. Raises on any failure —
-    the caller turns every failure into 'dreaming skipped'."""
+    """One streaming /api/generate call (R126). Raises on any
+    failure — the caller turns every failure into 'dreaming
+    skipped'.
+
+    Two budgets: `timeout` is the total generation budget (a slow
+    CPU model may use all of it), and `silence_timeout` is the
+    give-up on a dead peer — the socket timeout applies per read,
+    so a peer that sends nothing for that long raises while a
+    streaming model keeps going. The wall-clock deadline is
+    checked after every chunk, so a peer dribbling one chunk per
+    silence window still cannot outlive the total budget. A
+    single non-streaming JSON object parses as one chunk, so a
+    server that answers all at once still works.
+    """
     from .ollama import ollama_url
 
     base = (url or ollama_url()).rstrip("/")
@@ -434,7 +467,7 @@ def _ollama_generate(
         {
             "model": model_tag,
             "prompt": prompt,
-            "stream": False,
+            "stream": True,
             "options": {"temperature": 0.8, "num_predict": 2048},
         }
     ).encode("utf-8")
@@ -444,10 +477,34 @@ def _ollama_generate(
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        body = json.loads(resp.read().decode("utf-8"))
-    text = body.get("response") if isinstance(body, dict) else None
-    if not isinstance(text, str):
+    deadline = time.monotonic() + timeout
+    parts: list[str] = []
+    with urllib.request.urlopen(req, timeout=silence_timeout) as resp:
+        while True:
+            if time.monotonic() > deadline:
+                raise TimeoutError(
+                    "dreaming took longer than the "
+                    f"{timeout:g}s generation budget"
+                )
+            line = resp.readline()
+            if not line:
+                break
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                chunk = json.loads(line.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                continue
+            if not isinstance(chunk, dict):
+                continue
+            piece = chunk.get("response")
+            if isinstance(piece, str):
+                parts.append(piece)
+            if chunk.get("done"):
+                break
+    text = "".join(parts)
+    if not text:
         raise ValueError("Ollama returned no text")
     return text
 
@@ -460,6 +517,7 @@ def dream_rows(
     exclude_hashes: set[str] | frozenset = frozenset(),
     ollama_url: str | None = None,
     timeout: float = DREAM_TIMEOUT_SECONDS,
+    silence_timeout: float = DREAM_SILENCE_SECONDS,
 ) -> tuple[list[dict], str | None]:
     """Ask the local Ollama model for synthetic practice examples.
 
@@ -483,10 +541,11 @@ def dream_rows(
         return [], "no seed examples to dream from"
     try:
         raw = _ollama_generate(
-            model_tag, _dream_prompt(seeds[:3], count), ollama_url, timeout
+            model_tag, _dream_prompt(seeds[:3], count), ollama_url,
+            timeout, silence_timeout=silence_timeout,
         )
     except (urllib.error.URLError, OSError, TimeoutError, ValueError) as exc:
-        return [], f"Ollama unreachable ({exc}) . Dreaming skipped"
+        return [], f"Ollama unreachable ({exc}). Dreaming skipped"
     kept: list[dict] = []
     seen = set(exclude_hashes)
     for line_no, line in enumerate(raw.splitlines(), 1):

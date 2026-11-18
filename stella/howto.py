@@ -188,7 +188,12 @@ not fit in 8 GB, rather than freezing your PC.
 When training finishes, the adapter is saved in the project
 folder. It is small (tens of megabytes). The base model is
 untouched. To use the tuned model in Ollama, export it as GGUF
-(see GGUF export to Ollama).""",
+(see GGUF export to Ollama).
+
+Training settings are changed from the terminal: stella
+update-project <profile> <project> --seed 7. The window never
+shows the settings themselves: the backend picks them for this
+PC, and the terminal is the only way to change them.""",
     ),
     (
         "Checkpoints",

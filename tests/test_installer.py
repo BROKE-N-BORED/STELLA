@@ -136,7 +136,14 @@ def run_script(
     # it at a dead local address.
     env.setdefault("STELLA_INSTALL_SKIP_NET_CHECK", "1")
     if env_extra:
-        env.update(env_extra)
+        # R118: a None value REMOVES the variable (a test that
+        # must run display-less strips QT_QPA_PLATFORM/DISPLAY
+        # rather than inheriting the pytest process's values).
+        for key, value in env_extra.items():
+            if value is None:
+                env.pop(key, None)
+            else:
+                env[key] = value
     return subprocess.run(
         ["bash", script, *args],
         cwd=tree, env=env, capture_output=True, text=True,
@@ -149,13 +156,14 @@ def run_install(tree: Path, home: Path, **kw) -> subprocess.CompletedProcess:
 
 
 def installed(
-    tree: Path, home: Path, **venv_kw
+    tree: Path, home: Path, env_extra: dict[str, str] | None = None,
+    **venv_kw
 ) -> subprocess.CompletedProcess:
     """A tree + HOME with a completed base install (or a failed
     assertion with the install output attached). Extra keywords go
-    to make_wrapper_venv."""
+    to make_wrapper_venv; env_extra goes to the install run."""
     make_wrapper_venv(tree, **venv_kw)
-    res = run_install(tree, home)
+    res = run_install(tree, home, env_extra=env_extra)
     assert res.returncode == 0, (
         f"install failed:\nstdout:\n{res.stdout}\nstderr:\n{res.stderr}"
     )
@@ -227,6 +235,54 @@ def make_train_stubs(tmp_path: Path) -> Path:
             f"Version: {version}\n"
         )
     return stubs
+
+
+def make_xdg_user_dir_stub(tmp_path: Path) -> Path:
+    """A fake `xdg-user-dir` on a fresh bin dir (the real tool is
+    not installed in the sandbox): it reads
+    $XDG_CONFIG_HOME/user-dirs.dirs and prints XDG_DESKTOP_DIR
+    with $HOME expanded, falling back to $HOME/Desktop — the
+    real tool's contract, which is all the code under test
+    relies on. Returns the bin dir; prepend it to PATH."""
+    bindir = tmp_path / "xdg-bin"
+    bindir.mkdir(exist_ok=True)
+    stub = bindir / "xdg-user-dir"
+    stub.write_text(
+        "#!/bin/sh\n"
+        "# Fake xdg-user-dir for installer tests (see test_installer.py).\n"
+        "config=\"${XDG_CONFIG_HOME:-$HOME/.config}/user-dirs.dirs\"\n"
+        "dir=\"\"\n"
+        "if [ -f \"$config\" ]; then\n"
+        "  dir=$(grep '^XDG_DESKTOP_DIR=' \"$config\" "
+        "| cut -d= -f2- | tr -d '\"')\n"
+        "  case \"$dir\" in\n"
+        "    '$HOME/'*) dir=\"$HOME/${dir#\\$HOME/}\" ;;\n"
+        "    '$HOME') dir=\"$HOME\" ;;\n"
+        "  esac\n"
+        "fi\n"
+        "if [ -n \"$dir\" ]; then printf '%s\\n' \"$dir\"; "
+        "else printf '%s\\n' \"$HOME/Desktop\"; fi\n"
+    )
+    stub.chmod(0o755)
+    return bindir
+
+
+def make_localized_desktop_env(tmp_path: Path, home: Path) -> dict[str, str]:
+    """Env for a localized desktop (R119): XDG_CONFIG_HOME points
+    at a fixture whose user-dirs.dirs names $HOME/Bureau as the
+    desktop, and the fake xdg-user-dir is first on PATH. The
+    caller creates the Bureau dir itself (a resolved dir that
+    does not exist gets no copy, as before)."""
+    config_home = tmp_path / "xdg-config"
+    config_home.mkdir(exist_ok=True)
+    (config_home / "user-dirs.dirs").write_text(
+        'XDG_DESKTOP_DIR="$HOME/Bureau"\n'
+    )
+    bindir = make_xdg_user_dir_stub(tmp_path)
+    return {
+        "XDG_CONFIG_HOME": str(config_home),
+        "PATH": str(bindir) + os.pathsep + os.environ["PATH"],
+    }
 
 
 # ---------------------------------------------------------------- static
@@ -1372,3 +1428,360 @@ def test_uninstall_desktop_runs_uninstaller(tmp_path):
     assert not (home / ".local" / "bin" / "stella").exists()
     assert not (tree / ".venv").exists()
     assert not (tree / ".stella-install-receipt").exists()
+
+
+# -- v0.29.0 (R114–R121, R128, R120) ---------------------------------
+
+
+def test_readme_documents_pre_install_generic_icon():
+    """R114: the pre-install icon cannot be given within the
+    desktop-entry spec (no relative Icon=, unknown unzip
+    location), so the limitation is documented in the README's
+    install section and the generic icon is accepted."""
+    readme = (ROOT / "README.md").read_text()
+    flat = " ".join(readme.split())
+    assert "shows a plain generic icon until Stella is installed" in flat
+    assert "no spec-compliant way" in flat
+    assert "The generic icon is accepted" in flat
+
+
+def test_failed_reinstall_keeps_the_old_receipt(tmp_path):
+    """R117: a re-install that fails early (here, the disk
+    preflight) keeps the previous good receipt — the old
+    up-front `rm -f` deleted it before the preflight, so the
+    doctor reported "no install receipt" for a complete install.
+    T63 still holds: a failed FRESH install leaves no receipt."""
+    # Fresh half: nothing installed, preflight fails, no receipt.
+    tree = copy_tree(tmp_path)
+    home = make_home(tmp_path)
+    huge = {"STELLA_INSTALL_MIN_FREE_KB": "999999999"}
+    res = run_install(tree, home, env_extra=huge)
+    assert res.returncode == 1
+    assert not (tree / ".stella-install-receipt").exists()
+    # Re-install half: a good install, then a failing re-run.
+    tree2 = copy_tree(tmp_path, "stella2")
+    installed(tree2, home)
+    receipt = tree2 / ".stella-install-receipt"
+    assert receipt.is_file()
+    before = receipt.read_text()
+    res = run_install(tree2, home, env_extra=huge)
+    assert res.returncode == 1
+    assert "not enough free disk space" in res.stderr
+    assert receipt.is_file()
+    assert receipt.read_text() == before
+
+
+def test_clone_without_pngs_renders_icons_display_less(tmp_path):
+    """R118: the icon render runs offscreen, exactly as the
+    QApplication check does — a clone (SVG only, no PNGs) renders
+    its icons with no display and no QT_QPA_PLATFORM inherited
+    from the test process."""
+    tree = copy_tree(tmp_path)
+    home = make_home(tmp_path)
+    for png in (tree / "assets").glob("*.png"):
+        png.unlink()
+    assert (tree / "assets" / "stella.svg").is_file()
+    make_wrapper_venv(tree)
+    res = run_install(
+        tree, home,
+        env_extra={"QT_QPA_PLATFORM": None, "DISPLAY": None},
+    )
+    assert res.returncode == 0, res.stdout + res.stderr
+    for size in ICON_SIZES:
+        assert (tree / "assets" / f"stella-{size}.png").is_file()
+    assert (tree / "assets" / "stella.png").is_file()
+
+
+def test_install_uses_the_localized_desktop_dir(tmp_path):
+    """R119: with XDG_CONFIG_HOME naming a localized desktop
+    ($HOME/Bureau), the install lands both desktop icons there —
+    and the receipt records the Bureau copy, not ~/Desktop."""
+    tree = copy_tree(tmp_path)
+    home = make_home(tmp_path)
+    (home / "Bureau").mkdir()
+    env = make_localized_desktop_env(tmp_path, home)
+    res = installed(tree, home, env_extra=env)
+    assert (home / "Bureau" / "Stella.desktop").is_file()
+    assert (home / "Bureau" / "Install Stella Training.desktop").is_file()
+    assert not (home / "Desktop").exists()
+    assert "double-click Stella on the desktop" in res.stdout
+    receipt = (tree / ".stella-install-receipt").read_text()
+    assert f"desktop_copy: {home / 'Bureau' / 'Stella.desktop'}" in receipt
+
+
+def test_uninstall_removes_the_localized_desktop_icon(tmp_path):
+    """R119: uninstall removes the desktop icons from the resolved
+    dir — and from ~/Desktop too, when they differ, so an icon
+    installed by an older (~/Desktop-only) version is not left
+    behind when the desktop has since been localized."""
+    # Localized install, localized uninstall: Bureau icons go.
+    tree = copy_tree(tmp_path)
+    home = make_home(tmp_path)
+    (home / "Bureau").mkdir()
+    env = make_localized_desktop_env(tmp_path, home)
+    installed(tree, home, env_extra=env)
+    assert (home / "Bureau" / "Stella.desktop").is_file()
+    res = run_script(tree, home, "uninstall.sh", "--yes", env_extra=env)
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert not (home / "Bureau" / "Stella.desktop").exists()
+    assert not (home / "Bureau" / "Install Stella Training.desktop").exists()
+    # Plain install, localized uninstall: the ~/Desktop icons go
+    # too (both dirs are tried).
+    tree2 = copy_tree(tmp_path, "stella2")
+    home2 = make_home(tmp_path, "home2", desktop=True)
+    installed(tree2, home2)
+    assert (home2 / "Desktop" / "Stella.desktop").is_file()
+    env2 = make_localized_desktop_env(tmp_path, home2)
+    res = run_script(tree2, home2, "uninstall.sh", "--yes", env_extra=env2)
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert not (home2 / "Desktop" / "Stella.desktop").exists()
+    assert not (home2 / "Desktop" / "Install Stella Training.desktop").exists()
+
+
+def test_uninstall_falls_back_to_manual_icon_removal(tmp_path):
+    """R115: when the venv python is broken, the python icon
+    remover fails — and the manual rm loop runs as a real
+    fallback, so the hicolor PNGs are still removed. The old
+    `|| true` swallowed the failure and left them behind."""
+    tree = copy_tree(tmp_path)
+    home = make_home(tmp_path)
+    installed(tree, home)
+    hicolor = home / ".local" / "share" / "icons" / "hicolor"
+    for size in ICON_SIZES:
+        assert (hicolor / f"{size}x{size}" / "apps"
+                / "stella.png").is_file()
+    # Break the venv python: every call exits 1, as a damaged
+    # venv's failed stella.install import would.
+    venv_python = tree / ".venv" / "bin" / "python"
+    venv_python.write_text("#!/bin/sh\nexit 1\n")
+    venv_python.chmod(0o755)
+    res = run_script(tree, home, "uninstall.sh", "--yes")
+    assert res.returncode == 0, res.stdout + res.stderr
+    for size in ICON_SIZES:
+        assert not (hicolor / f"{size}x{size}" / "apps"
+                    / "stella.png").exists()
+
+
+def _plant_pip_cache(home: Path) -> Path:
+    """A small fake pip cache (a few KB of wheels)."""
+    cache = home / ".cache" / "pip"
+    cache.mkdir(parents=True)
+    (cache / "wheel.whl").write_bytes(b"x" * 4096)
+    return cache
+
+
+def test_uninstall_offers_to_clear_the_pip_cache(tmp_path):
+    """R116: after the venv is gone, uninstall offers to clear the
+    pip cache, naming the size — answering yes removes it, the
+    default (empty answer) keeps it. The threshold is overridden
+    for the test (a real cache is ~2 GB; the planted one is KB)."""
+    env = {"STELLA_UNINSTALL_PIP_CACHE_MIN_KB": "1"}
+    # Yes: the first line answers the data question (No, keep
+    # the data), the second answers the pip-cache offer.
+    tree = copy_tree(tmp_path)
+    home = make_home(tmp_path)
+    installed(tree, home)
+    cache = _plant_pip_cache(home)
+    res = run_script(
+        tree, home, "uninstall.sh", env_extra=env, input_text="\ny\n",
+    )
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "in the pip cache. Remove it?" in res.stdout
+    assert "Removed the pip cache." in res.stdout
+    assert not cache.exists()
+    # Default No: one empty line answers the data question, and
+    # the pip-cache read hits EOF — the cache stays.
+    tree2 = copy_tree(tmp_path, "stella2")
+    home2 = make_home(tmp_path, "home2")
+    installed(tree2, home2)
+    cache2 = _plant_pip_cache(home2)
+    res = run_script(
+        tree2, home2, "uninstall.sh", env_extra=env, input_text="\n",
+    )
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "in the pip cache. Remove it?" in res.stdout
+    assert cache2.is_dir()
+
+
+def test_uninstall_keeps_pip_cache_when_yes_or_tiny(tmp_path):
+    """R116: --yes asks nothing, so the pip cache is kept without
+    an offer; and a cache below the (default 100 MB) threshold is
+    not worth asking about, so no offer appears either."""
+    # --yes: no offer, cache kept.
+    tree = copy_tree(tmp_path)
+    home = make_home(tmp_path)
+    installed(tree, home)
+    cache = _plant_pip_cache(home)
+    res = run_script(
+        tree, home, "uninstall.sh", "--yes",
+        env_extra={"STELLA_UNINSTALL_PIP_CACHE_MIN_KB": "1"},
+    )
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "pip cache" not in res.stdout
+    assert cache.is_dir()
+    # Tiny cache, default threshold: no offer, cache kept.
+    tree2 = copy_tree(tmp_path, "stella2")
+    home2 = make_home(tmp_path, "home2")
+    installed(tree2, home2)
+    cache2 = _plant_pip_cache(home2)
+    res = run_script(tree2, home2, "uninstall.sh", input_text="\n")
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "pip cache" not in res.stdout
+    assert cache2.is_dir()
+
+
+def test_ci_runs_lint_and_scheduled_runs():
+    """R120: CI validates the desktop files, shellchecks the
+    scripts, and runs on a weekly schedule — not only on push/PR."""
+    ci_text = (
+        ROOT / ".github" / "workflows" / "ci.yml"
+    ).read_text()
+    assert "schedule:" in ci_text
+    assert "cron:" in ci_text
+    assert "desktop-file-validate" in ci_text
+    assert "shellcheck" in ci_text
+    assert "desktop-file-utils" in ci_text
+
+
+def test_desktop_files_validate_and_scripts_shellcheck_clean():
+    """R120: the checks CI runs, when the tools are available in
+    the sandbox — every .desktop file validates, every script
+    shellchecks clean (the lint job runs them for real in CI)."""
+    validator = shutil.which("desktop-file-validate")
+    shellcheck = shutil.which("shellcheck")
+    if validator is None and shellcheck is None:
+        pytest.skip("neither desktop-file-validate nor shellcheck installed")
+    if validator is not None:
+        res = subprocess.run(
+            [validator, *[str(p) for p in ROOT.glob("*.desktop")]],
+            capture_output=True, text=True,
+        )
+        assert res.returncode == 0, res.stdout + res.stderr
+    if shellcheck is not None:
+        scripts = [str(p) for p in ROOT.glob("*.sh")] + [str(ROOT / "stella-cli")]
+        res = subprocess.run(
+            [shellcheck, *scripts], capture_output=True, text=True,
+        )
+        assert res.returncode == 0, res.stdout + res.stderr
+
+
+# -- R121: click-only doctor ----------------------------------------
+
+
+def test_repair_desktop_file_is_executable_in_tree():
+    """R121: the double-click repair entry must be executable or
+    Nemo will not offer to launch it."""
+    path = ROOT / "Repair Stella.desktop"
+    assert path.is_file()
+    assert os.access(path, os.X_OK)
+
+
+def test_repair_desktop_file_validates():
+    """R121: desktop-file-validate is clean, when the tool is
+    available in the sandbox."""
+    validator = shutil.which("desktop-file-validate")
+    if validator is None:
+        pytest.skip("desktop-file-validate not installed")
+    res = subprocess.run(
+        [validator, str(ROOT / "Repair Stella.desktop")],
+        capture_output=True, text=True,
+    )
+    assert res.returncode == 0, res.stdout + res.stderr
+
+
+def _run_desktop_exec(desktop: Path, home: Path, cwd: Path,
+                      input_text: str = "\n") -> subprocess.CompletedProcess:
+    """Run a .desktop file's Exec line the way the desktop
+    environment would: %k expanded to the file, from a different
+    working directory, with a scratch HOME."""
+    exec_line = parse_desktop(desktop).get("Desktop Entry", "Exec")
+    argv = [str(desktop) if a == "%k" else a for a in shlex.split(exec_line)]
+    env = dict(os.environ)
+    env["HOME"] = str(home)
+    env["STELLA_INSTALL_MIN_FREE_KB"] = "1024"
+    return subprocess.run(
+        argv, cwd=cwd, env=env, capture_output=True, text=True,
+        input=input_text, timeout=300, check=False,
+    )
+
+
+def test_repair_desktop_repairs_after_move(tmp_path):
+    """R121: the double-click repair entry resolves its own folder
+    (via %k, not the working directory) and runs the doctor: a
+    moved folder's launcher is re-pointed, and the result stays
+    on screen until Enter. Its Exec line carries no nested
+    escaped quotes (GLib rejects those) and it asks for a
+    terminal so the report is visible."""
+    tree = copy_tree(tmp_path)
+    home = make_home(tmp_path)
+    installed(tree, home)
+    moved = tmp_path / "moved to"
+    shutil.move(str(tree), str(moved))
+    launcher = home / ".local" / "share" / "applications" / "stella.desktop"
+    assert str(tree / "run.sh") in launcher.read_text()
+    desktop = moved / "Repair Stella.desktop"
+    entry = parse_desktop(desktop)
+    assert entry.get("Desktop Entry", "Name") == "Repair Stella"
+    assert entry.get("Desktop Entry", "Terminal") == "true"
+    assert entry.get("Desktop Entry", "Type") == "Application"
+    exec_line = entry.get("Desktop Entry", "Exec")
+    assert "repair_launcher.py" in exec_line
+    assert "%k" in exec_line
+    assert '\\"' not in exec_line  # no nested escaped quotes
+    # The launcher it runs is the file that runs the doctor.
+    launcher_src = (moved / "repair_launcher.py").read_text()
+    assert "stella.doctor" in launcher_src
+    res = _run_desktop_exec(desktop, home, tmp_path)
+    assert res.returncode == 0, res.stdout + res.stderr
+    assert "FIXED" in res.stdout
+    assert "Repair finished." in res.stdout
+    assert str(moved / "run.sh") in launcher.read_text()
+    receipt = (moved / ".stella-install-receipt").read_text()
+    assert f"install_dir: {moved}" in receipt
+
+
+def test_repair_desktop_runs_without_a_venv(tmp_path):
+    """R121: the repair launcher never assumes a working venv — it
+    runs the doctor under the system python3, so with the venv
+    deleted entirely the doctor still runs and names the venv
+    problem instead of dying before it starts."""
+    tree = copy_tree(tmp_path)
+    home = make_home(tmp_path)
+    installed(tree, home)
+    shutil.rmtree(tree / ".venv")
+    desktop = tree / "Repair Stella.desktop"
+    res = _run_desktop_exec(desktop, home, tmp_path)
+    assert res.returncode == 1  # broken checks remain: honest failure
+    assert "Python environment" in res.stdout
+    assert "bash install.sh" in res.stdout
+    assert "The check found problems" in res.stdout
+
+
+# -- R128: pytest config --------------------------------------------
+
+
+def test_pytest_ini_has_timeout_and_gui_marker():
+    """R128: the suite runs under a per-test timeout (a hung test
+    times out instead of holding CI) and the GUI suite is marked
+    as a group, so it can be run or skipped together."""
+    import configparser
+
+    ini = configparser.ConfigParser()
+    ini.read(ROOT / "pytest.ini")
+    assert ini.has_option("pytest", "timeout")
+    assert int(ini.get("pytest", "timeout")) > 0
+    markers = ini.get("pytest", "markers")
+    assert "gui:" in markers
+    gui_src = (ROOT / "tests" / "test_gui.py").read_text()
+    assert "pytestmark = pytest.mark.gui" in gui_src
+
+
+def test_pytest_timeout_is_wired_into_both_install_paths():
+    """R128: pytest-timeout is installed wherever pytest is —
+    run_tests.sh and both CI jobs — or the timeout in pytest.ini
+    would silently do nothing."""
+    assert "pytest-timeout" in (ROOT / "run_tests.sh").read_text()
+    ci_text = (
+        ROOT / ".github" / "workflows" / "ci.yml"
+    ).read_text()
+    assert ci_text.count("pytest-timeout") == 2

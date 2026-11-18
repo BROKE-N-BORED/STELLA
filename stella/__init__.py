@@ -1,4 +1,10 @@
-"""STELLA: fine-tune models on your own PC. v0.8.0: make models smaller (re-quantize an installed Ollama model) and teach small models from big ones (distillation), on the command line and through the Chat. Plus v0.7.0 provider connections (Groq, Gemini, or any OpenAI-compatible service with your own key), v0.6.0 provider chat, the v0.4.0 menu + tree + session window, one-click model downloads, built-in How to Use guide, debug log layer."""
+"""STELLA v0.29.0: fine-tune models on your own PC.
+
+Train a small model on your own data, sleep on it, probe it, and
+export it — through the window or the command line. (R127: the
+versioned feature list that used to live here is gone — it
+drifted with every release and said v0.8.0 while the app was
+v0.28.0. CHANGELOG.md is the version record.)"""
 
 from .model import STELLA_VERSION
 

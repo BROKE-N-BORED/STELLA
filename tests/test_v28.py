@@ -38,12 +38,8 @@ def _run_cli_subprocess(home, *args):
     )
 
 
-def test_version_is_0_28_0(home):
-    """The version is 0.28.0 everywhere the CLI reports it."""
-    assert STELLA_VERSION == "0.28.0"
-    res = _run_cli_subprocess(home, "--version")
-    assert res.returncode == 0
-    assert "0.28.0" in res.stdout
+# NOTE: the version tests moved to test_v29.py (test_version_is_0_29_0,
+# test_window_title_carries_version) — the version is 0.29.0 now.
 
 
 @pytest.fixture()
@@ -68,9 +64,8 @@ def window(qapp, seeded, settings):
     win.close()
 
 
-def test_window_title_carries_version(window):
-    """The window title carries STELLA 0.28.0."""
-    assert "0.28.0" in window.windowTitle()
+# (test_window_title_carries_version moved to test_v29.py with the
+# version tests — see the NOTE above.)
 
 
 # -- R76: out-of-memory gets a plain-words message --------------------

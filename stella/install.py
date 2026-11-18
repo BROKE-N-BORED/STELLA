@@ -47,6 +47,31 @@ def desktop_entry_text(install_dir: Path, icon: str) -> str:
     )
 
 
+def desktop_dir(home_dir: Path) -> Path:
+    """The user's desktop folder (R119): `xdg-user-dir DESKTOP`
+    when the tool exists and answers, else ~/Desktop. A localized
+    Mint desktop (~/Bureau, ~/Schreibtisch) is found this way;
+    the tool may be absent on a minimal system, and the resolved
+    dir may not exist — both fall back silently, and callers
+    still check the dir exists before copying anything into it.
+    A relative or empty answer is ignored, never trusted."""
+    home = Path(home_dir)
+    tool = shutil.which("xdg-user-dir")
+    if tool:
+        try:
+            out = subprocess.run(
+                [tool, "DESKTOP"], capture_output=True, text=True,
+                timeout=10, check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return home / "Desktop"
+        if out.returncode == 0:
+            resolved = out.stdout.strip()
+            if resolved and Path(resolved).is_absolute():
+                return Path(resolved)
+    return home / "Desktop"
+
+
 def launcher_path(home_dir: Path) -> Path:
     return home_dir / ".local" / "share" / "applications" / LAUNCHER_NAME
 
@@ -172,8 +197,11 @@ def write_receipt(
     install time. A base install writes it; a training install
     re-writes it with the torch versions added (installed_at is
     preserved across re-writes). Written only for a complete
-    install: install.sh deletes any stale receipt up front, so a
-    failed install leaves no receipt behind."""
+    install: the receipt is replaced atomically here, at the end
+    of a successful install (R117) — a failed install never
+    touches the old receipt, so a failed re-install keeps the
+    record of the good install it replaced, while a failed fresh
+    install still leaves no receipt behind (T63)."""
     tree = Path(install_dir)
     home = Path(home_dir)
     dest = tree / RECEIPT_NAME
@@ -186,7 +214,7 @@ def write_receipt(
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     if installed_at is None:
         installed_at = now
-    desktop_copy = home / "Desktop" / "Stella.desktop"
+    desktop_copy = desktop_dir(home) / "Stella.desktop"
     lines = [
         "# Stella install receipt. Written by install.sh (and updated by",
         "# install-training.sh). Send this file to Arlo when an install",
