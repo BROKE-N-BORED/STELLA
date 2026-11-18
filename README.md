@@ -328,10 +328,10 @@ nothing trains silently and nothing downloads on its own.
   reference, config, processor/tokenizer, dependencies. The base stays
   clean and untouched — Stella only ever points at it, never modifies
   it. Each profile carries a friendly **role** name (driver, reviewer,
-  vision…) so the roster reads by job, not by cryptic tag — the role
-  field offers one canonical seat list (driver, reviewer, vision,
-  fast, tester, all-rounder, utility), and a role outside it is kept
-  and flagged as custom. A profile can also be **bound for a Forge
+  vision…) so the roster reads by job, not by cryptic tag — Stella
+  works the role out from the model, and the profile window shows
+  what the model is good and not good at in plain words instead of
+  asking you to assign anything. A profile can also be **bound for a Forge
   governing seat** (driver, reviewer, tester, fast): a bound profile
   warns before training unless its base is abliterated, and its
   refusal probe runs as a gate. The Ollama tag stays the identifier

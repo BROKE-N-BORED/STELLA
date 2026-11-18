@@ -440,12 +440,11 @@ def test_geometry_remembered(qapp, seeded, settings):
 def test_profile_window_save_writes_through(window, seeded):
     win = window.open_profile_window("lfm3-tool")
     assert win.display_edit.text() == "LFM3 Tool Seat"
-    assert win.role_combo.currentText() == "fast"
     assert win.tag_combo.currentText() == "lfm3:1.7b"
-    win.role_combo.setCurrentText("reviewer")
+    win.display_edit.setText("LFM3 Renamed")
     win.save()
-    assert seeded.get_profile("lfm3-tool")["role"] == "reviewer"
-    assert "reviewer" in window.tree.topLevelItem(0).text(0)
+    assert seeded.get_profile("lfm3-tool")["display_name"] == "LFM3 Renamed"
+    assert "LFM3 Renamed" in window.tree.topLevelItem(0).text(0)
     win.close()
 
 
@@ -455,7 +454,11 @@ def test_profile_window_has_help_lines_and_no_processor(window):
     assert not hasattr(win, "processor_edit")
     labels = [w.text() for w in win.findChildren(QLabel)]
     assert any("Just a label for the list" in t for t in labels)
-    assert any("Only matters if Code Forge" in t for t in labels)
+    # v0.31.0: the role is derived, not assigned — its help line
+    # says Stella worked it out.
+    assert any(
+        "worked out by Stella" in t for t in labels
+    )
     assert any("The model as Ollama knows it" in t for t in labels)
     assert any("Where training loads the base model" in t for t in labels)
     win.close()
@@ -463,12 +466,15 @@ def test_profile_window_has_help_lines_and_no_processor(window):
 
 def test_profile_window_has_no_download_row(window):
     """T79: one honest download row, in the main window. The
-    Profile window's duplicate is gone; the seeded profile has no
-    base_ref, so the main Download button is disabled and the fix
-    button shows instead."""
+    Profile window has no duplicate row — v0.31.0 gives it one
+    button that calls the main window's download, with no
+    cancel, progress, or status of its own. The seeded profile
+    has no base_ref, so the main Download button is disabled
+    and the fix button shows instead."""
     win = window.open_profile_window("lfm3-tool")
+    assert hasattr(win, "download_btn")
+    assert win.download_btn.text() == "Download the training files"
     for attr in (
-        "download_btn",
         "download_cancel_btn",
         "download_progress",
         "download_status",
@@ -2142,14 +2148,14 @@ def test_profile_window_close_prompts_and_saves(window, seeded, monkeypatch, qap
     prof_win = window.open_profile_window("lfm3-tool")
     qapp.processEvents()
     assert not prof_win.is_modified()
-    prof_win.role_combo.setCurrentText("reviewer")
+    prof_win.display_edit.setText("LFM3 Renamed")
     assert prof_win.is_modified()
     assert prof_win.windowTitle().endswith("*")
     monkeypatch.setattr(
         QMessageBox, "question", lambda *a, **k: QMessageBox.Save
     )
     assert prof_win.close() is True
-    assert seeded.get_profile("lfm3-tool")["role"] == "reviewer"
+    assert seeded.get_profile("lfm3-tool")["display_name"] == "LFM3 Renamed"
 
 
 def test_notes_marker_and_save_notes_only(window, seeded, monkeypatch, qapp):
@@ -7340,33 +7346,14 @@ def test_profile_window_dependencies_editable(window, seeded):
     win.close()
 
 
-def test_profile_window_role_combo_offers_canonical_list(window):
-    """T116/T122 Done: the detail panel's role field is an
-    editable combo offering the canonical list."""
-    from stella.model import CANONICAL_ROLES
-
+def test_profile_window_has_no_role_combo_role_is_read_only(window):
+    """v0.31.0: nobody assigns roles by hand anymore. The window
+    has no role combo; the derived role shows read-only in
+    Details, and the stored role is what the record holds."""
     win = window.open_profile_window("lfm3-tool")
-    items = [
-        win.role_combo.itemText(i) for i in range(win.role_combo.count())
-    ]
-    assert items == list(CANONICAL_ROLES)
-    assert win.role_combo.isEditable()
-    assert win.role_combo.currentText() == "fast"
-    win.close()
-
-
-def test_profile_window_custom_role_flagged(window, qapp):
-    """T116 Done: a role outside the canonical list is kept and
-    visibly marked custom."""
-    win = window.open_profile_window("lfm3-tool")
-    assert not win.custom_role_note.isVisible()
-    win.role_combo.setCurrentText("drvier")
-    qapp.processEvents()
-    assert win.custom_role_note.isVisible()
-    assert "Custom role" in win.custom_role_note.text()
-    win.role_combo.setCurrentText("driver")
-    assert not win.custom_role_note.isVisible()
-    win.role_combo.setCurrentText("fast")
+    assert not hasattr(win, "role_combo")
+    assert not hasattr(win, "custom_role_note")
+    assert win.role_label.text() == "fast"
     win.close()
 
 

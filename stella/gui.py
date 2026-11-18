@@ -119,7 +119,6 @@ from .model import (
     StellaError,
     Store,
     governing_seat_warning,
-    is_custom_role,
     metamorph_mode,
     metamorph_problem,
     slug_from_model,
@@ -129,6 +128,7 @@ from .ollama import MODEL_CACHE, SHOW_CACHE, ollama_url
 from .ollama_bridge import suggest_hf_repos
 from .requant import DEFAULT_QUANT, KNOWN_QUANTS
 from .provision import is_hf_repo_id
+from .strengths import strengths_for_tag
 from .style import (
     DISABLED,
     apply_stella_style,
@@ -332,6 +332,33 @@ def _fmt_bytes(n: int) -> str:
     return f"{n:,} bytes"
 
 
+# What Ollama's capability words mean, in plain words (v0.31.0).
+# A capability with no plain wording is left out of the simple
+# view — it still shows in the technical line in Details.
+_CAPABILITY_WORDS = {
+    "completion": "write and answer",
+    "tools": "use tools",
+    "vision": "see pictures",
+    "insert": "fill in missing text",
+    "embedding": "compare how alike two texts are",
+}
+
+
+def _plain_capabilities(caps) -> str:
+    """One plain sentence for a model's capabilities: "It can
+    write and answer, and use tools." Unknown capabilities are
+    left out; with none known, an honest line instead."""
+    words = [
+        _CAPABILITY_WORDS[c] for c in (caps or [])
+        if c in _CAPABILITY_WORDS
+    ]
+    if not words:
+        return "Stella does not know what this model can do yet."
+    if len(words) == 1:
+        return f"It can {words[0]}."
+    return f"It can {', '.join(words[:-1])}, and {words[-1]}."
+
+
 def _fmt_date(timestamp: float) -> str:
     """A Unix timestamp as a plain date (T150): 2026-11-14."""
     try:
@@ -408,7 +435,8 @@ class NewProfileDialog(QDialog):
 
     And it used to demand a role, a display name, and a base ref up
     front. It doesn't anymore: the profile's name comes from the model,
-    and role/display/base can be changed later in the profile window.
+    Stella works out the role from the model, and the display name and
+    base can be changed later in the profile window.
     One pick, one button.
 
     The pick itself (T18): a list of the models installed on this PC,
@@ -1557,12 +1585,20 @@ class CollapsibleSection(QWidget):
 
 
 class ProfileWindow(QDialog):
-    """One profile's settings, in its own window.
+    """One profile, in its own window — child-simple (v0.31.0).
 
     Reached from the menu (Profiles) or by double-clicking a profile
-    row in the tree. Every field explains itself in plain words
-    underneath. The download row lives only in the main window now
-    (T79): one honest download row, not a duplicate here.
+    row in the tree. The simple view is what opens: the model's name,
+    what it does in plain words, what it is good and not good at,
+    whether its training files are ready (with one button to get
+    them), and its projects. No jargon anywhere in it.
+
+    Everything technical lives behind one Details flap, closed by
+    default and still fully working: the derived role (read-only —
+    nobody assigns roles by hand anymore), the governing-seat
+    binding, the Ollama tag, the Hugging Face repo, the technical
+    stats line, and the config. Nothing is deleted; it is one tap
+    away for the rare case that needs it.
     """
 
     def __init__(self, main, slug, parent=None):
@@ -1587,24 +1623,55 @@ class ProfileWindow(QDialog):
         scroll.setWidget(body)
         outer.addWidget(scroll, 1)
 
-        form = QFormLayout()
+        # -- simple view: name, what it does, strengths, training
+        # files, projects. No jargon anywhere in it (v0.31.0).
+        layout.addWidget(QLabel("Name"))
         self.display_edit = QLineEdit()
-        # Role (T116/T122): an editable combo offering the
-        # canonical seats, with custom entry still allowed — a
-        # typed role outside the list is kept, and flagged as
-        # custom underneath. Nothing is selected by default:
-        # the combo starts blank and only the load fills it.
-        self.role_combo = QComboBox()
-        self.role_combo.setEditable(True)
-        self.role_combo.addItems(list(CANONICAL_ROLES))
-        self.role_combo.setCurrentIndex(-1)
-        self.role_combo.lineEdit().setPlaceholderText(
-            "driver, reviewer, vision..."
+        layout.addWidget(self.display_edit)
+        layout.addWidget(
+            _help_label(
+                "Just a label for the list. It already says the model's name."
+            )
         )
-        self.custom_role_note = _help_label(
-            "Custom role: not one of the canonical seats."
-        )
-        self.custom_role_note.setVisible(False)
+        self.what_label = QLabel("")
+        self.what_label.setWordWrap(True)
+        layout.addWidget(self.what_label)
+        self.size_label = QLabel("")
+        self.size_label.setWordWrap(True)
+        layout.addWidget(self.size_label)
+        self.strengths_label = QLabel("")
+        self.strengths_label.setWordWrap(True)
+        layout.addWidget(self.strengths_label)
+        # Training files: ready or not, with one button to get
+        # them. The button calls the main window's download, so
+        # the bridge offer (v0.30.0) and the progress bar live
+        # there, not duplicated here.
+        self.readiness_label = QLabel("")
+        self.readiness_label.setWordWrap(True)
+        layout.addWidget(self.readiness_label)
+        self.download_btn = QPushButton("Download the training files")
+        self.download_btn.clicked.connect(self._start_download)
+        layout.addWidget(self.download_btn)
+        # Projects: the profile's own projects, with one button
+        # to start another. Double-click a project to open it.
+        layout.addWidget(QLabel("Projects"))
+        self.projects_list = QListWidget()
+        self.projects_list.setMinimumHeight(70)
+        self.projects_list.itemDoubleClicked.connect(self._open_project)
+        layout.addWidget(self.projects_list)
+        self.projects_empty_label = QLabel("No projects yet.")
+        layout.addWidget(self.projects_empty_label)
+        self.new_project_btn = QPushButton("Start a project")
+        self.new_project_btn.clicked.connect(self._start_project)
+        layout.addWidget(self.new_project_btn)
+
+        # -- Details: everything technical, behind one flap,
+        # closed by default (v0.31.0). Nothing is deleted; it is
+        # one tap away for the rare case that needs it. The flap
+        # is the deliberate exception to CollapsibleSection's
+        # start-open rule — Joshua's order, 2026-11-18.
+        details = CollapsibleSection("Details")
+        details.set_expanded(False)
         self.tag_combo = QComboBox()
         self.tag_combo.setEditable(True)
         self.base_edit = QLineEdit()
@@ -1615,24 +1682,21 @@ class ProfileWindow(QDialog):
         self.seat_combo = QComboBox()
         self.seat_combo.addItem("(not bound)")
         self.seat_combo.addItems(list(GOVERNING_SEATS))
-        form.addRow("Display name", self.display_edit)
-        form.addRow(
+        # The role (v0.31.0): read-only. Stella works it out from
+        # what the model is good at; nobody types it anymore.
+        self.role_label = QLabel("No role yet")
+        self.role_label.setWordWrap(True)
+        details_form = QFormLayout()
+        details_form.addRow("Role", self.role_label)
+        details_form.addRow(
             "",
             _help_label(
-                "Just a label for the list. It already says the model's name."
+                "The job this model does, worked out by Stella "
+                "from what the model is good at."
             ),
         )
-        form.addRow("Role", self.role_combo)
-        form.addRow("", self.custom_role_note)
-        form.addRow(
-            "",
-            _help_label(
-                "Only matters if Code Forge uses this profile as a seat "
-                "(driver, reviewer...). Leave blank otherwise."
-            ),
-        )
-        form.addRow("Governing seat", self.seat_combo)
-        form.addRow(
+        details_form.addRow("Governing seat", self.seat_combo)
+        details_form.addRow(
             "",
             _help_label(
                 "Set only when this model will fill a Forge "
@@ -1640,16 +1704,16 @@ class ProfileWindow(QDialog):
                 "training on a stock base."
             ),
         )
-        form.addRow("Ollama tag", self.tag_combo)
-        form.addRow(
+        details_form.addRow("Ollama tag", self.tag_combo)
+        details_form.addRow(
             "",
             _help_label(
                 "The model as Ollama knows it on this PC. "
                 "Used for dreaming and the refusal probe."
             ),
         )
-        form.addRow("Hugging Face repo", self.base_edit)
-        form.addRow(
+        details_form.addRow("Hugging Face repo", self.base_edit)
+        details_form.addRow(
             "",
             _help_label(
                 "Where training loads the base model from: a Hugging Face "
@@ -1661,42 +1725,44 @@ class ProfileWindow(QDialog):
         # No Processor row: the stored field exists but nothing in
         # Stella reads it — showing it only asked a question nobody
         # could answer. It stays in profile.json for compatibility.
-        layout.addLayout(form)
+        details.content_layout.addLayout(details_form)
 
         # What the profile points at (T165): the model's size,
         # quant, context, and capabilities from a cached /api/show,
-        # plus the project count and the dates. The info loads in
-        # the background; until it lands the label says so, and
-        # with Ollama down it says unavailable, never blank.
+        # plus the project count and the dates. The technical line
+        # lives in Details now; the simple view gets the plain
+        # version of the same info. The info loads in the
+        # background; until it lands the label says so, and with
+        # Ollama down it says unavailable, never blank.
         self.model_info_label = QLabel("")
         self.model_info_label.setWordWrap(True)
-        layout.addWidget(self.model_info_label)
+        details.content_layout.addWidget(self.model_info_label)
         self.profile_facts_label = QLabel("")
         self.profile_facts_label.setWordWrap(True)
-        layout.addWidget(self.profile_facts_label)
+        details.content_layout.addWidget(self.profile_facts_label)
 
         # Config and dependencies (T115): the first step toward
         # the profile's own clean environment — the values are
         # editable here and through update-profile, and
         # show-profile prints them. Full environment management
         # is T182, not this: nothing here installs or runs
-        # anything.
-        config_section = CollapsibleSection("Config and dependencies")
-        config_section.content_layout.addWidget(QLabel("Config (JSON)"))
+        # anything. They live in Details now (v0.31.0), as plain
+        # widgets, not a section inside a section.
+        details.content_layout.addWidget(QLabel("Config (JSON)"))
         self.config_edit = QPlainTextEdit()
         self.config_edit.setMinimumHeight(80)
         self.config_edit.setPlaceholderText('{\n  "key": "value"\n}')
-        config_section.content_layout.addWidget(self.config_edit)
-        config_section.content_layout.addWidget(
+        details.content_layout.addWidget(self.config_edit)
+        details.content_layout.addWidget(
             _help_label(
                 "Training config for this profile, as a JSON object. "
                 "Bad JSON is refused on save, with the error named."
             )
         )
-        config_section.content_layout.addWidget(QLabel("Dependencies"))
+        details.content_layout.addWidget(QLabel("Dependencies"))
         self.deps_list = QListWidget()
         self.deps_list.setMinimumHeight(70)
-        config_section.content_layout.addWidget(self.deps_list)
+        details.content_layout.addWidget(self.deps_list)
         dep_row = QHBoxLayout()
         self.dep_add_edit = QLineEdit()
         self.dep_add_edit.setPlaceholderText("package name")
@@ -1715,12 +1781,12 @@ class ProfileWindow(QDialog):
         self.dep_remove_btn.clicked.connect(self._remove_dependency)
         self.dep_remove_btn.setEnabled(False)
         dep_row.addWidget(self.dep_remove_btn)
-        config_section.content_layout.addLayout(dep_row)
-        config_section.content_layout.addWidget(
+        details.content_layout.addLayout(dep_row)
+        details.content_layout.addWidget(
             _help_label("One package per row. Nothing is installed from here.")
         )
-        layout.addWidget(config_section)
-        self.config_section = config_section
+        layout.addWidget(details)
+        self.details_section = details
 
         # Profile notes (T166): why this profile exists, what it
         # is for, what was learned about its base. They save with
@@ -1774,7 +1840,6 @@ class ProfileWindow(QDialog):
         self._show_worker: ModelShowWorker | None = None
         for widget, signal in (
             (self.display_edit, self.display_edit.textChanged),
-            (self.role_combo, self.role_combo.currentTextChanged),
             (self.tag_combo, self.tag_combo.currentTextChanged),
             (self.base_edit, self.base_edit.textChanged),
             (self.seat_combo, self.seat_combo.currentTextChanged),
@@ -1782,11 +1847,13 @@ class ProfileWindow(QDialog):
             (self.notes_edit, self.notes_edit.textChanged),
         ):
             signal.connect(self._on_edited)
-        # The custom-role flag follows the role text (T116), and
-        # Remove follows the dependency selection (T115).
-        self.role_combo.currentTextChanged.connect(
-            self._refresh_custom_role_note
+        # The strengths follow the tag as it changes (v0.31.0):
+        # the lookup is an in-memory table, so it is instant —
+        # unlike the model-info fetch, which stays on load/save.
+        self.tag_combo.currentTextChanged.connect(
+            self._refresh_strengths
         )
+        # Remove follows the dependency selection (T115).
         self.deps_list.currentItemChanged.connect(
             lambda *_a: self.dep_remove_btn.setEnabled(
                 self.deps_list.currentItem() is not None
@@ -1796,7 +1863,8 @@ class ProfileWindow(QDialog):
         # Ctrl+S saves here (T82); Tab walks the form in visual order.
         QShortcut(QKeySequence(shortcut_for("save")), self, self.save)
         _chain_tab_order([
-            self.display_edit, self.role_combo, self.seat_combo,
+            self.display_edit, self.download_btn, self.projects_list,
+            self.new_project_btn, self.seat_combo,
             self.tag_combo, self.base_edit, self.config_edit,
             self.deps_list, self.dep_add_edit, self.dep_add_btn,
             self.dep_remove_btn, self.notes_edit, self.save_btn,
@@ -1816,7 +1884,6 @@ class ProfileWindow(QDialog):
     def _current_values(self):
         return {
             "display": self.display_edit.text(),
-            "role": self.role_combo.currentText(),
             "tag": self.tag_combo.currentText(),
             "base": self.base_edit.text(),
             "seat": self._seat_value(),
@@ -1837,13 +1904,6 @@ class ProfileWindow(QDialog):
             self.deps_list.item(i).text()
             for i in range(self.deps_list.count())
         ]
-
-    def _refresh_custom_role_note(self):
-        """The custom-role flag (T116): a role outside the
-        canonical list is kept, and visibly marked custom."""
-        self.custom_role_note.setVisible(
-            is_custom_role(self.role_combo.currentText())
-        )
 
     def _add_dependency(self):
         """Add one dependency row (T115): a blank or duplicate
@@ -1979,6 +2039,122 @@ class ProfileWindow(QDialog):
             f"last used {last if last else 'never'}."
         )
 
+    # -- simple view (v0.31.0) --------------------------------------
+
+    def _refresh_simple_view(self):
+        """The simple view's stored parts: the derived role label,
+        the strengths for the current tag, the training-files
+        readiness, and the projects list. Called on load and on
+        save (the tag may have changed)."""
+        try:
+            p = self._main.store.get_profile(self._slug)
+        except StellaError:
+            self.role_label.setText("No role yet")
+            self.strengths_label.setText("Not measured yet.")
+            self.readiness_label.setText(
+                "Could not check the training files."
+            )
+            self.download_btn.setVisible(False)
+            self.projects_list.clear()
+            self.projects_list.setVisible(False)
+            self.projects_empty_label.setVisible(True)
+            return
+        role = (p.get("role") or "").strip()
+        self.role_label.setText(role if role else "No role yet")
+        self._refresh_strengths()
+        self._refresh_readiness()
+        self._refresh_projects()
+
+    def _refresh_strengths(self, *_args):
+        """Good at / Not good at for the tag in the field (the
+        field may hold an unsaved change — the lookup follows it,
+        the way the model info does). Unknown models say so."""
+        tag = self.tag_combo.currentText().strip()
+        entry = strengths_for_tag(tag)
+        if entry is None:
+            self.strengths_label.setText("Not measured yet.")
+            return
+        lines = []
+        if entry["good"]:
+            lines.append("Good at: " + ", ".join(entry["good"]) + ".")
+        if entry["not_good"]:
+            lines.append(
+                "Not good at: " + ", ".join(entry["not_good"]) + "."
+            )
+        self.strengths_label.setText(
+            "\n".join(lines) if lines else "Not measured yet."
+        )
+
+    def _refresh_readiness(self):
+        """Whether the training files are downloaded, and the one
+        button to get them. The button only shows when there is
+        something to download."""
+        try:
+            status = provision.weights_status(
+                self._main.store, self._slug
+            )
+        except StellaError:
+            self.readiness_label.setText(
+                "Could not check the training files."
+            )
+            self.download_btn.setVisible(False)
+            return
+        state = status["state"]
+        if state == "ready":
+            self.readiness_label.setText(
+                "Training files are downloaded."
+            )
+            self.download_btn.setVisible(False)
+        elif state == "partial":
+            self.readiness_label.setText(
+                "Training files are partly downloaded."
+            )
+            self.download_btn.setVisible(True)
+        else:  # missing, no-repo
+            self.readiness_label.setText(
+                "Training files are not downloaded yet."
+            )
+            self.download_btn.setVisible(True)
+
+    def _refresh_projects(self):
+        """The profile's projects, by name. Double-click opens
+        one; an empty profile says so instead of a blank list."""
+        try:
+            projects = self._main.store.list_projects(self._slug)
+        except StellaError:
+            projects = []
+        names = [
+            p.get("name") for p in projects if p.get("name")
+        ]
+        self.projects_list.clear()
+        for name in names:
+            self.projects_list.addItem(name)
+        self.projects_list.setVisible(bool(names))
+        self.projects_empty_label.setVisible(not names)
+
+    def _start_download(self):
+        """One button to get the training files: the main
+        window's download, with its bridge offer and progress."""
+        self._main.start_download(self._slug)
+
+    def _start_project(self):
+        """Start a project under this profile: select it, run the
+        usual new-project flow, then refresh the list."""
+        self._main.set_session(self._slug, None)
+        self._main.new_project()
+        self._refresh_projects()
+        try:
+            self._refresh_facts(
+                self._main.store.get_profile(self._slug)
+            )
+        except StellaError:
+            pass
+
+    def _open_project(self, item):
+        """Double-click a project: open its window."""
+        if item is not None:
+            self._main.open_project_window(self._slug, item.text())
+
     def _refresh_model_info(self):
         """The model info line (T165) for the current tag: from
         the show cache when it has the tag, a background fetch
@@ -1990,11 +2166,17 @@ class ProfileWindow(QDialog):
             self.model_info_label.setText(
                 "No tag set, so there is no model info to show."
             )
+            self.what_label.setText(
+                "Stella does not know what this model can do yet."
+            )
+            self._set_size_label(None)
             return
         if SHOW_CACHE.loaded(tag):
             self._show_model_info(tag)
             return
         self.model_info_label.setText("Loading model info...")
+        self.what_label.setText("Loading model info...")
+        self._set_size_label(None)
         if (
             self._show_worker is not None
             and self._show_worker.isRunning()
@@ -2022,14 +2204,22 @@ class ProfileWindow(QDialog):
         """Render the cached /api/show info for a tag (T165):
         size, quant, context length, capabilities. Ollama down
         shows as unavailable, never blank or wrong; a tag Ollama
-        does not have says so outright."""
+        does not have says so outright. The technical line goes
+        to Details; the simple view gets the same facts in plain
+        words (v0.31.0)."""
         if not SHOW_CACHE.loaded(tag):
             self.model_info_label.setText("Loading model info...")
+            self.what_label.setText("Loading model info...")
+            self._set_size_label(None)
             return
         if not SHOW_CACHE.ollama_up(tag):
             self.model_info_label.setText(
                 "Model info unavailable: Ollama is not answering."
             )
+            self.what_label.setText(
+                "Stella does not know what this model can do yet."
+            )
+            self._set_size_label(None)
             return
         info = SHOW_CACHE.info(tag)
         if info is None:
@@ -2037,6 +2227,10 @@ class ProfileWindow(QDialog):
                 f"Model info unavailable: Ollama does not have "
                 f"{tag!r} installed."
             )
+            self.what_label.setText(
+                "Stella does not know what this model can do yet."
+            )
+            self._set_size_label(None)
             return
         parts = []
         size = info.get("size_bytes")
@@ -2058,8 +2252,28 @@ class ProfileWindow(QDialog):
             self.model_info_label.setText(
                 "Ollama has this model, but gave no details about it."
             )
+            self.what_label.setText(
+                "Stella does not know what this model can do yet."
+            )
+            self._set_size_label(None)
             return
         self.model_info_label.setText(", ".join(parts) + ".")
+        self.what_label.setText(
+            _plain_capabilities(info.get("capabilities") or [])
+        )
+        self._set_size_label(size)
+
+    def _set_size_label(self, size):
+        """The size line: shown when known, hidden when not, so
+        an unknown size leaves no blank gap in the simple view."""
+        if size is None:
+            self.size_label.setText("")
+            self.size_label.setVisible(False)
+        else:
+            self.size_label.setText(
+                f"Size on disk: {_fmt_bytes(size)}."
+            )
+            self.size_label.setVisible(True)
 
     def _load_inner(self):
         self._fill_tag_combo()
@@ -2067,7 +2281,6 @@ class ProfileWindow(QDialog):
             p = self._main.store.get_profile(self._slug)
         except StellaError:
             self.display_edit.setText("")
-            self.role_combo.setCurrentText("")
             self.seat_combo.setCurrentText("(not bound)")
             self.base_edit.setText("")
             self.config_edit.setPlainText("")
@@ -2075,10 +2288,11 @@ class ProfileWindow(QDialog):
             self.notes_edit.setPlainText("")
             self.model_info_label.setText("")
             self.profile_facts_label.setText("")
+            self.what_label.setText("")
+            self._set_size_label(None)
+            self._refresh_simple_view()
             return
         self.display_edit.setText(p.get("display_name", ""))
-        self.role_combo.setCurrentText(p.get("role", ""))
-        self._refresh_custom_role_note()
         seat = p.get("governing_seat", "") or ""
         self.seat_combo.setCurrentText(seat if seat else "(not bound)")
         # Config (T115): pretty JSON when there is any, blank
@@ -2104,7 +2318,10 @@ class ProfileWindow(QDialog):
         self.base_edit.setText(self._loaded_base)
         # T165: the facts and the model info for this profile's
         # tag. T166: the profile notes, loaded with the form.
+        # v0.31.0: the simple view (role, strengths, readiness,
+        # projects) loads with the form too.
         self._refresh_facts(p)
+        self._refresh_simple_view()
         self.notes_edit.setPlainText(
             self._main.store.read_profile_notes(self._slug)
         )
@@ -2154,7 +2371,6 @@ class ProfileWindow(QDialog):
             return False
         fields = {
             "display_name": self.display_edit.text().strip(),
-            "role": self.role_combo.currentText().strip(),
             "ollama_tag": self.tag_combo.currentText().strip(),
             "config": config,
             "dependencies": self._deps_values(),
@@ -2191,8 +2407,11 @@ class ProfileWindow(QDialog):
         self._main.refresh_session()
         self._main._say(f"Saved profile {self._slug}.")
         # T165: the tag may have changed — the model info follows
-        # it — and the save stamped a new updated date.
+        # it — and the save stamped a new updated date. v0.31.0:
+        # the simple view follows it too (a new tag re-derives
+        # the role and the strengths).
         self._refresh_model_info()
+        self._refresh_simple_view()
         try:
             self._refresh_facts(
                 self._main.store.get_profile(self._slug)
@@ -6083,12 +6302,6 @@ class MainWindow(QMainWindow):
             export.triggered.connect(
                 lambda: self._bulk_export_profiles(selected)
             )
-            role = menu.addAction(
-                f"Change role for {n} selected profiles..."
-            )
-            role.triggered.connect(
-                lambda: self._bulk_change_role(selected)
-            )
         return menu
 
     def _selected_profiles(self) -> list[str]:
@@ -7959,38 +8172,6 @@ class MainWindow(QMainWindow):
             f"bulk profile export started: {len(slugs)} profiles "
             f"to {dest}"
         )
-
-    def _bulk_change_role(self, slugs):
-        """Change the role on several profiles at once (T181):
-        one role picker, applied to the whole selection. "No role"
-        clears the role. A profile that fails to update warns and
-        the rest still change.
-
-        Modal audit: QInputDialog.getItem is reached only from
-        this action; the bulk tests stub getItem."""
-        items = ["No role"] + list(CANONICAL_ROLES)
-        choice, ok = QInputDialog.getItem(
-            self, "Change role",
-            f"New role for the {len(slugs)} selected profiles:",
-            items, 0, False,
-        )
-        if not ok:
-            return
-        role = "" if choice == "No role" else choice
-        changed = 0
-        for slug in slugs:
-            try:
-                self.store.update_profile(slug, role=role)
-            except StellaError as exc:
-                self._warn(str(exc))
-                continue
-            changed += 1
-        self.refresh_tree()
-        self.refresh_session()
-        if changed:
-            self._say(
-                f"Changed the role for {changed} profiles."
-            )
 
     # -- project actions --------------------------------------------
     def new_project(self):

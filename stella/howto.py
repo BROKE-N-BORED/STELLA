@@ -134,16 +134,18 @@ and its projects. The base model itself is never touched.
 The left panel lists your profiles. Click the arrow next to one
 to see its projects. Double-click a profile to open its window.
 
-The profile window has four things:
-Display name. Just a label for the list.
-Role. Only matters if Code Forge uses this profile as a seat
-(driver, reviewer, and so on). Leave blank otherwise.
-Ollama tag. The model as Ollama knows it on this PC. Used for
+The profile window shows the plain facts first: the model's name,
+what it does, what it is good and not good at, whether its
+training files are downloaded (with one button to get them), and
+its projects. Double-click a project there to open it.\n\nThe technical details live behind one Details flap: the role
+Stella worked out for the model, the governing seat it is bound
+for (if any), the Ollama tag, the Hugging Face repo (where
+training loads the base model from), and the training config.
+The Ollama tag is the model as Ollama knows it on this PC. Used for
 dreaming: the sleep phase asks that model to write practice
 examples. The refusal probe does not use it.
-Hugging Face repo. Where training loads the base model from: a
-Hugging Face name like LiquidAI/LFM3-1.7B. Needed before you
-train.
+Nothing in the window asks you to set a role. Stella works
+that out from the model.
 
 The main window has the Download model button, next to the
 model picker. It pulls the base weights with a progress bar,
@@ -338,11 +340,13 @@ governing-seat tune cannot be exported to GGUF until its probe
 has passed: the export refuses, and says to run the probe
 first.
 
-A profile is bound for a seat in two ways: its Role names a
+A profile is bound for a seat in two ways: its role names a
 governing seat (driver, reviewer, tester, fast), or its
-governing-seat marker names one. The marker lives in the
-profile window, under Role: pick the seat, or leave it blank.
-Either way binds the same: the warning, the gate, and the
+governing-seat marker names one. Stella works the role out from
+the model. It is not something you set. The marker lives in the
+profile
+window, behind the Details flap: pick the seat, or leave it
+blank. Either way binds the same: the warning, the gate, and the
 export block all follow.""",
     ),
     (

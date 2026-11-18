@@ -1,5 +1,40 @@
 # Changelog
 
+## v0.31.0 — 2026-11-18
+
+Joshua's order from his real-PC session the same day v0.30.0
+shipped: he opened the Profile window and saw Display name /
+Role / Governing seat / Ollama tag / Base ref / Config (JSON) /
+"quant Q4_K_M, 3.4B parameters, can do: completion, tools" — and
+said he did not know what any of it was, invoking the 5-year-old
+rule ("it should be easy enough for [a] child to use? This
+isnt"). Then: "I also dont know what you mean by assigning it
+roles neither I shouldn't need to do that... it shoukd be able
+to get the accurate weights and know what the model is good at
+and what it isnt good at". This version is the answer.
+
+- The profile window is child-simple now. What opens is the
+  model's name, what it does in plain words ("It can write and
+  answer, and use tools."), what it is good and not good at,
+  whether its training files are ready with one button to get
+  them, and its projects with a Start a project button.
+- Everything technical lives behind one Details flap, closed by
+  default and still fully working: the derived role (read-only),
+  the governing-seat binding, the Ollama tag, the Hugging Face
+  repo, the technical stats line, and the config. Nothing was
+  deleted.
+- Nobody assigns roles by hand anymore. The role is worked out
+  from the model by a curated strengths table (stella/
+  strengths.py), grounded only in the roster audit and OST's
+  graded results — never fabricated. Unknown models say "Not
+  measured yet". The role field stays in the profile record, so
+  the tree filter, the probe sets, and the governing-seat
+  warning all keep working off derived roles; a governing role
+  is derived only for the three tags that actually hold those
+  seats in Forge. The bulk Change role menu action is gone.
+- The How to Use topics for Profiles and Governing seats now
+  describe the simple window and the derived role.
+
 ## v0.30.0 — 2026-11-18
 
 A real-PC defect Joshua hit minutes after the v0.29.0 release:

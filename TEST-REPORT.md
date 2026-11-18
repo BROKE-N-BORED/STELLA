@@ -1,3 +1,125 @@
+# STELLA v0.31.0 — Test Report
+
+Measured 2026-11-18 by the builder from a fresh unzip of the
+release zip. Python 3.12.3, PySide6 offscreen Qt,
+forge-v2-testenv; TMPDIR a sibling of the tree. Joshua's order
+from his real-PC session the same day: the Profile window was
+not child-simple ("I dont know what anybody this is"), and
+nobody should assign roles by hand ("it shoukd be able to get
+the accurate weights and know what the model is good at and
+what it isnt good at"). The Profile window is now a simple view
+(name, plain what-it-does, strengths in plain words, one
+download button, projects) with everything technical behind one
+closed Details flap; roles are derived from a curated strengths
+table grounded only in the roster audit and OST's graded LFM3
+card.
+
+## Suite: 1991 passed, 67 skipped (2059 collected)
+
+The single-process full run OOMs on this 6 GB VM, so the suite
+ran in 4 chunks from the fresh unzip: non-GUI (1616 passed, 67
+skipped, 12:32) + test_gui.py in 3 chunks (130 + 122 + 123
+passed). Counts reconcile exactly to the 2059 collected (2031
+in v0.30.0 + 28 net new: test_v31.py has 32 tests including the
+2 version pins moved from test_v30.py, test_v30.py lost those
+2, test_gui.py lost 1 net (two role-combo tests replaced by
+one has-no-role-combo test), test_v22.py lost 1 (the
+multi-select role change test, replaced by a comment)).
+
+One failure appeared in the run and is a load flake, not a
+regression: tests/test_gui.py::
+test_install_training_button_disabled_while_job_runs failed in
+the second GUI chunk while the box sat at load ~12 with another
+thread's suite running. It passes 3/3 solo (20.6s, 9.3s, 8.7s),
+and v0.31.0 touches nothing under it (the install-training
+button logic is unchanged).
+
+The first verification run of this version showed 15 failures,
+all understood and fixed before this run: 8 installer tests +
+1 uninstall test were the Python-zipfile extraction artifact
+(proven again this version: zipfile.extract writes 664 while
+the `unzip` CLI restores the stored 755 — the zip itself was
+correct; the v0.30.0 report records the same lesson); 2 were
+real defects in the new How to Use text (em-dashes in two topic
+strings, and the Profiles topic had dropped the "Used for
+dreaming" / "The refusal probe does not use it" sentences) —
+both fixed in place; 3 were version pins (the two v0.30.0
+version tests moved to test_v31.py per the per-version
+convention, the debug-report header pin updated to 0.31.0).
+The fixed areas were re-run green in the build copy (187
+passed, 3 skipped) before the zip was rebuilt and the full
+suite re-run from the fresh unzip.
+
+The 67 skips are the v0.30.0 skips unchanged (65 training-stack
+skips — no torch in forge-v2-testenv — plus the 2 tool skips
+for desktop-file-validate / shellcheck, neither installed in
+the sandbox).
+
+Environment notes: verification ran under heavy load from
+another thread's suite (load 12-24 during the first run, down
+to ~1 by the last GUI chunk). No EPERM burst hit this run. Zip
+extraction for verification used the `unzip` CLI, never
+Python's zipfile.extractall (see above).
+
+The `malloc_consolidate(): unaligned fastbin chunk detected`
+post-run line did not reproduce in any chunk — exit code 0
+throughout.
+
+## CLI smoke: green
+
+`stella-cli --version` reports 0.31.0. `stella-cli pc-info`
+runs and measures the box. The CLI `--role` flags are kept
+(power-user path; 15+ CLI tests pin them) but create-profile
+derives the role when `--role` is omitted, and update
+re-derives on a tag change unless `--role` is given explicitly.
+
+## GUI drive: green (verify like the user)
+
+drive script offscreen (stella-v31-drive.py): the window opens,
+4 screenshots saved and eyeballed. The simple view for LFM3
+reads "It can write and answer, and use tools." / "Size on
+disk: 1.0 GB." / "Good at: using tools, answering fast, reading
+long documents." / "Not good at: long multi-step jobs, it
+still refuses some ordinary work." / "Training files are not
+downloaded yet." with one "Download the training files" button
+and the projects list. Granite (the model from Joshua's
+screenshot) reads the same way. An unknown model reads
+honestly: "Stella does not know what this model can do yet." /
+"Not measured yet." / "No projects yet." Details opens with
+Role "No role yet", the governing-seat combo, and the rest of
+the technical fields working. One defect found by eyeballing
+the screenshots and fixed in place: the size line left a blank
+gap for unknown models (an empty label still takes a line), so
+it is now hidden when the size is not known.
+
+## Sweeps
+
+Em-dash: the suite's visible-text pins all pass; howto.py
+carries 0 em-dashes; the em-dashes in strengths.py are
+docstring/comment only (excluded by the AST sweep, which
+passed). "Base ref": zero occurrences in stella/ outside the
+base_ref code identifier (unchanged from v0.30.0). No manual
+role editing path remains in the window: role_combo,
+custom_role, and _bulk_change_role have zero matches in
+gui.py. Secrets grep: clean. Zip modes: 0o100755 for scripts,
+0o100644 for plain files, with file-type bits throughout;
+testzip clean, no self-inclusion.
+
+## Merge notes
+
+No merge: v0.31.0 was built in one isolated copy and merged
+into the live tree by rsync (diff-clean, no --delete). The
+bridge map is untouched (no new repos, no guessing unknown
+tags). The strengths table and the bridge map are different
+tables for different purposes: Granite has strengths (from the
+audit) but no bridge repo, and the mismatch guard still cannot
+catch a Granite profile carrying the wrong repo — Joshua's
+Granite profile still has LiquidAI/LFM3-1.7B typed into it
+and needs a hand fix in the profile window. Report-card upload
+is NOT in this version (planned v0.32.0).
+
+---
+
 # STELLA v0.30.0 — Test Report
 
 Measured 2026-11-18 by the builder from a fresh unzip of the

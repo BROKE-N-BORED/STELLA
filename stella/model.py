@@ -29,8 +29,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .autoconfig import compute_settings, measure_pc
+from .strengths import derived_role
 
-STELLA_VERSION = "0.30.0"
+STELLA_VERSION = "0.31.0"
 
 # Slug: lowercase letters, digits, dash, underscore. Must start alnum.
 # No dots, no slashes — a slug can never climb out of its directory.
@@ -836,6 +837,12 @@ class Store:
         display_name = _require_text(display_name, "display_name")
         role = _require_text(role, "role")
         ollama_tag = _require_text(ollama_tag, "ollama_tag")
+        # v0.31.0: nobody assigns roles by hand anymore. A role
+        # not given here is worked out from the model (the
+        # strengths table); an explicitly given role still wins,
+        # so the terminal and imports keep working as before.
+        if not role and ollama_tag:
+            role = derived_role(ollama_tag)
         base_ref = _require_text(base_ref, "base_ref")
         processor = _require_text(processor, "processor")
         config = _require_config(config)
@@ -908,6 +915,7 @@ class Store:
         }
         old_tag = data.get("ollama_tag", "")
         old_base = data.get("base_ref", "")
+        old_role = data.get("role", "")
         for key, value in fields.items():
             if key not in allowed:
                 raise StellaError(f"cannot change {key!r} on a profile")
@@ -954,6 +962,24 @@ class Store:
             and (not old_base or old_base == old_tag)
         ):
             data["base_ref"] = fields["ollama_tag"]
+        # v0.31.0: the role follows the tag the same way (the
+        # T54 rule, for roles). A stored role that equals what
+        # the OLD tag derives to (or is blank) was never
+        # deliberately set, so it follows the new tag. A stored
+        # role that differs is a deliberate override (set from
+        # the terminal) and stays. An explicit role in the same
+        # call always wins.
+        if (
+            "ollama_tag" in fields
+            and "role" not in fields
+            and fields["ollama_tag"] != old_tag
+            and (
+                not (old_role or "").strip()
+                or (old_role or "").strip().lower()
+                == derived_role(old_tag)
+            )
+        ):
+            data["role"] = derived_role(fields["ollama_tag"])
         data["updated"] = utc_now()
         _write_json(self.profile_dir(slug) / "profile.json", data)
         return data

@@ -116,17 +116,8 @@ def _click_box_button(monkeypatch, prefix, seen):
 # -- Version --------------------------------------------------------
 
 
-def test_version_is_0_30_0(home):
-    """The version is 0.30.0 everywhere the CLI reports it."""
-    assert STELLA_VERSION == "0.30.0"
-    res = _run_cli_subprocess(home, "--version")
-    assert res.returncode == 0
-    assert "0.30.0" in res.stdout
-
-
-def test_window_title_carries_version(window):
-    """The window title carries STELLA 0.30.0."""
-    assert "0.30.0" in window.windowTitle()
+# NOTE: the version tests moved to test_v31.py (test_version_is_0_31_0,
+# test_window_title_carries_version) — the version is 0.31.0 now.
 
 
 # -- The bridge offer in the download flow --------------------------

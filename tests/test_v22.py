@@ -998,7 +998,8 @@ def test_filter_no_match_says_so(rich_window, qapp):
 
 def test_tree_context_menu_offers_bulk_actions(rich_window, qapp):
     """T181: with several profiles selected, the right-click
-    menu offers the bulk actions — delete, export, role change."""
+    menu offers the bulk actions — delete and export. v0.31.0:
+    the bulk role change is gone with manual role assignment."""
     rich_window.tree.topLevelItem(0).setSelected(True)
     rich_window.tree.topLevelItem(1).setSelected(True)
     menu = rich_window._tree_context_menu(
@@ -1007,7 +1008,8 @@ def test_tree_context_menu_offers_bulk_actions(rich_window, qapp):
     texts = [a.text() for a in menu.actions()]
     assert "Delete 2 selected profiles..." in texts
     assert "Export 2 selected profiles..." in texts
-    assert "Change role for 2 selected profiles..." in texts
+    assert not any("role" in t.lower() for t in texts)
+    assert not hasattr(rich_window, "_bulk_change_role")
 
 
 def test_single_selection_menu_unchanged(rich_window, qapp):
@@ -1120,21 +1122,9 @@ def test_multi_select_export(
     assert not (dest / "gamma-stella-profile-export").exists()
 
 
-def test_multi_select_role_change(rich_window, monkeypatch, qapp):
-    """T181: bulk role change applies one picked role to the
-    whole selection."""
-    from PySide6.QtWidgets import QInputDialog
-
-    monkeypatch.setattr(
-        QInputDialog, "getItem",
-        lambda *a, **k: ("tester", True),
-    )
-    rich_window._bulk_change_role(["alpha", "beta"])
-    qapp.processEvents()
-    assert rich_window.store.get_profile("alpha")["role"] == "tester"
-    assert rich_window.store.get_profile("beta")["role"] == "tester"
-    assert rich_window.store.get_profile("gamma")["role"] == "fast"
-    assert "2 profiles" in rich_window.statusBar().currentMessage()
+# (v0.31.0: test_multi_select_role_change is gone with the bulk
+# role change itself — roles are derived, never assigned by hand.
+# The menu test above pins that no role action remains.)
 
 
 # -- T170/T173/T174: GUI entry points -------------------------------
