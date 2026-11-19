@@ -1,3 +1,113 @@
+# STELLA v0.33.0 — Test Report
+
+When Stella does not know where a model's training files live,
+it looks them up on Hugging Face itself and offers what it finds
+in one tap. Joshua's order from his real-PC session 2026-11-18:
+"I told you it needs to pull this from huggingface dude I
+shouldn't have to do anything".
+
+## What was built
+
+- New module `stella/hub_lookup.py`: the live lookup against
+  the public Hub API (no key, no account). Query ladder,
+  documented in the module: the base name as-is, the base name
+  dashed at letter-to-digit boundaries, family + size, then the
+  family alone (only when no size is known). The first rung
+  that yields an offerable repo wins. `_base_name` was factored
+  out of `suggest_hf_repos` in ollama_bridge and is shared.
+- Hard filters: a repo is offerable only when its name carries
+  no "gguf"/"mlx" AND its file list shows config.json plus at
+  least one .safetensors file. Ranking is deterministic: exact
+  repo-name match, then the tag's own author org, then most
+  downloads, then repo id. At most 3 offered. A 30-second
+  budget covers the whole lookup; per-request cap 10 seconds.
+- All four no-repo walls use it, after the bridge check: the
+  GUI's download button and "Set the model source..." button,
+  the train/sleep pre-check, and the chat's download_weights
+  and start_training tools. The curated map still answers
+  first; a mapped tag never triggers a search (pinned by
+  tests). A found repo is never set silently: one candidate
+  gets the Yes/No offer ("Stella found <repo> on Hugging Face
+  for this model. Use it?"), several get the pick-one dialog,
+  and the chat uses the same confirm round-trip as the bridge
+  (a confirming call re-runs the lookup; no offer state is
+  kept between calls).
+- The GUI lookup runs in a HubLookupWorker (QThread) with a
+  plain "Looking on Hugging Face..." activity + status state.
+  Window close waits it out on the T36 deferred-close timer,
+  like the other workers. A window already closing drops the
+  outcome whole.
+- Honest endings, word-shared between the window and the chat
+  (hub_lookup.UNKNOWN_MESSAGE / OFFLINE_MESSAGE): Hub
+  unreachable, timeout, or budget out gives "Stella couldn't
+  reach Hugging Face. Check your connection and try again, or
+  pick a different model." A completed search with nothing
+  offerable keeps the pre-v0.33.0 unknown message verbatim —
+  now the rare case (bonsai-2 still lands there).
+- The reviewer and bonsai-2 stay out of the curated map by
+  design (pinned by test_v32); the lookup finding something
+  for them at runtime is the feature working.
+- How to Use (Profiles) gained one sentence about the search.
+  No storage keys renamed; report cards, strengths, training,
+  probe, and the download engine untouched.
+
+## Suite (fresh unzip, 4 chunks, 2,315 tests)
+
+From a fresh unzip of the shipped zip (unzip CLI, workspace
+TMPDIR sibling of the tree): 574 (test_gui) + 339 passed /
+2 skipped (v22-v33) + 538 passed / 3 skipped (chat, CLI,
+export, installer) + 797 passed / 62 skipped (the rest) =
+2248 passed, 67 skipped, 0 failures.
+
+- New tests in tests/test_v33.py (26) against a FAKE Hub server
+  (ThreadingHTTPServer, the R62 pattern): the ladder for the
+  reviewer / Granite / bonsai tags; GGUF and MLX name filtering
+  (detail never fetched for them); a GGUF-only file list
+  rejected; ranking exact > own-org > downloads; ladder walking
+  (second rung pays off, family rung never searched); none and
+  offline (connection refused) and timeout states; all GUI
+  walls (accept stores + downloads, decline stores nothing,
+  pick-one order, none/offline messages, bridge-wins-no-search,
+  the weights-offer continuation) and all chat walls (offer,
+  confirm round-trip, wrong-repo refusal, offline, none,
+  bridge-wins). One GUI test runs the whole flow over real HTTP
+  against the fake Hub.
+- Two pre-existing tests updated for the new behavior
+  (test_v30's bonsai GUI + chat unknown-tag tests now stub the
+  lookup to "none" and assert the same honest message); the
+  version tests moved to test_v33.py per convention; the
+  debug-report version pin in test_v29.py updated.
+
+## Like the user (offscreen drive)
+
+Drove the real window offscreen with a reviewer profile against
+the fake Hub (GGUF repo filtered, the real repo offered).
+Screenshots eyeballed: the "Looking on Hugging Face..." activity
++ status state; the offer dialog ("Stella found
+dolphinlabs/qwen3.5-uncensored on Hugging Face for this model.
+Use it?", Yes/No); after a real mouse click on Yes, the repo is
+stored and the window shows "Downloading model: 0%". No jargon,
+no typing anywhere in the flow.
+
+## Sweeps
+
+CLI smoke from the unzip: `stella 0.33.0`. Em-dash sweep: no
+em-dashes in any new visible string (How to Use included);
+hub_lookup's docstring keeps them, as does the rest of the
+codebase's developer docs. Secrets grep clean. Zip stored modes
+verified: the exec set is identical to v0.32.0's zip (4 .desktop
+launchers, 4 shell scripts, run_tests.sh, stella-cli,
+repair_launcher.py at 0o100755; everything else 0o100644,
+file-type bits present); testzip clean.
+
+## Still needs Joshua's real-PC verdict
+
+- The lookup against the real huggingface.co from this code
+  path (the sandbox drive used a local fake Hub; the Hub API
+  shapes the fake serves are the documented ones, and the
+  Granite repo facts were verified live on the Hub on
+  2026-11-18 when its bridge entry was made).
+
 # STELLA v0.32.0 — Test Report
 
 Report cards attach to a model's profile, and Stella reads them to

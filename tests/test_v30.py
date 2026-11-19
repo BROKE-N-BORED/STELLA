@@ -100,6 +100,17 @@ def _mock_download(window, monkeypatch, started):
     monkeypatch.setattr(window.download_manager, "start", started.append)
 
 
+def _wait_for_lookup(window, qapp, timeout_ms=10000):
+    """Wait for the window's Hugging Face lookup worker (v0.33.0)
+    to finish and its completion slot to run."""
+    waited = 0
+    while window._hub_lookup_in_flight():
+        QTest.qWait(50)
+        waited += 50
+        assert waited < timeout_ms, "lookup did not finish in time"
+    qapp.processEvents()
+
+
 def _click_box_button(monkeypatch, prefix, seen):
     """Fake QMessageBox.exec: click the first button whose text
     starts with prefix, recording the box text in seen."""
@@ -116,8 +127,8 @@ def _click_box_button(monkeypatch, prefix, seen):
 # -- Version --------------------------------------------------------
 
 
-# NOTE: the version tests moved to test_v32.py (test_version_is_0_32_0,
-# test_window_title_carries_version) — the version is 0.32.0 now.
+# NOTE: the version tests moved to test_v33.py (test_version_is_0_33_0,
+# test_window_title_carries_version) — the version is 0.33.0 now.
 
 
 # -- The bridge offer in the download flow --------------------------
@@ -169,19 +180,25 @@ def test_start_download_multi_candidate_pick(window, monkeypatch):
 
 
 def test_start_download_unknown_tag_plain_message(
-    window, monkeypatch
+    window, qapp, monkeypatch
 ):
     """An unknown tag (bonsai-2 has no verifiable Hub repo by
-    design): a plain-words message with no jargon, nothing stored,
-    nothing downloaded."""
+    design): v0.33.0 looks it up on Hugging Face first — the
+    stubbed lookup finds nothing, so the plain-words message
+    lands with no jargon, nothing stored, nothing downloaded."""
     window.store.create_profile(
         "bonsai", ollama_tag="bonsai-2:4b", role="fast"
+    )
+    monkeypatch.setattr(
+        gui_mod, "lookup_hf_repos",
+        lambda tag, **k: {"state": "none", "candidates": []},
     )
     warnings = []
     monkeypatch.setattr(window, "_warn", warnings.append)
     started = []
     _mock_download(window, monkeypatch, started)
     window.start_download("bonsai")
+    _wait_for_lookup(window, qapp)
     assert warnings
     assert "doesn't know where this model's training files live" in (
         warnings[0]
@@ -422,9 +439,16 @@ def test_chat_download_weights_multi_candidates(
     )
 
 
-def test_chat_download_weights_unknown_tag(agent, store, seeded):
-    """An unknown tag gets the honest plain-words answer, with no
-    jargon and no offered repo."""
+def test_chat_download_weights_unknown_tag(
+    agent, store, seeded, monkeypatch
+):
+    """An unknown tag: v0.33.0 looks it up on Hugging Face first —
+    the stubbed lookup finds nothing, so the honest plain-words
+    answer lands, with no jargon and no offered repo."""
+    monkeypatch.setattr(
+        chat_mod, "lookup_hf_repos",
+        lambda tag, **k: {"state": "none", "candidates": []},
+    )
     store.create_profile(
         "bonsai", ollama_tag="bonsai-2:4b", role="fast"
     )

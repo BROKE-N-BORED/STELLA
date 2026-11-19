@@ -52,17 +52,8 @@ def window(qapp, seeded, settings):
     win.close()
 
 
-def test_version_is_0_32_0(home):
-    """The version is 0.32.0 everywhere the CLI reports it."""
-    assert STELLA_VERSION == "0.32.0"
-    res = _run_cli_subprocess(home, "--version")
-    assert res.returncode == 0
-    assert "0.32.0" in res.stdout
-
-
-def test_window_title_carries_version(window):
-    """The window title carries STELLA 0.32.0."""
-    assert "0.32.0" in window.windowTitle()
+# NOTE: the version tests moved to test_v33.py (test_version_is_0_33_0,
+# test_window_title_carries_version) — the version is 0.33.0 now.
 
 
 # -- fixtures: the real OST formats ---------------------------------

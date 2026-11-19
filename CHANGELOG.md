@@ -1,5 +1,36 @@
 # Changelog
 
+## v0.33.0 — 2026-11-18
+
+Joshua's order from his real-PC session, after the Granite
+profile hit the unknown-model message: "I told you it needs to
+pull this from huggingface dude I shouldn't have to do
+anything". This version is the answer.
+
+- When Stella does not know where a model's training files
+  live, it now looks them up on Hugging Face itself. The
+  curated bridge map still answers first (fast, offline,
+  verified); for a tag the map does not know, Stella searches
+  the public Hugging Face API, checks that a repo really holds
+  training weights (config.json plus safetensors — GGUF-only
+  and MLX repos are filtered out), and offers what it finds:
+  one tap on Yes stores the repo and starts the download,
+  exactly like the bridge offer. Nothing is ever set without
+  the user's say-so.
+- All four no-repo walls use it: Get its weights, the train
+  and sleep pre-checks, the "Set the model source..." button,
+  and the chat's download and train tools (the chat uses the
+  same confirm round-trip as the bridge).
+- The search runs off the UI thread with a plain "Looking on
+  Hugging Face..." state and a 30-second budget. Hugging Face
+  unreachable gives a plain try-again message; a completed
+  search with nothing offerable keeps the honest unknown
+  message, which is now the rare case (bonsai-2, which has no
+  training repo on the Hub, still lands there).
+- The reviewer and bonsai-2 stay out of the curated map by
+  design; the live lookup finding something for them at
+  runtime is the feature working, not a map change.
+
 ## v0.32.0 — 2026-11-18
 
 Joshua's order from his real-PC session the same day v0.30.0

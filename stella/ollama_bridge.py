@@ -68,6 +68,20 @@ def _normalize(tag: str) -> str:
     return (tag or "").strip().lower()
 
 
+def _base_name(tag: str) -> str:
+    """The tag with its version stripped: "qwen3.5:2b-q4_K_M"
+    becomes "qwen3.5", "lfm3:1.7b" becomes "lfm3". The org
+    prefix is kept ("huihui_ai/x:1b" becomes "huihui_ai/x"): the
+    version is the part after the last ":" in the model's own
+    name segment. Shared with the live Hugging Face lookup
+    (hub_lookup), which searches by this base name."""
+    wanted = _normalize(tag)
+    last = wanted.rsplit("/", 1)[-1]
+    if ":" not in last:
+        return wanted
+    return wanted.rsplit(":", 1)[0]
+
+
 def suggest_hf_repos(tag: str) -> list[dict]:
     """Hugging Face repo candidates for an Ollama tag.
 
@@ -93,8 +107,7 @@ def suggest_hf_repos(tag: str) -> list[dict]:
     if found:
         return found
     # No exact match: try the model name without its version.
-    last = wanted.rsplit("/", 1)[-1]
-    base = wanted if ":" not in last else wanted.rsplit(":", 1)[0]
+    base = _base_name(wanted)
     for known_tag, repo, source in KNOWN_BRIDGE:
         if known_tag == base or known_tag.startswith(base + ":"):
             add(repo, source)

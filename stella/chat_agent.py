@@ -34,6 +34,7 @@ import re
 from .distill import distill_dataset
 from .gguf import export_gguf
 from .howto import topic_text, topic_titles
+from .hub_lookup import OFFLINE_MESSAGE, UNKNOWN_MESSAGE, lookup_hf_repos
 from .model import StellaError, Store, slug_from_model
 from .ollama import OllamaError, chat_stream, list_models
 from .ollama_bridge import suggest_hf_repos
@@ -1106,26 +1107,39 @@ class ChatAgent:
         """The no-repo answer for the chat tools (v0.30.0): the
         bridge's Hugging Face candidate(s) for this profile's
         Ollama tag, in text form. Returns None when the call
-        already carries the user's confirmation (\"confirm\": true
-        plus a \"repo\" naming one of the candidates) — the repo is
+        already carries the user's confirmation ("confirm": true
+        plus a "repo" naming one of the candidates) — the repo is
         stored on the profile and the caller proceeds. Otherwise
         returns the message to show: the suggestion and the ask,
         or the honest unknown-tag answer. A repo that is not a
-        bridge candidate is never stored from here, so a made-up
-        name cannot slip in. ``after`` is what happens once the
+        candidate is never stored from here, so a made-up name
+        cannot slip in. ``after`` is what happens once the
         user says yes to the one candidate; ``after_pick`` is the
         same for the pick-one case, where the user names a repo
-        instead of just saying yes."""
+        instead of just saying yes.
+
+        v0.33.0: when the bridge knows nothing, the candidates
+        come from a live Hugging Face lookup instead (the agent
+        runs off the UI thread, so the lookup runs inline here).
+        The confirm round-trip validates against the same
+        candidates: a confirming call re-runs the lookup, so no
+        offer state is kept between calls. The Hub unreachable
+        gives the plain couldn't-reach message; a completed
+        search with nothing offerable gives the honest unknown
+        answer."""
         data = self.store.get_profile(profile)
         tag = (data.get("ollama_tag") or "").strip()
         candidates = suggest_hf_repos(tag)
+        found = False
         if not candidates:
-            return (
-                "Stella doesn't know where this model's training "
-                "files live on Hugging Face yet. Find the model on "
-                "huggingface.co and set the Hugging Face repo in the "
-                "profile window, or pick a different model."
-            )
+            self._progress("Looking on Hugging Face...")
+            result = lookup_hf_repos(tag)
+            if result["state"] == "offline":
+                return OFFLINE_MESSAGE
+            if result["state"] != "found":
+                return UNKNOWN_MESSAGE
+            candidates = result["candidates"]
+            found = True
         names = [c["repo"] for c in candidates]
         if args.get("confirm") and (args.get("repo") or "").strip():
             repo = args["repo"].strip()
@@ -1140,11 +1154,20 @@ class ChatAgent:
             return None
         if len(candidates) == 1:
             candidate = candidates[0]
+            if found:
+                return (
+                    "Stella found "
+                    f"{candidate['repo']} on Hugging Face for this "
+                    f"model. {after}"
+                )
             return (
                 "This model lives on Hugging Face as "
                 f"{candidate['repo']} ({candidate['source']}). {after}"
             )
-        lines = ["This model could be one of these on Hugging Face:"]
+        if found:
+            lines = ["Stella found these on Hugging Face for this model:"]
+        else:
+            lines = ["This model could be one of these on Hugging Face:"]
         for candidate in candidates:
             lines.append(
                 f"- {candidate['repo']} ({candidate['source']})"

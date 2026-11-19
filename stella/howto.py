@@ -162,7 +162,9 @@ and a Cancel button while it runs. If no Hugging Face repo is
 set, the button is greyed out and a "Set the model source..."
 button shows instead: it offers the Hugging Face repo Stella
 found for the model, or opens the profile window so you can
-type one.""",
+type one. For a model Stella does not know yet, it searches
+Hugging Face itself and offers what it finds: you just say
+yes or no.""",
     ),
     (
         "Projects",

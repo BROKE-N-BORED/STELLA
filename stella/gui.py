@@ -111,6 +111,7 @@ from .autoconfig import measure_pc, ram_usage_gb
 from .chat_agent import ChatAgent, template_step_text
 from .debug_log import DebugLogger, check_ollama
 from .howto import topic_text, topic_titles
+from .hub_lookup import OFFLINE_MESSAGE, UNKNOWN_MESSAGE, lookup_hf_repos
 from .model import (
     CANONICAL_ROLES,
     GOVERNING_SEATS,
@@ -797,6 +798,28 @@ class ModelShowWorker(QThread):
     def run(self):
         info, ollama_up = SHOW_CACHE.refresh(self._tag, self._url)
         self.show_ready.emit(self._tag, info or {}, ollama_up)
+
+
+class HubLookupWorker(QThread):
+    """Run the live Hugging Face lookup off the UI thread
+    (v0.33.0). One lookup call; the result dict arrives on the
+    done signal, on the UI thread. The tag is captured at
+    construction, like ModelListWorker's URL. Any unexpected
+    error becomes the offline result — the window shows the
+    plain try-again message, never a traceback."""
+
+    done = Signal(object)  # the hub_lookup result dict
+
+    def __init__(self, tag, parent=None):
+        super().__init__(parent)
+        self._tag = tag
+
+    def run(self):
+        try:
+            result = lookup_hf_repos(self._tag)
+        except Exception:
+            result = {"state": "offline", "candidates": []}
+        self.done.emit(result)
 
 
 class TrainWorker(QThread):
@@ -4958,6 +4981,14 @@ class MainWindow(QMainWindow):
         # then on demand only. The worker is tracked so close waits
         # for it (a QThread destroyed while running aborts the app).
         self._model_list_worker: ModelListWorker | None = None
+        # The Hugging Face lookup worker (v0.33.0): runs when the
+        # bridge does not know a model's repo. Tracked like the
+        # model-list worker so close waits for it; the slug and
+        # the continuation ride along so the completion knows
+        # which profile asked and what to do next.
+        self._hub_lookup_worker: HubLookupWorker | None = None
+        self._hub_lookup_slug: str | None = None
+        self._hub_lookup_after = None
 
         # Debug log layer (U12): rotating log under the Stella home,
         # ring buffer, scrubbed report on demand from Settings.
@@ -7440,15 +7471,18 @@ class MainWindow(QMainWindow):
             self.stat_epoch.setText("Epoch: not started")
 
     # -- downloads --------------------------------------------------
-    def _offer_bridge_repo(self, slug) -> str | None:
-        """Offer the Hugging Face repo the bridge knows for a
-        profile whose base is an Ollama tag (v0.30.0): the download
-        used to dead-end here with jargon nobody could act on. One candidate gets a Yes/No question naming
-        the repo and where it comes from; several get a pick-one
-        dialog; an unknown tag gets a plain-words message with no
-        jargon. Returns the repo id (already stored on the profile)
-        when the user picks one, else None. Nothing is ever set
-        without the user's say-so."""
+    def _offer_bridge_repo(self, slug, after_done=None) -> str | None:
+        """Offer the Hugging Face repo for a profile whose base is
+        an Ollama tag (v0.30.0): the download used to dead-end here
+        with jargon nobody could act on. The curated bridge map
+        answers first (fast, offline, verified). When it knows
+        nothing, a live Hugging Face lookup runs in a worker
+        instead (v0.33.0) and this returns None at once;
+        ``after_done`` (slug, repo or None) hears the outcome when
+        the lookup and its offer finish. Returns the repo id
+        (already stored on the profile) when the user picks one
+        synchronously, else None. Nothing is ever set without the
+        user's say-so."""
         try:
             profile = self.store.get_profile(slug)
         except StellaError as exc:
@@ -7457,21 +7491,34 @@ class MainWindow(QMainWindow):
         tag = (profile.get("ollama_tag") or "").strip()
         candidates = suggest_hf_repos(tag)
         if not candidates:
-            self._warn(
-                "Stella doesn't know where this model's training "
-                "files live on Hugging Face yet. Find the model on "
-                "huggingface.co and set the Hugging Face repo in the "
-                "profile window, or pick a different model."
-            )
+            self._start_hub_lookup(slug, tag, after_done)
             return None
+        return self._offer_repo_candidates(slug, candidates, found=False)
+
+    def _offer_repo_candidates(self, slug, candidates, found) -> str | None:
+        """The offer dialogs, shared by the bridge and the live
+        lookup: one candidate gets a Yes/No question naming the
+        repo; several get a pick-one dialog. A pick is stored on
+        the profile and returned; a decline stores nothing.
+        ``found`` marks lookup results — the question says Stella
+        found the repo on Hugging Face."""
         if len(candidates) == 1:
             candidate = candidates[0]
+            if found:
+                text = (
+                    f"Stella found {candidate['repo']} on Hugging "
+                    "Face for this model. Use it?"
+                )
+            else:
+                text = (
+                    f"This model lives on Hugging Face as "
+                    f"{candidate['repo']} ({candidate['source']}). "
+                    "Use that and download it?"
+                )
             answer = QMessageBox.question(
                 self,
                 "Stella",
-                f"This model lives on Hugging Face as "
-                f"{candidate['repo']} ({candidate['source']}). "
-                "Use that and download it?",
+                text,
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.Yes,
             )
@@ -7496,18 +7543,80 @@ class MainWindow(QMainWindow):
             return None
         return repo
 
+    def _hub_lookup_in_flight(self) -> bool:
+        return (
+            self._hub_lookup_worker is not None
+            and self._hub_lookup_worker.isRunning()
+        )
+
+    def _start_hub_lookup(self, slug, tag, after_done):
+        """Kick the live Hugging Face lookup off in its worker,
+        with the plain "Looking on Hugging Face..." state showing
+        meanwhile. One lookup at a time: a second ask while one
+        runs is answered with a say-so, and its continuation is
+        dropped (the user can press again)."""
+        if self._hub_lookup_in_flight():
+            self._say("Stella is already looking on Hugging Face...")
+            return
+        self._hub_lookup_slug = slug
+        self._hub_lookup_after = after_done
+        self._say("Looking on Hugging Face...")
+        self._set_activity("job", "Looking on Hugging Face...")
+        worker = HubLookupWorker(tag, parent=self)
+        worker.done.connect(self._on_hub_lookup_done)
+        self._hub_lookup_worker = worker
+        worker.start()
+
+    def _on_hub_lookup_done(self, result):
+        """The lookup landed: offer what it found (the same
+        dialogs as the bridge), or say the honest ending — the
+        unknown message when the search completed empty, the
+        couldn't-reach message when the Hub stayed silent. The
+        continuation hears (slug, repo or None) either way. A
+        window already closing drops the outcome whole: no
+        dialogs, no continuation, no download started."""
+        slug = self._hub_lookup_slug
+        after = self._hub_lookup_after
+        self._hub_lookup_worker = None
+        self._hub_lookup_slug = None
+        self._hub_lookup_after = None
+        if self._closing:
+            return
+        self._set_activity("idle", "Idle")
+        state = (result or {}).get("state")
+        candidates = (result or {}).get("candidates") or []
+        repo = None
+        if state == "found" and candidates:
+            repo = self._offer_repo_candidates(slug, candidates, found=True)
+        elif state == "offline":
+            self._warn(OFFLINE_MESSAGE)
+        else:
+            self._warn(UNKNOWN_MESSAGE)
+        if after is not None:
+            after(slug, repo)
+
     def _on_fix_download(self):
-        """T79 + v0.30.0: the \"Set the model source...\" button in
+        """T79 + v0.30.0: the "Set the model source..." button in
         the no-repo state. Offer the bridge repo first — a pick
-        starts the download at once. A decline, a cancel, or an
-        unknown tag opens the profile window as before, where the
-        repo can be typed by hand."""
+        starts the download at once. A decline or a cancel opens
+        the profile window as before, where the repo can be typed
+        by hand. v0.33.0: an unknown tag runs the live lookup
+        first; its outcome drives the same two endings (a found
+        repo downloads, anything else opens the profile window)."""
         slug = self._current_profile
         if not slug:
             return
-        if self._offer_bridge_repo(slug) is not None:
+        repo = self._offer_bridge_repo(
+            slug,
+            after_done=lambda s, found_repo: (
+                self.start_download(s)
+                if found_repo
+                else self.open_profile_window(s)
+            ),
+        )
+        if repo is not None:
             self.start_download(slug)
-        else:
+        elif not self._hub_lookup_in_flight():
             self.open_current_profile_window()
 
     def _check_base_repo_match(self, slug, repo):
@@ -7596,7 +7705,15 @@ class MainWindow(QMainWindow):
             # starts below — the user never presses the button
             # twice. The status is re-read: a repo whose weights
             # are already on disk is ready, not a download.
-            if self._offer_bridge_repo(slug) is None:
+            # v0.33.0: an unknown tag runs the live lookup in its
+            # worker instead; when it lands a repo, the download
+            # restarts from the top with the repo set.
+            if self._offer_bridge_repo(
+                slug,
+                after_done=lambda s, repo: (
+                    self.start_download(s) if repo else None
+                ),
+            ) is None:
                 return
             try:
                 status = provision.weights_status(self.store, slug)
@@ -7705,8 +7822,16 @@ class MainWindow(QMainWindow):
         if status["state"] == "no-repo":
             # v0.30.0: offer the bridge repo, then fall through to
             # the "Download the model first?" question below — the
-            # download logic lives in one place, here.
-            if self._offer_bridge_repo(profile) is None:
+            # download logic lives in one place, here. v0.33.0: an
+            # unknown tag runs the live lookup in its worker; when
+            # it lands a repo, this offer runs again with the repo
+            # set and lands on the same question.
+            if self._offer_bridge_repo(
+                profile,
+                after_done=lambda s, repo: (
+                    self._weights_offer(s) if repo else None
+                ),
+            ) is None:
                 return False
             try:
                 status = provision.weights_status(self.store, profile)
@@ -10851,7 +10976,7 @@ class MainWindow(QMainWindow):
                 if item.isExpanded()
             ],
         )
-        if self._job_running():
+        if self._job_running() or self._hub_lookup_in_flight():
             # Close waits for every worker, without freezing (T36):
             # the old code blocked the UI thread on wait(15000) —
             # a 15-second dead window with no feedback, and a worker
@@ -10863,7 +10988,17 @@ class MainWindow(QMainWindow):
             # the whole time, and no running thread is ever
             # destroyed. A second close click while stopping just
             # repeats the message.
-            name = self._running_job_name() or "A job"
+            name = self._running_job_name()
+            if name is None:
+                # v0.33.0: the only thing running is the Hugging
+                # Face lookup — it cannot be cancelled, but it is
+                # bounded (30 seconds), so close just waits it out
+                # on the same timer.
+                name = (
+                    "The Hugging Face lookup"
+                    if self._hub_lookup_in_flight()
+                    else "A job"
+                )
             if self._training_running():
                 self._train_worker.request_stop()
             if self._sleep_running():
@@ -10910,7 +11045,7 @@ class MainWindow(QMainWindow):
         with the "Stopping..." feedback showing."""
         if not self._closing:
             return
-        if self._job_running():
+        if self._job_running() or self._hub_lookup_in_flight():
             return
         self._close_timer.stop()
         self._close_timer = None
