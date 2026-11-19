@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.34.0 — 2026-11-19
+
+The last typed command in Stella is gone. After a GGUF export,
+the window used to show an `ollama create ...` command for you
+to run yourself. Now the export's finish card offers one
+button: Put it in Ollama. This closes the last terminal
+touchpoint under the no-terminal-by-default rule.
+
+- When a GGUF export finishes, the finish card shows a "Put it
+  in Ollama" button and waits for it — a button that vanishes
+  in 2.5 seconds is no button. One click runs the create (the
+  same T89 engine the Train panel button and the CLI use), and
+  the answer names the model: "<name> is in Ollama now. It
+  will show up in Code Forge's model list."
+- The Train panel's button is renamed to match: Put it in
+  Ollama. One action, one name.
+- If a model with the same name is already in Ollama, Stella
+  asks before replacing it — in the window (the question
+  defaults to No) and on the CLI, where `export-gguf --create`
+  asks the same way and `--yes` answers ahead of time. The
+  export output also names the `--create` flag, so the
+  no-typing path is discoverable from the CLI too.
+- The typed command stays in the Train log as a detail line
+  for power users. It is never the required path.
+- Failures are plain sentences: Ollama not installed, Ollama
+  not answering, or Ollama's own error line as the detail —
+  never a traceback, never an instruction to open a terminal.
+
 ## v0.33.0 — 2026-11-18
 
 Joshua's order from his real-PC session, after the Granite

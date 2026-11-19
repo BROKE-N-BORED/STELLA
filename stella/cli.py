@@ -1767,11 +1767,29 @@ def cmd_export_gguf(args) -> int:
     print("Create the Ollama model with:")
     print(f"  {result['ollama_create']}")
     print(f"Then run it: ollama run {result['ollama_name']}")
+    print("(Or let Stella do it: add --create to the export command.)")
     if getattr(args, "create", False):
         # T89: --create runs the command instead of leaving it to
         # a copy-paste. The manual commands above are still printed.
         from .gguf import SUBPROCESS_TIMEOUT_SECONDS, create_in_ollama
+        from .ollama import list_models, name_taken
 
+        # v0.34.0: a model with the same name already in Ollama
+        # is replaced only after the user says so (default No,
+        # --yes skips the question) — the window asks the same
+        # way before its one-click put.
+        if name_taken(
+            result["ollama_name"], list_models()
+        ) and not getattr(args, "yes", False):
+            if not _confirm_destructive(
+                f"A model named {result['ollama_name']} is already "
+                "in Ollama. Replace it?"
+            ):
+                print(
+                    f"Left the Ollama model {result['ollama_name']} "
+                    "as it was."
+                )
+                return 0
         output = create_in_ollama(
             result["ollama_name"], result["modelfile"],
             # R82: a hung Ollama create stops on a timeout instead
@@ -3247,6 +3265,10 @@ def build_parser() -> argparse.ArgumentParser:
                    "name and Modelfile, instead of leaving it to a "
                    "copy-paste (T89). The manual commands are still "
                    "printed.")
+    p.add_argument("--yes", action="store_true",
+                   help="answer yes to questions (with --create: "
+                   "replace an Ollama model with the same name "
+                   "without asking first)")
     p.set_defaults(func=cmd_export_gguf)
 
     p = _cmd("probe", "refusal probe, before vs after tuning",

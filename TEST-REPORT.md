@@ -1,3 +1,133 @@
+# STELLA v0.34.0 — Test Report
+
+One click puts an exported model in Ollama. After a GGUF
+export the window used to show an `ollama create ...` command
+for the user to run themselves — the last terminal touchpoint
+in Stella, under Joshua's no-terminal-by-default rule
+(2026-11-18). Now the export's finish moment offers the
+button instead.
+
+## What was built
+
+- The gap, verified in the v0.33.0 tree before building: the
+  export job's finish message ended with "Run: ollama create
+  ..." (the presented path), and the T89 "Create in Ollama"
+  button sat in the Train panel's Checkpoints section — a
+  separate button the user had to find after exporting. The
+  engine already existed (gguf.create_in_ollama, T89, used by
+  the panel button and the CLI --create flag; requant shells
+  out to the same ollama binary). This version reuses that
+  mechanism and its curated error translation unchanged.
+- JobCard.finish_moment gains an optional action: with
+  action_text/on_action the card shows ONE button and waits
+  (no 2.5 s auto-hide — a button that vanishes is no button).
+  Reduced motion still shows the card, statically. A new job,
+  a plain finish, or the moment's end clears the action, so a
+  stale button can never fire. The export's on_finished offers
+  "Put it in Ollama" once the export record is on disk.
+- Found by the like-the-user drive and fixed in place: the
+  first-run checklist flipped the page away the instant the
+  export job ended (the exported project's status leaves the
+  checklist incomplete), hiding the card and the button with
+  it. _refresh_checklist now keeps the bento up while a
+  finish-moment action is pending, and the export refreshes
+  the checklist again after offering the button.
+- The create itself is one shared path, _put_in_ollama: the
+  finish-moment button and the Train panel button (renamed
+  "Put it in Ollama" — one action, one name) both run it. It
+  runs gguf.create_in_ollama on the job card with the R82
+  timeout, and its success line is "<name> is in Ollama now.
+  It will show up in Code Forge's model list." A successful
+  put refreshes the model list, so a second put asks first.
+- Replace confirm: ollama.name_taken(name, installed) — a
+  model created without a tag is filed under "<name>:latest",
+  so both spellings count. The window checks its cached model
+  list (T43: a check never fetches; no cached list, no
+  question asked on a guess) and asks with
+  QMessageBox.question defaulting to No. No = nothing runs,
+  and the log says the model was left as it was.
+- CLI parity: export-gguf --create (T89) gains the same ask —
+  a fresh list_models() check, _confirm_destructive ([y/N],
+  default No, EOF-safe), and a --yes flag that answers ahead
+  of time. Without --create the printed block now also names
+  the flag ("Or let Stella do it: add --create..."), so the
+  no-typing path is discoverable from the CLI.
+- The typed command stays in the Train log as a detail line
+  ("The command, if you want to run it yourself: ..."). It is
+  never the required path. The How to Use GGUF topic now
+  describes the button, not a command to run.
+- No export/training/probe/report-card/strengths/bridge/Hub
+  changes. No storage keys renamed. No new settings.
+
+## Suite (fresh unzip, 4 chunks, 2,134 tests)
+
+Run from a fresh `unzip` of the release zip, workspace
+TMPDIR, offscreen Qt, 4 chunks serially:
+
+- Chunk A (test_gui.py): 375 passed, 1 failed, of 376.
+- Chunk B (cli, chat_agent, gguf, train): 562 passed,
+  48 skipped.
+- Chunk C (v22-v34 + howto): 368 passed, 2 skipped.
+- Chunk D (everything else): 761 passed, 17 skipped.
+- Total: 2,066 passed, 67 skipped, 1 failed, 2,134
+  collected — the counts reconcile exactly.
+
+The one failure is
+test_install_training_button_disabled_while_job_runs
+(a cancel-then-500 ms timing assertion). It is NOT a
+v0.34.0 regression, proven by A/B: the same test fails
+3/3 solo on the pristine v0.33.0 tree in this environment
+too. It was already recorded as a load flake at v0.31.0
+(3/3 solo green then); on today's loaded box it fails in
+both trees. Nothing in this version touches the install
+training button or its job path.
+
+New tests: tests/test_v34.py, 19 tests — name_taken
+spellings, the JobCard action (waits, fires once, reduced
+motion, stale-action clearing), the export finish offering
+the button (and not offering it with no record), the
+replace question (default No captured; No runs nothing;
+Yes replaces), a failed create as a plain sentence, the
+real create with no ollama binary on PATH, the CLI ask
+(No skips, --yes replaces, yes replaces, free name never
+asks), the --create hint line, the How to Use wording, and
+the version pins (moved here from test_v33.py, per the
+standing convention).
+
+## Like the user (offscreen drive)
+
+Drove the real window at 1366x768 with a fake `ollama` binary
+on PATH (the real gguf.create_in_ollama ran it): export ->
+the finish card shows "GGUF ready" with a full-width "Put it
+in Ollama" button (screenshot 1) -> click -> the binary's log
+shows exactly `create lfm3-tool-tool-calls -f .../Modelfile`
+and the status bar reads "lfm3-tool-tool-calls is in Ollama
+now. It will show up in Code Forge's model list."
+(screenshot 2). With the name seeded as taken, the panel
+button asked "A model called lfm3-tool-tool-calls is already
+in Ollama. Replace it with this export?" (screenshot 3);
+clicking No ran no second create and the log said the model
+was left as it was. No typing anywhere in the path, no
+jargon on any screen.
+
+## Sweeps
+
+- CLI smoke from the fresh unzip: `stella 0.34.0`;
+  export-gguf --help shows --create and --yes.
+- Zip: testzip clean; stored modes are exactly 137 files
+  at 0o100644 and 11 at 0o100755 (file-type bits present);
+  extracted with the `unzip` CLI, the scripts land 755.
+- Em-dashes: none in any new visible string (the suite's
+  own pins cover the How to Use topics and pass); no bare
+  & in new labels.
+- Secrets grep over stella/*.py: clean.
+
+## Still needs Joshua's real-PC verdict
+
+- A real export -> Put it in Ollama against his real Ollama,
+  and the model showing up in Code Forge's list on his PC.
+- The standing tails carry over (real LFM3 proof run, real
+  llama.cpp merge, the R19-R23 gates).
 # STELLA v0.33.0 — Test Report
 
 When Stella does not know where a model's training files live,

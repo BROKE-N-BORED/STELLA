@@ -127,8 +127,8 @@ def _click_box_button(monkeypatch, prefix, seen):
 # -- Version --------------------------------------------------------
 
 
-# NOTE: the version tests moved to test_v33.py (test_version_is_0_33_0,
-# test_window_title_carries_version) — the version is 0.33.0 now.
+# NOTE: the version tests moved to test_v34.py (test_version_is_0_34_0,
+# test_window_title_carries_version) — the version is 0.34.0 now.
 
 
 # -- The bridge offer in the download flow --------------------------

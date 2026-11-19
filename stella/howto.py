@@ -371,8 +371,12 @@ converts the result to GGUF format, and quantizes it to the
 size you picked in the Quant list beside the button (Q4_K_M
 by default: 4-bit, the size that runs well on this PC). Pick
 a bigger quant for a sharper model that uses more disk, or a
-smaller one to save space. Then it shows you the exact ollama
-create command to run.
+smaller one to save space. When the export finishes, the card
+offers one button: Put it in Ollama. One click and the tuned
+model is in Ollama, ready to use. Nothing to type. The same
+button sits beside Export GGUF, for the last export. If a
+model with the same name is already in Ollama, Stella asks
+before replacing it.
 
 You need llama.cpp installed for the convert and quantize steps.
 Stella checks for it first and tells you if it is missing. The

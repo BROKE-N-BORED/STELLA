@@ -1458,6 +1458,17 @@ class JobCard(QFrame):
         self.progress.setMaximum(100)
         self.progress.setValue(0)
         layout.addWidget(self.progress)
+        # The finish-moment action (v0.34.0): one button a
+        # finished job can offer — the GGUF export's "Put it in
+        # Ollama". Hidden at rest; finish_moment shows it, and
+        # the moment then waits for the user instead of timing
+        # out: a button that vanishes in 2.5 s is no button.
+        self.action_btn = QPushButton("")
+        self.action_btn.setVisible(False)
+        self.action_btn.clicked.connect(self._run_action)
+        layout.addWidget(self.action_btn)
+        self._action = None
+        self._action_pending = False
         self.setVisible(False)
         # The finish-moment timer (T145): a real timer, not a
         # singleShot, so start()/finish() can cancel a moment that
@@ -1483,6 +1494,7 @@ class JobCard(QFrame):
         stopped: a new start always wins."""
         self._stop_morph()
         self._moment_timer.stop()
+        self._clear_action()
         self.setStyleSheet("")
         self.title_label.setText(title)
         self.status_label.setText("Starting...")
@@ -1534,23 +1546,45 @@ class JobCard(QFrame):
     def finish(self) -> None:
         self._stop_morph()
         self._moment_timer.stop()
+        self._clear_action()
         self.setStyleSheet("")
         self.setVisible(False)
 
-    def finish_moment(self, summary: str, reduced_motion: bool = False) -> None:
+    def finish_moment(self, summary: str, reduced_motion: bool = False,
+                      action_text: str | None = None,
+                      on_action=None) -> None:
         """The finish moment (T145): the card shows the summary in
         a gold glow for a beat, then hides — the job's end is a
         moment, not a vanishing. With reduced motion the card just
         hides: the summary is already in the log and the status
         bar, so nothing is lost. A morph still running stops first
-        (T149)."""
+        (T149).
+
+        With `action_text` (v0.34.0) the moment offers ONE button
+        and waits for the user: no auto-hide timer, because a
+        button that vanishes in 2.5 s is no button. Reduced motion
+        still shows the card, statically — the button has to be
+        there to click. Clicking fires `on_action` once."""
         self._stop_morph()
-        if reduced_motion:
+        if reduced_motion and action_text is None:
             self.finish()
             return
         self._moment_timer.stop()
         self.cancel_btn.setEnabled(False)
         self.status_label.setText(summary)
+        if action_text is not None:
+            self._action = on_action
+            self._action_pending = True
+            self.action_btn.setText(action_text)
+            self.action_btn.setVisible(True)
+            if not reduced_motion:
+                self.setStyleSheet(
+                    "QFrame#card { border: 2px solid #ffc93c; "
+                    "background-color: #3a3016; }"
+                )
+            self.setVisible(True)
+            return
+        self._clear_action()
         self.setStyleSheet(
             "QFrame#card { border: 2px solid #ffc93c; "
             "background-color: #3a3016; }"
@@ -1558,7 +1592,36 @@ class JobCard(QFrame):
         self.setVisible(True)
         self._moment_timer.start(self.FINISH_MOMENT_MS)
 
+    def _clear_action(self) -> None:
+        """Drop any finish-moment action: button hidden, callback
+        forgotten. A new job's start, a plain finish, and the
+        moment's own end all clear it, so a stale button can
+        never fire for a job that is already gone."""
+        self._action = None
+        self._action_pending = False
+        self.action_btn.setVisible(False)
+
+    def has_pending_action(self) -> bool:
+        """True while a finish-moment action waits for the user.
+        The main window keeps the job's page up while one is
+        pending: the first-run checklist would otherwise hide
+        the card, and the button with it, the moment the job
+        ends."""
+        return self._action_pending
+
+    def _run_action(self) -> None:
+        """The finish-moment action was clicked: fire it once.
+        The action clears itself first, so it cannot be clicked
+        twice; the callback starts its own job, whose start()
+        resets the card anyway."""
+        action, self._action = self._action, None
+        self._action_pending = False
+        self.action_btn.setVisible(False)
+        if action is not None:
+            action()
+
     def _end_finish_moment(self) -> None:
+        self._clear_action()
         self.setStyleSheet("")
         self.setVisible(False)
 
@@ -5801,8 +5864,8 @@ class MainWindow(QMainWindow):
         export_btns = QHBoxLayout()
         self.train_export_gguf_btn = QPushButton("Export GGUF")
         self.train_export_gguf_btn.clicked.connect(self.export_gguf_gui)
-        # T89: create the last GGUF export in Ollama, one click.
-        self.train_create_ollama_btn = QPushButton("Create in Ollama")
+        # T89: put the last GGUF export in Ollama, one click.
+        self.train_create_ollama_btn = QPushButton("Put it in Ollama")
         self.train_create_ollama_btn.clicked.connect(
             self.create_in_ollama_gui
         )
@@ -6915,8 +6978,8 @@ class MainWindow(QMainWindow):
             self.train_view_probe_btn,
         ):
             w.setEnabled(has_session and not running)
-        # T89: Create in Ollama is live only when the project has a
-        # GGUF export to create (its record is in the project dir).
+        # T89: Put it in Ollama is live only when the project has a
+        # GGUF export to put (its record is in the project dir).
         has_export = False
         if has_session and not running:
             try:
@@ -7301,7 +7364,12 @@ class MainWindow(QMainWindow):
             self.checklist_widget.setVisible(False)
             self.bento_widget.setVisible(True)
             return
-        if self._job_running():
+        if self._job_running() or self.job_card.has_pending_action():
+            # A running job keeps the bento up so the user can
+            # watch it — and so does a finish moment still
+            # offering its action button (v0.34.0): flipping to
+            # the checklist here would hide the card and the
+            # button with it.
             self.checklist_widget.setVisible(False)
             self.bento_widget.setVisible(True)
             return
@@ -10757,13 +10825,44 @@ class MainWindow(QMainWindow):
                 on_event=on_event,
                 should_stop=ctx.is_cancelled,
             )
+            # v0.34.0: the command stays in the log as a detail
+            # line for power users — it is never the required
+            # path. The finish moment offers the button instead.
             return (
                 f"GGUF ready: {result['gguf']} "
                 f"({result['gguf_bytes']:,} bytes).\n"
-                f"Run: {result['ollama_create']}"
+                f"The command, if you want to run it yourself: "
+                f"{result['ollama_create']}"
             )
 
-        self._start_job_worker(job, "Exporting GGUF", True)
+        def on_finished(ok, message):
+            # v0.34.0: the finish moment gains the one click —
+            # "Put it in Ollama" — so the exported model becomes
+            # usable without typing anything. The export record
+            # the engine just wrote names the model and its
+            # Modelfile; with no record there is nothing to put,
+            # and the moment stays a plain summary.
+            if not ok:
+                return
+            if self._last_gguf_export(profile, project) is None:
+                return
+            self.job_card.finish_moment(
+                message.splitlines()[0] if message else "GGUF ready.",
+                reduced_motion(),
+                action_text="Put it in Ollama",
+                on_action=lambda: self._put_in_ollama(
+                    profile, project
+                ),
+            )
+            # _on_job_finished already refreshed the checklist —
+            # before the action existed, so the page may have
+            # flipped away from the card. Refresh again with the
+            # action pending: the bento stays up for the button.
+            self._refresh_checklist()
+
+        self._start_job_worker(
+            job, "Exporting GGUF", True, on_finished=on_finished
+        )
         if estimate_text:
             self._train_log_line(
                 f"Exporting GGUF (merge, convert, quantize). "
@@ -10794,26 +10893,53 @@ class MainWindow(QMainWindow):
         return data
 
     def create_in_ollama_gui(self):
-        """Run `ollama create` for the last GGUF export (T89): the
-        model the user just exported becomes usable in Ollama
-        without a copy-paste. Runs on the job card, so a slow
-        create can be cancelled."""
+        """The Train panel's Put it in Ollama button (T89): the
+        picked project's last GGUF export, put in Ollama."""
         profile = self._selected_profile()
         project = self._selected_project()
         if not profile or not project:
             self._warn("Pick a project first.")
             return
+        self._put_in_ollama(profile, project)
+
+    def _put_in_ollama(self, profile, project):
+        """Put a project's last GGUF export in Ollama (T89,
+        v0.34.0): one click instead of a typed command — the
+        last terminal touchpoint in Stella. Runs `ollama
+        create` on the job card, so a slow create can be
+        cancelled. A model with the same name already in
+        Ollama is replaced only after the user says so
+        (default No). The name check reads the cached model
+        list (T43): with no cached list there is nothing to
+        check against, so no question is asked on a guess."""
         if self._job_already_running():
             return
         record = self._last_gguf_export(profile, project)
         if record is None:
             self._warn(
                 "No GGUF export yet for this project. Export GGUF "
-                "first, then create it in Ollama."
+                "first, then put it in Ollama."
             )
             return
         name = record.get("ollama_name") or f"{profile}-{project}"
         modelfile = record["modelfile"]
+        from .ollama import name_taken
+
+        if name_taken(name, MODEL_CACHE.models()):
+            answer = QMessageBox.question(
+                self, "Stella",
+                f"A model called {name} is already in Ollama. "
+                "Replace it with this export?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                self._train_log_line(
+                    f"Left the Ollama model {name} as it was."
+                )
+                self._say(
+                    f"Left the Ollama model {name} as it was."
+                )
+                return
         from .gguf import SUBPROCESS_TIMEOUT_SECONDS, create_in_ollama
 
         def job(ctx):
@@ -10826,10 +10952,22 @@ class MainWindow(QMainWindow):
             )
             if output:
                 ctx.log(output)
-            return f"Created in Ollama as {name}."
+            return (
+                f"{name} is in Ollama now. It will show up in "
+                "Code Forge's model list."
+            )
 
-        self._start_job_worker(job, "Creating in Ollama", False)
-        self._train_log_line(f"Creating {name} in Ollama...")
+        def on_finished(ok, message):
+            # The model list learns the new model, so a second
+            # put asks before replacing it.
+            if ok:
+                self.refresh_model_list()
+
+        self._start_job_worker(
+            job, "Putting it in Ollama", False,
+            on_finished=on_finished,
+        )
+        self._train_log_line(f"Putting {name} in Ollama...")
 
     def run_probe_gui(self):
         profile = self._selected_profile()

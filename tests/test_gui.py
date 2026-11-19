@@ -7222,7 +7222,7 @@ def test_probe_job_shows_per_prompt_progress(
 def test_create_in_ollama_button(
     window, seeded, tmp_path, monkeypatch, qapp
 ):
-    """T89 Done: Create in Ollama is greyed out with no export,
+    """T89 Done: Put it in Ollama is greyed out with no export,
     live with one, and runs `ollama create` on the job card."""
     import json as json_mod
 
@@ -7251,7 +7251,7 @@ def test_create_in_ollama_button(
     window.train_create_ollama_btn.click()
     _wait_for_job(window, qapp)
     assert seen == [("lfm3-tool-tool-calls", str(modelfile))]
-    assert "Created in Ollama as lfm3-tool-tool-calls." in (
+    assert "lfm3-tool-tool-calls is in Ollama now." in (
         window.statusBar().currentMessage()
     )
 

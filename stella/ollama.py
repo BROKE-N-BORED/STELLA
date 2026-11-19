@@ -63,6 +63,22 @@ def list_models(url: str | None = None, timeout: float = TIMEOUT_SECONDS) -> lis
     return sorted(names)
 
 
+def name_taken(name: str, installed: list[str]) -> bool:
+    """True when `name` is already among the installed tags.
+
+    Ollama files a model created without a tag under
+    "<name>:latest", so both spellings count as taken. A name
+    that carries its own tag only matches itself. Pure: the
+    caller supplies the installed list (the window passes its
+    cached list, the CLI a fresh one), so a check never fetches
+    on its own."""
+    if name in installed:
+        return True
+    if ":" not in name:
+        return f"{name}:latest" in installed
+    return False
+
+
 def list_model_sizes(url: str | None = None,
                      timeout: float = TIMEOUT_SECONDS) -> dict[str, int]:
     """Installed Ollama model tags with their size in bytes, or {}

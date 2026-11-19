@@ -55,12 +55,8 @@ def _run_cli_subprocess(home, *args):
 # -- Version --------------------------------------------------------
 
 
-def test_version_is_0_33_0(home):
-    """The version is 0.33.0 everywhere the CLI reports it."""
-    assert STELLA_VERSION == "0.33.0"
-    res = _run_cli_subprocess(home, "--version")
-    assert res.returncode == 0
-    assert "0.33.0" in res.stdout
+# NOTE: the version tests moved to test_v34.py (test_version_is_0_34_0,
+# test_window_title_carries_version) — the version is 0.34.0 now.
 
 
 @pytest.fixture()
@@ -84,11 +80,6 @@ def window(qapp, seeded, settings):
         win._hub_lookup_worker.wait(5000)
         qapp.processEvents()
     win.close()
-
-
-def test_window_title_carries_version(window):
-    """The window title carries STELLA 0.33.0."""
-    assert "0.33.0" in window.windowTitle()
 
 
 # -- The fake Hub ---------------------------------------------------

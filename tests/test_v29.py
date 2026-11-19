@@ -875,7 +875,7 @@ def test_cli_debug_report(home):
     reports = sorted((home / "logs").glob("debug-report-stella-*.txt"))
     assert len(reports) == 1
     text = reports[0].read_text(encoding="utf-8")
-    assert "DEBUG REPORT: stella 0.33.0" in text
+    assert "DEBUG REPORT: stella 0.34.0" in text
     assert str(home) in text  # the home setting, as the GUI sets it
     res = _run_cli_subprocess(home, "debug-report", "--json")
     assert res.returncode == 0
