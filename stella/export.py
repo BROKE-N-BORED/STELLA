@@ -35,7 +35,8 @@ import, naming the file. The manifest also carries the original
 keeps its history and a package found on disk can say which
 machine made it. Every export and import is recorded in the
 home's history log (`history.jsonl`, T179). A profile package
-also carries the profile notes as `profile-notes.md` (T166).
+also carries the profile notes as `profile-notes.md` (T166)
+and the attached report cards as `report-cards/` (v0.32.0).
 
 Import reads a package back, verifies it (required keys, known
 metamorph mode, sane names), and recreates the profile (if missing)
@@ -374,6 +375,8 @@ def estimate_profile_export_size(
     notes = store.profile_dir(profile) / "notes.md"
     if notes.is_file():
         total += notes.stat().st_size
+    # v0.32.0: the attached report cards travel with the profile.
+    total += _dir_bytes(store.profile_dir(profile) / "report-cards")
     return total
 
 
@@ -936,6 +939,10 @@ def export_profile(
     sleep cycles — the same payload a project export carries).
     A profile with zero projects exports fine: the package is
     the profile alone, and importing it brings the profile back.
+    The attached report cards travel with the profile
+    (v0.32.0), restored only when the profile is newly created
+    on import — an existing profile keeps its own cards, the
+    same rule as the profile notes.
 
     The profile package kind comes from T40
     (`kind: "stella-profile-export"`); import verifies it with
@@ -978,6 +985,14 @@ def export_profile(
     profile_notes_src = store.profile_dir(profile) / "notes.md"
     if profile_notes_src.is_file():
         total += profile_notes_src.stat().st_size
+    # v0.32.0: the attached report cards travel too.
+    cards_src = store.profile_dir(profile) / "report-cards"
+    total += _dir_bytes(cards_src)
+    card_count = (
+        sum(1 for item in cards_src.iterdir() if item.is_file())
+        if cards_src.is_dir()
+        else 0
+    )
     progress = _CopyProgress(total, on_progress, should_stop)
     # R38: the manifest is validated before anything is written —
     # see export_project.
@@ -1029,6 +1044,11 @@ def export_profile(
             contents = (
                 "No projects in this package: the profile alone.\n"
             )
+        if card_count:
+            contents += (
+                f"\nReport cards attached: {card_count} "
+                f"(in `report-cards/`).\n"
+            )
         (staging / "README.md").write_text(
             f"# {prof.get('display_name', prof['name'])}: Stella profile export\n\n"
             f"Profile (role: {role}, base: "
@@ -1051,6 +1071,11 @@ def export_profile(
             _copy_file_counted(
                 profile_notes_src, staging / "profile-notes.md", progress
             )
+        # v0.32.0: the report cards travel as report-cards/ at
+        # the package root, the same way sleep/ travels in a
+        # project package. Absent when the profile has none.
+        if cards_src.is_dir():
+            _copy_tree_counted(cards_src, staging / "report-cards", progress)
         if progress is not None:
             progress.check()
         manifest["files"] = _package_file_hashes(staging)
@@ -2599,6 +2624,8 @@ def _import_total_bytes(package_root: Path, payload_dirs) -> int:
     notes = package_root / "profile-notes.md"
     if notes.is_file():
         total += notes.stat().st_size
+    # v0.32.0: the report cards (profile packages only) count too.
+    total += _dir_bytes(package_root / "report-cards")
     return total
 
 
@@ -3044,6 +3071,16 @@ def import_profile_export(
             if notes_src.is_file():
                 store.write_profile_notes(
                     slug, notes_src.read_text(encoding="utf-8")
+                )
+            # v0.32.0: the report cards come back with a newly
+            # created profile, the same rule as the notes — a
+            # profile that already existed keeps its own cards.
+            cards_src = path / "report-cards"
+            if cards_src.is_dir():
+                _copy_tree_counted(
+                    cards_src,
+                    store.profile_dir(slug) / "report-cards",
+                    progress,
                 )
         elif choice == "take":
             merged_before = {

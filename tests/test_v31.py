@@ -8,26 +8,11 @@ plain what-it-does line, the readiness button, the projects list,
 and the tree role filter still working off derived roles.
 """
 
-import os
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
 
-from stella.model import STELLA_VERSION
-
 ROOT = Path(__file__).resolve().parent.parent
-
-
-def _run_cli_subprocess(home, *args):
-    """Run the real `python -m stella.cli` in a subprocess."""
-    env = dict(os.environ)
-    env["STELLA_HOME"] = str(home)
-    return subprocess.run(
-        [sys.executable, "-m", "stella.cli", *args],
-        cwd=ROOT, env=env, capture_output=True, text=True, timeout=60,
-    )
 
 
 @pytest.fixture()
@@ -63,17 +48,8 @@ def seed_show():
     SHOW_CACHE.reset()
 
 
-def test_version_is_0_31_0(home):
-    """The version is 0.31.0 everywhere the CLI reports it."""
-    assert STELLA_VERSION == "0.31.0"
-    res = _run_cli_subprocess(home, "--version")
-    assert res.returncode == 0
-    assert "0.31.0" in res.stdout
-
-
-def test_window_title_carries_version(window):
-    """The window title carries STELLA 0.31.0."""
-    assert "0.31.0" in window.windowTitle()
+# (v0.32.0: the version pins moved to tests/test_v32.py — the
+# version test lives in the current version's file.)
 
 
 # -- strengths table ------------------------------------------------

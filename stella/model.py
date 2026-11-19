@@ -7,6 +7,7 @@ Home layout (default ~/.stella, overridable with STELLA_HOME):
         <profile-slug>/
           profile.json        # manifest: role, Ollama tag, base ref, config
           notes.md            # profile notes (T166), with notes.md.1 backup
+          report-cards/       # attached report cards (v0.32.0)
           projects/
             <project-slug>/
               project.json    # manifest: dataset, settings, metamorph block
@@ -31,7 +32,7 @@ from pathlib import Path
 from .autoconfig import compute_settings, measure_pc
 from .strengths import derived_role
 
-STELLA_VERSION = "0.31.0"
+STELLA_VERSION = "0.32.0"
 
 # Slug: lowercase letters, digits, dash, underscore. Must start alnum.
 # No dots, no slashes — a slug can never climb out of its directory.

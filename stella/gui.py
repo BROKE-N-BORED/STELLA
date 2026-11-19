@@ -128,6 +128,12 @@ from .ollama import MODEL_CACHE, SHOW_CACHE, ollama_url
 from .ollama_bridge import suggest_hf_repos
 from .requant import DEFAULT_QUANT, KNOWN_QUANTS
 from .provision import is_hf_repo_id
+from .report_cards import (
+    add_report_card,
+    list_report_cards,
+    remove_report_card,
+    strengths_from_cards,
+)
 from .strengths import strengths_for_tag
 from .style import (
     DISABLED,
@@ -1593,6 +1599,13 @@ class ProfileWindow(QDialog):
     whether its training files are ready (with one button to get
     them), and its projects. No jargon anywhere in it.
 
+    Report cards (v0.32.0) sit in the simple view too, by the
+    strengths: graded test results attached to the profile. An
+    OST card changes what the strengths say — the card's measured
+    strengths beat the built-in table, and the window says where
+    they came from. Cards from anywhere else are kept here to
+    open, not read.
+
     Everything technical lives behind one Details flap, closed by
     default and still fully working: the derived role (read-only —
     nobody assigns roles by hand anymore), the governing-seat
@@ -1642,6 +1655,45 @@ class ProfileWindow(QDialog):
         self.strengths_label = QLabel("")
         self.strengths_label.setWordWrap(True)
         layout.addWidget(self.strengths_label)
+        # Report cards (v0.32.0): graded test results for this
+        # model, attached here. An OST card changes what the
+        # strengths above say — card evidence beats the built-in
+        # table. Cards from anywhere else are kept here to open,
+        # not read. The list shows name and month; the line under
+        # it says what the selected card is. Add copies the file
+        # into the profile, so the original may move.
+        layout.addWidget(QLabel("Report cards"))
+        self.cards_list = QListWidget()
+        self.cards_list.setMinimumHeight(70)
+        self.cards_list.itemDoubleClicked.connect(self._open_card)
+        self.cards_list.currentItemChanged.connect(
+            self._on_card_selected
+        )
+        layout.addWidget(self.cards_list)
+        self.cards_empty_label = QLabel("No report cards yet.")
+        layout.addWidget(self.cards_empty_label)
+        self.cards_detail_label = QLabel("")
+        self.cards_detail_label.setWordWrap(True)
+        layout.addWidget(self.cards_detail_label)
+        card_row = QHBoxLayout()
+        self.card_add_btn = QPushButton("Add a report card")
+        self.card_add_btn.clicked.connect(self._add_card)
+        card_row.addWidget(self.card_add_btn)
+        self.card_open_btn = QPushButton("Open")
+        self.card_open_btn.setToolTip(
+            "Open the selected report card in its usual program."
+        )
+        self.card_open_btn.clicked.connect(self._open_card)
+        self.card_open_btn.setEnabled(False)
+        card_row.addWidget(self.card_open_btn)
+        self.card_remove_btn = QPushButton("Remove")
+        self.card_remove_btn.setToolTip(
+            "Remove the selected report card from this profile."
+        )
+        self.card_remove_btn.clicked.connect(self._remove_card)
+        self.card_remove_btn.setEnabled(False)
+        card_row.addWidget(self.card_remove_btn)
+        layout.addLayout(card_row)
         # Training files: ready or not, with one button to get
         # them. The button calls the main window's download, so
         # the bridge offer (v0.30.0) and the progress bar live
@@ -1838,6 +1890,11 @@ class ProfileWindow(QDialog):
         # The /api/show fetch worker (T165): one fetch at a time,
         # tracked so close waits for it.
         self._show_worker: ModelShowWorker | None = None
+        # The newest OST card's strengths (v0.32.0), refreshed
+        # with the card list — the strengths label reads this
+        # cache instead of re-parsing the cards on every tag
+        # keystroke.
+        self._card_strengths = None
         for widget, signal in (
             (self.display_edit, self.display_edit.textChanged),
             (self.tag_combo, self.tag_combo.currentTextChanged),
@@ -1863,7 +1920,9 @@ class ProfileWindow(QDialog):
         # Ctrl+S saves here (T82); Tab walks the form in visual order.
         QShortcut(QKeySequence(shortcut_for("save")), self, self.save)
         _chain_tab_order([
-            self.display_edit, self.download_btn, self.projects_list,
+            self.display_edit, self.cards_list, self.card_add_btn,
+            self.card_open_btn, self.card_remove_btn,
+            self.download_btn, self.projects_list,
             self.new_project_btn, self.seat_combo,
             self.tag_combo, self.base_edit, self.config_edit,
             self.deps_list, self.dep_add_edit, self.dep_add_btn,
@@ -2061,14 +2120,143 @@ class ProfileWindow(QDialog):
             return
         role = (p.get("role") or "").strip()
         self.role_label.setText(role if role else "No role yet")
+        self._refresh_cards()
         self._refresh_strengths()
         self._refresh_readiness()
         self._refresh_projects()
 
+    def _refresh_cards(self):
+        """The report cards list (v0.32.0): name and month per
+        row, the selected card's one line under it, and the
+        cached card strengths the strengths label reads. An
+        empty profile says so instead of a blank list."""
+        try:
+            cards = list_report_cards(self._main.store, self._slug)
+        except StellaError:
+            cards = []
+        self._cards = cards
+        self.cards_list.clear()
+        for card in cards:
+            text = card["name"]
+            if card["date"]:
+                text += f" - {card['date']}"
+            self.cards_list.addItem(text)
+        self.cards_list.setVisible(bool(cards))
+        self.cards_empty_label.setVisible(not cards)
+        self._card_strengths = strengths_from_cards(
+            self._main.store, self._slug
+        )
+        self._on_card_selected()
+
+    def _on_card_selected(self, *_args):
+        """A card was picked (or the list was rebuilt): the line
+        under the list says what it is, and Open/Remove follow
+        the selection."""
+        item = self.cards_list.currentItem()
+        if item is None:
+            self.cards_detail_label.setText("")
+            self.card_open_btn.setEnabled(False)
+            self.card_remove_btn.setEnabled(False)
+            return
+        row = self.cards_list.row(item)
+        if 0 <= row < len(getattr(self, "_cards", [])):
+            self.cards_detail_label.setText(self._cards[row]["line"])
+        else:
+            self.cards_detail_label.setText("")
+        self.card_open_btn.setEnabled(True)
+        self.card_remove_btn.setEnabled(True)
+
+    def _selected_card(self):
+        """The selected card's record, or None."""
+        item = self.cards_list.currentItem()
+        if item is None:
+            return None
+        row = self.cards_list.row(item)
+        cards = getattr(self, "_cards", [])
+        if 0 <= row < len(cards):
+            return cards[row]
+        return None
+
+    def _add_card(self):
+        """Add a report card (v0.32.0): one file picker, the
+        file is copied into the profile. The strengths follow
+        the new card at once."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Add a report card", str(Path.home()),
+            "Report cards (*.json *.pdf *.md *.txt);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            add_report_card(self._main.store, self._slug, path)
+        except StellaError as exc:
+            QMessageBox.warning(self, "Stella", str(exc))
+            return
+        self._refresh_cards()
+        self._refresh_strengths()
+
+    def _remove_card(self):
+        """Remove the selected report card: the copy in the
+        profile is deleted, the original file is untouched.
+        Confirm first, defaulting to No — the copy may be the
+        only one left. The strengths fall back at once."""
+        card = self._selected_card()
+        if card is None:
+            return
+        answer = QMessageBox.question(
+            self, "Stella",
+            f"Remove the report card {card['name']} from this "
+            "profile? The copy in Stella is deleted.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        try:
+            remove_report_card(self._main.store, self._slug, card["name"])
+        except StellaError as exc:
+            QMessageBox.warning(self, "Stella", str(exc))
+            return
+        self._refresh_cards()
+        self._refresh_strengths()
+
+    def _open_card(self, *_args):
+        """Open the selected report card in its usual program."""
+        card = self._selected_card()
+        if card is None:
+            return
+        opened = QDesktopServices.openUrl(
+            QUrl.fromLocalFile(card["path"])
+        )
+        if not opened:
+            QMessageBox.warning(
+                self, "Stella",
+                "Stella could not open that report card.",
+            )
+
     def _refresh_strengths(self, *_args):
         """Good at / Not good at for the tag in the field (the
         field may hold an unsaved change — the lookup follows it,
-        the way the model info does). Unknown models say so."""
+        the way the model info does). An attached OST report card
+        beats the built-in table (v0.32.0): the card's measured
+        strengths show, with where they came from. Unknown models
+        say so."""
+        if self._card_strengths is not None:
+            entry = self._card_strengths
+            lines = []
+            if entry["good"]:
+                lines.append(
+                    "Good at: " + ", ".join(entry["good"]) + "."
+                )
+            if entry["not_good"]:
+                lines.append(
+                    "Not good at: " + ", ".join(entry["not_good"]) + "."
+                )
+            if not lines:
+                lines.append("No clear strengths or weaknesses.")
+            lines.append(entry["source"])
+            self.strengths_label.setText("\n".join(lines))
+            return
         tag = self.tag_combo.currentText().strip()
         entry = strengths_for_tag(tag)
         if entry is None:

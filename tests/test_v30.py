@@ -116,8 +116,8 @@ def _click_box_button(monkeypatch, prefix, seen):
 # -- Version --------------------------------------------------------
 
 
-# NOTE: the version tests moved to test_v31.py (test_version_is_0_31_0,
-# test_window_title_carries_version) — the version is 0.31.0 now.
+# NOTE: the version tests moved to test_v32.py (test_version_is_0_32_0,
+# test_window_title_carries_version) — the version is 0.32.0 now.
 
 
 # -- The bridge offer in the download flow --------------------------
@@ -566,14 +566,14 @@ def test_guard_matching_repo_downloads_with_no_warning(
 def test_guard_unknown_tag_downloads_with_no_warning(
     window, monkeypatch
 ):
-    """A tag the bridge does not know (Granite is not in the map,
-    and must not be added unguessed): no warning fires, the
-    download proceeds as today. This is Joshua's actual case —
-    his Granite profile still has LFM3's repo typed in, and only
-    a verified map entry or a manual fix in the profile window
-    can catch it."""
+    """A tag the bridge does not know (the reviewer is not in
+    the map — unverified — and must not be added unguessed):
+    no warning fires, the download proceeds as today. Granite
+    used to be this test's example; it is in the map now
+    (v0.32.0, verified), so the guard test for it lives in
+    test_v32.py."""
     _guard_profile(
-        window, "granite", "huihui_ai/granite4.1-abliterated:3b",
+        window, "reviewer", "dolphinlabs/qwen3.5-uncensored:latest",
         "LiquidAI/LFM3-1.7B",
     )
 
@@ -583,7 +583,7 @@ def test_guard_unknown_tag_downloads_with_no_warning(
     monkeypatch.setattr(QMessageBox, "exec", _no_dialog)
     started = []
     _mock_download(window, monkeypatch, started)
-    window.start_download("granite")
+    window.start_download("reviewer")
     assert started == ["LiquidAI/LFM3-1.7B"]
 
 

@@ -153,7 +153,10 @@ never bundled. A profile package with no projects carries an
 empty list. The profile notes travel at the package root as
 `profile-notes.md` (v0.21.0, T166) when the profile has any; on
 import they are restored only when the profile is newly created
-— an existing profile keeps its own notes. Import restores the
+— an existing profile keeps its own notes. The attached report
+cards travel as `report-cards/` at the package root (v0.32.0)
+under the same rule: restored only for a newly created profile.
+Import restores the
 profile and every project in one atomic step; it refuses while
 any of the package's projects already exist in that profile,
 naming them.

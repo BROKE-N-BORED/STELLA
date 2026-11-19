@@ -1,3 +1,132 @@
+# STELLA v0.32.0 — Test Report
+
+Report cards attach to a model's profile, and Stella reads them to
+know what the model is good and weak at. OST cards are understood;
+other sources' cards are stored, not understood. Plus one verified
+bridge entry (Granite 4.1), disjoint from report cards.
+
+## What was built
+
+- New module `stella/report_cards.py`: attach (copy in, never link),
+  list (newest first), remove, and parse OST cards. Per-file cap
+  10 MB, refused in plain words. Storage:
+  `profiles/<slug>/report-cards/`; no manifest, the directory
+  listing is the list.
+- OST parser handles five shapes, all found on disk first (see
+  "OST format" below): per-template result files, a single
+  per-model summary block, multi-model summaries keyed by slug,
+  OST GUI reports (`{"generated", "models": [...]}`), and JSON
+  lists of per-template results. Multi-model files pick the entry
+  matching the profile's tag (case-insensitive); no match means
+  not understood, never guessed. A bad file never raises.
+- Strengths: score >= 80 is good at, <= 40 is not good at, in
+  between is silence; speed is never a strength; unknown template
+  ids are skipped, never guessed. Card evidence beats the
+  built-in strengths table at display time; the table itself is
+  unchanged. Newest card wins; removing it falls back at once.
+  Source line: "From its OST report card, Nov 2026."
+- Profile window (simple view): "Report cards" section after the
+  strengths — list (name + month-year), one-line detail for the
+  selected card, Add / Open / Remove. Cards are immediate store
+  ops, not form edits. Remove confirms, defaulting to No.
+- Export/import: profile export carries `report-cards/` (same
+  pattern as sleep/ in project export); import restores cards
+  only for a newly created profile — an existing profile keeps
+  its own cards. Clone does NOT carry cards (same as notes).
+- Bridge: `huihui_ai/granite4.1-abliterated:3b` maps to
+  `ibm-granite/granite-4.1-3b-base` (verified on the Hub
+  2026-11-18: config.json + 2 safetensors, transformers library,
+  zero GGUF files). The mismatch guard now catches the LFM3 repo
+  typed into a Granite profile. The reviewer and bonsai-2 stay
+  unknown (unverified / no repo).
+
+## OST format (found on disk, read-only)
+
+- Per-template result file: `ost/results/<slug>/<system>/
+  <YYYY-MM-DD-HHMMSS>-<template>.json` (OST v22 `save_run_file`).
+  Fields: template, template_name, template_score, passed, total,
+  capability, timestamp, model, model_slug, tasks, avg_decode_tok_s.
+- Per-model summary JSON: dict keyed by model slug; each value has
+  model, slug, templates_scored, overall_score, mean_decode_tok_s,
+  templates (id -> name, capability, score, passed, total, ...).
+- OST GUI report: `bench-results-<stamp>.json` with `models` as a
+  LIST of per-model results.
+- Fixtures use the real LFM3 numbers from
+  `results-summary-3models.json` (overall 70.0, 15 templates:
+  tool_calling/structured_output/instruction/grounded_qa/
+  summarization/refusal 100, math 90, coding/knowledge 80,
+  multi_turn/reasoning 60, code_repair/role_following 40,
+  long_context/planning 0, speed score None).
+- PDFs are STORED, not parsed — Stella has no PDF parser
+  dependency. The JSON is the machine-readable truth.
+
+## Suite (fresh unzip, 5 chunks, 2,093 tests)
+
+- Chunk 00: 416 passed.
+- Chunk 01: 365 passed, 8 skipped.
+- Chunk 02a: 221 passed, 1 failed — test_job_card_morphs_from_
+  button_rect, a load flake (passed 3/3 solo).
+- Chunk 02b: 210 passed, 3 skipped, 7 failed — all installer
+  exec-bit tests, an artifact of the verifier's first unzip
+  (Python zipfile drops modes). Re-extracted with `unzip`
+  (modes restored) and test_installer.py re-ran clean:
+  61 passed, 3 skipped.
+- Chunk 03: 397 passed, 23 skipped.
+- Chunk 04: 408 passed, 33 skipped, 1 failed —
+  test_cli_debug_report pinned the old version string
+  ("DEBUG REPORT: stella 0.31.0"); a real stale pin missed in
+  the version move. Fixed in place to 0.32.0 and re-verified.
+- Totals: 2,017 passed, 67 skipped, 9 failed-and-explained
+  above (1 load flake, 7 unzip artifacts, 1 stale pin fixed).
+
+## Like the user (offscreen drive)
+
+`drive_report_cards.py` drives the real Add button (picker
+answered), the real Remove button (confirm answered Yes), and
+screenshots each step. Checked by eye: the empty state reads
+"No report cards yet." with Add enabled and Open/Remove greyed;
+after adding the LFM3 card the strengths change to the card's
+(good: answering from given text, following instructions, saying
+no to bad requests, summing up, using tools, writing in a set
+format, maths, knowledge questions, writing code; not good:
+making plans, reading long documents, fixing code, staying in
+character) with "From its OST report card, Nov 2026."; the
+selected card reads "OST tested this model: overall 70 out of
+100."; after removing, the strengths fall back to the table.
+No jargon anywhere on screen.
+
+## Defects found and fixed in place
+
+- One real defect, in a test: `test_cli_debug_report`
+  (test_v29.py) pinned the debug report header to the old
+  version ("DEBUG REPORT: stella 0.31.0") — a stale pin missed
+  when the version tests moved. Updated to 0.32.0, re-verified.
+- Two environmental failures during verification, both
+  diagnosed and re-verified green:
+  1. `test_second_main_exits_zero_while_first_runs` failed 3/3
+     solo: the workspace TMPDIR had been deleted mid-run, so
+     Qt's tempPath pointed at a missing directory and
+     QLocalServer.listen failed with "Name error" — the first
+     instance ran without the single-instance guard. Recreated
+     the TMPDIR; the test passed 3/3.
+  2. Verify chunk 01 failed with 97 PermissionError errors: a
+     system-wide EPERM write burst (AGENTS.md). Waited for a
+     clear window (tempfile.mkdtemp probe loop) and re-ran.
+  3. Seven installer exec-bit tests failed in chunk 02b: the
+     verifier's first unzip used Python zipfile, which drops
+     file modes. Re-extracted with `unzip`; test_installer.py
+     re-ran clean (61 passed, 3 skipped).
+
+## Still needs Joshua's real-PC verdict
+
+- Attaching a real OST card from his PC (the fixtures are real
+  format + real numbers, but the attach flow has only run
+  offscreen in the sandbox).
+- The Granite download: his Granite profile's stored LFM3 repo
+  should now warn and offer the IBM base on "Get its weights".
+- The LFM3 proof run itself (unchanged from v0.31.0).
+
+
 # STELLA v0.31.0 — Test Report
 
 Measured 2026-11-18 by the builder from a fresh unzip of the

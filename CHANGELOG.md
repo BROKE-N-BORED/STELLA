@@ -1,5 +1,41 @@
 # Changelog
 
+## v0.32.0 — 2026-11-18
+
+Joshua's order from his real-PC session the same day v0.30.0
+shipped: "I wil also have training report cards from OST and
+other sources that will be abke to be uploaded as well for yhe
+profile of each base model". This version is the answer.
+
+- Report cards live in the Profile window, by the strengths.
+  "Add a report card" is one button and one file picker; the
+  file is copied into the profile's own folder, so the original
+  can move. Each card lists with its name, its month, and one
+  plain-words line. Cards open in their usual program and can
+  be removed (confirm first, defaulting to No).
+- OST cards are understood. Stella reads the graded
+  per-template scores out of OST's real result formats — the
+  per-model summary JSON, a single per-template result file,
+  the OST GUI report, or a list of result files — and the
+  strengths come from the newest card instead of the built-in
+  table, with the source named ("From its OST report card, Nov
+  2026"). A card for a different model is flagged, never
+  applied. Cards from anywhere else are stored, not read: the
+  strengths stay as they were, and the window says so.
+- Report cards travel with the profile on export and come back
+  on import, under the same rule as the profile notes: a
+  profile that already exists keeps its own cards.
+- A file over 10 MB is refused in plain words. A damaged or
+  unfamiliar card never breaks the window: it lists as a stored
+  file, and the strengths fall back to the table.
+- One verified bridge entry, disjoint from report cards:
+  huihui_ai/granite4.1-abliterated:3b now maps to its IBM base
+  ibm-granite/granite-4.1-3b-base (verified on the Hub
+  2026-11-18: config.json + 2 safetensors, transformers
+  library, zero GGUF files). The mismatch guard now catches
+  the LFM3 repo Joshua typed into his Granite profile. The
+  reviewer and bonsai-2 stay unknown (unverified / no repo).
+
 ## v0.31.0 — 2026-11-18
 
 Joshua's order from his real-PC session the same day v0.30.0

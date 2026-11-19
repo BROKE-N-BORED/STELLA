@@ -17,10 +17,14 @@ file Ollama runs — but the user knows their models by Ollama tag
 - ``bridge_error_message`` — the plain-words train refusal: what
   the problem is, what to do, and the `stella bridge` command.
 
-Deliberately not in the map: MiniCPM5-Heretic's Ollama tag maps
-to its base (openbmb/MiniCPM5-2B, verified), but bonsai-2 has no
-verifiable Hub transformers repo — its author has no models on
-the Hub at all — so it stays unknown rather than guessed.
+Deliberately not in the map: bonsai-2 has no verifiable Hub
+transformers repo — its author has no models on the Hub at all
+— so it stays unknown rather than guessed, and the reviewer
+(dolphinlabs/qwen3.5-uncensored) is unverified, so it stays
+unknown too. Granite 4.1 maps to its base the same way
+MiniCPM5-Heretic and the abliterated coder do (verified
+2026-11-18: ibm-granite/granite-4.1-3b-base has config.json +
+2 safetensors, transformers library, zero GGUF files).
 """
 
 from __future__ import annotations
@@ -28,9 +32,10 @@ from __future__ import annotations
 from pathlib import Path
 
 # (Ollama tag, Hugging Face repo, where the suggestion comes from).
-# Every repo was verified to exist on the Hub on 2026-11-15. Tags
-# are matched lowercased; a tag without a version matches every
-# versioned entry for that model.
+# Every repo was verified to exist on the Hub (the first nine on
+# 2026-11-15, the Granite base on 2026-11-18). Tags are matched
+# lowercased; a tag without a version matches every versioned
+# entry for that model.
 KNOWN_BRIDGE: tuple[tuple[str, str, str], ...] = (
     ("lfm3", "LiquidAI/LFM3-1.7B",
      "Liquid AI's own repo for this model"),
@@ -50,6 +55,11 @@ KNOWN_BRIDGE: tuple[tuple[str, str, str], ...] = (
      "Qwen/Qwen2.5-Coder-1.5B",
      "the base model this Ollama tag is tuned from"),
     ("maternion/minicpm5-heretic:2b", "openbmb/MiniCPM5-2B",
+     "the base model this Ollama tag is tuned from"),
+    # v0.32.0: verified on the Hub 2026-11-18 (config.json + 2
+    # safetensors, transformers library, zero GGUF files).
+    ("huihui_ai/granite4.1-abliterated:3b",
+     "ibm-granite/granite-4.1-3b-base",
      "the base model this Ollama tag is tuned from"),
 )
 

@@ -137,7 +137,16 @@ to see its projects. Double-click a profile to open its window.
 The profile window shows the plain facts first: the model's name,
 what it does, what it is good and not good at, whether its
 training files are downloaded (with one button to get them), and
-its projects. Double-click a project there to open it.\n\nThe technical details live behind one Details flap: the role
+its projects. Double-click a project there to open it.\n\nReport cards live in the profile window too, by the strengths.
+A report card is a graded test result for the model, from OST
+or from anywhere else. Add a report card copies the file into
+the profile, so the original can move. When the card is an OST
+result, Stella reads its scores and the strengths above come
+from the card instead of the built-in table; the window says
+where they came from. The newest card wins when several are
+attached. Cards from anywhere else are kept here to open.
+Stella does not read them, and the strengths stay as they were.
+Report cards travel with the profile when it is exported.\n\nThe technical details live behind one Details flap: the role
 Stella worked out for the model, the governing seat it is bound
 for (if any), the Ollama tag, the Hugging Face repo (where
 training loads the base model from), and the training config.
