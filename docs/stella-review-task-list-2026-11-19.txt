@@ -1,0 +1,92 @@
+STELLA REVIEW TASK LIST - 2026-11-19 (v0.34.0)
+Status: all 83 tasks are OPEN. None have been started.
+From the full-product review of Stella v0.34.0: 85 findings (0 P0, 18 P1, 37 P2, 30 P3) merged into 83 tasks (18 P1, 37 P2, 28 P3). Full details: docs/stella-review-task-list-2026-11-19.md and docs/review-2026-11-19.md
+
+P1:
+N1. Requant reads almost every real model's quant wrong (its type table is shifted by one), so the shown quant, the size estimate, and the double-quant warning are all wrong
+N2. The live Hugging Face lookup offers models that are not the model you picked
+N3. A report card for a different model is applied as this model's strengths
+N4. Attaching a model's whole OST run shows strengths from one test only, not the whole run
+N5. A passed refusal probe keeps passing after the model is retrained or its base is changed
+N6. Requant deletes its only copy of the smaller file after an Ollama create it never checked
+N7. Distill reports success when every prompt in the run failed, as long as an old dataset file has 2 rows
+N8. Chat can announce 'all done' for a plan whose steps failed
+N9. Chat can set a model's repo with no user yes at all — and a bare 'confirm' loops forever
+N10. Chat runs the whole plan when the user says 'yes, but not yet' or 'go ahead and do something else'
+N11. The main screen permanently tells the user to change training settings from the terminal
+N12. The 'training packages missing' message names Python packages, a terminal command, and a panel that does not exist
+N13. The export probe-gate refusal is unexplained jargon plus a terminal command, and following it loops
+N14. When Stella cannot start, its failure popup tells the user to run a terminal command and never names the double-click fix
+N15. Uninstall leaves the ~2 GB training wheel cache behind and says removal is finished
+N16. The CLI's sleep-delete and sleep-prune delete sleep cycles for good with no 'are you sure?' and no --yes flag
+N17. A sleep cycle interrupted during its first checkpoint save can never sleep again, and the error names the wrong problem
+N18. How to Use Troubleshooting sends the user to a button that is not there, and back to the manual Hugging Face hunt (with the exact wrong-repo example)
+
+P2:
+N19. The no-repo ending from Download sends the user hunting by hand and does not open the profile window, while the other path into the same ending does
+N20. A Step cap number sits on the main screen — a training setting the brief says should not be there (plus pre-set numbers in export, prune, and distill)
+N21. Chat with Ollama down contradicts itself: it says pick a model in Settings, then treats typed text as a model name and suggests a cloud model the user cannot use
+N22. Chat permanently shows 'Step 4 of 8: Recipe.' — a step from a list the user never sees, in words never explained
+N23. At 1366x768 the main window is one ~2,020 px scroll and the export/probe buttons sit far below the fold behind tall empty sections
+N24. 'Estimate unavailable.' gives no reason and no next step, and the Estimate button answers with repo jargon plus a terminal command
+N25. Probes run from chat are saved as 'gate' runs even for models that hold no seat, so the results window later shows a gate verdict that was never a gate
+N26. The refusal judge scores two plainly compliant answers as refusals
+N27. Dreaming that produces nothing usable is reported as if it worked, and no dream outcome or skip reason is saved in the cycle report
+N28. The --steps cap is honoured by the training loop but ignored by the disk guard and the dry run, so a 5-step proof run can be refused for a full run's checkpoints
+N29. The merge RAM guard judges only the fixed 8 GB ceiling, never the RAM actually free; the replay check and the probe load the base with no RAM check at all
+N30. Distill's 'the teacher was slow, not down' wording never fires on the real path (a regression of the closed R30 fix)
+N31. Requant's Ollama create has no timeout, unlike every other step — a hung create hangs requant forever
+N32. Convert and quantize outputs are never checked to actually be GGUF files before being reported ready
+N33. The bridge offers another size's weights labelled as this model's own repo, and the strengths table likewise gives one size's measured strengths to other sizes
+N34. The mismatch guard only runs at download time — never before training on already-downloaded weights — and it re-warns forever after the user deliberately keeps a repo
+N35. The built-in strengths table says LFM3 is good at reading long documents; Stella's own OST measurement scored it 0% at exactly that
+N36. The Hub lookup reports 'nothing found' when Hugging Face actually failed mid-search, instead of 'couldn't reach it, try again'
+N37. The Hub lookup's 'offerable' check passes a repo whose real weights are a GGUF file (a small tokenizer.safetensors is enough)
+N38. Provision calls weights 'ready' when a weights file is a dangling symlink to a download that never finished
+N39. A local weights folder set as the base is treated as a Hugging Face repo id and reported missing, with a dead-end 'repo does not exist' message
+N40. Cloning a profile silently drops its report cards and its profile notes, and nothing anywhere says so
+N41. A chat model that has been removed (HTTP 404) dead-ends in raw provider wording, and the stale-list warning only ever shows in Settings, never in chat or the CLI
+N42. Unexpected chat errors are shown to the user with the raw exception text, unscrubbed (paths, URLs, even key-shaped strings)
+N43. Saving a key over a damaged providers.json silently drops the other providers' keys from the live file, and nobody tells the user
+N44. The CLI help promises --json works everywhere except 7 named commands, but 5 more refuse it — with a reason that is not true for them — and two already contain finished, unreachable --json code
+N45. train --dry-run --json failures print no JSON at all, while the same failure in sibling commands prints the JSON error document
+N46. prune-checkpoints reports cheerful success (exit 0) for a profile or project that does not exist; delete-checkpoint blames the checkpoint instead
+N47. The CLI never got v0.34.0's 'Put it in Ollama' name — it still says 'Create the Ollama model' and 'Created in Ollama as', so the action has two names
+N48. create-project accepts a dataset file that does not exist and reports plain success; the dead path only fails later, at train time
+N49. Every installer and doctor retry message says 'run bash install.sh again' — even inside the double-click windows, where the user cannot type it and the icon they used is never named
+N50. The training install's first step is minutes of silence — no progress line and no network check before the slow package-listing step
+N51. The README's LFM3 proof run tells the user to press a 'Start training' button that does not exist
+N52. The README's version and feature record stops at v0.24.0 — report cards, the live lookup, and Put it in Ollama are nowhere in it
+N53. The README proof run still teaches assigning a role by hand (--role fast), which v0.31.0 abolished
+N54. The profile window's own help says the Ollama tag is 'used for dreaming and the refusal probe'; the guide and the code say the probe does not use it
+N55. How to Use never mentions the mismatch warning, and its Bridge topic describes only the old curated lookup — the live Hugging Face search is missing from the topic that should explain it
+
+P3:
+N56. After a Hub lookup ends, the status bar still says 'Looking on Hugging Face...' while the activity light already says Idle
+N57. A brand-new profile's Details say 'updated unknown'
+N58. The profile simple view is dominated by two big empty boxes: the notes flap starts expanded and the report-cards list stretches mostly empty
+N59. The Hugging Face repo field's placeholder is a real repo that belongs to a different model — the exact value the mismatch guard exists to catch
+N60. Finish cards keep their working titles and a busy-looking bar after the job is done
+N61. A damaged dataset is reported one bad line at a time, in parser language — the user fixes line 2, then meets line 3, then line 4
+N62. The Put in Ollama success sentence sends the user to check Code Forge's model list — a different program a Stella-only user may not have
+N63. A 'Make smaller' failure tells the user to 'pull the model' — Ollama's CLI word — and Stella offers no pull button in that flow
+N64. The probe's status-bar refusal uses the internal project slug and a lowercase fragment instead of the display name and a full sentence
+N65. The New Project dialog starts with the template already chosen and a bare 'OK' button
+N66. The probe gate passes a saved result whose before/after total is missing entirely (damaged-file edge)
+N67. The sleep forgetting threshold accepts nan or negative values, silently disabling or inverting the check while the report records it as a real check
+N68. Validation loss is silently computed on at most the first 50 rows, and no report says the number is partial
+N69. Whether real Ollama accepts the single-quoted FROM line Stella writes into every Modelfile is unprobed — every export to a folder with spaces rides on it
+N70. A failing distill prompt silently burns two full timeouts (about 10 minutes at the default) with no sign of life between attempts
+N71. The rule 'import only brings report cards back for a newly created profile' is stated nowhere a user would see, and import gives no warning when cards were skipped
+N72. Wheel fetch leaves a hash-mismatching encoded-name twin in the cache forever, and an uppercase .WHL URL loses the resumable-download path
+N73. The same tool block twice in one chat reply runs twice, with real side effects (two profiles created)
+N74. A custom provider address containing a query string becomes a nonsense endpoint, with no warning when it is saved
+N75. One malformed tool block discards the whole chat turn, including valid tool calls that came before it
+N76. --quiet is accepted but does nothing on requant and export-gguf, though both print step-by-step progress
+N77. --verbose changes nothing for ordinary failures, though its help says it prints the traceback when a command fails
+N78. Saying No to a delete confirmation exits 1, but saying No to the Ollama replace question exits 0 — a script cannot tell a deliberate No from a failure on the delete path
+N79. The wheel download failure line shows the user a raw Python error before the installer's own plain-words lines
+N80. Three of the four double-click launcher scripts ship in the zip without the executable bit (harmless today, against the project's own zip rule)
+N81. The Export and import topic's export list omits the refusal-probe results that its own import list (two sentences later) includes — and the code does export them
+N82. FORMAT.md's example export manifest still says stella_version 0.29.0 in a tree that writes 0.34.0
+N83. The Chat topic uses 'validation loss' — a term explained nowhere in the guide
