@@ -694,9 +694,12 @@ def _run(cmd: list[str], *, what: str, _runner=None,
                 proc.kill()
                 proc.wait()
                 raise StellaError("Cancelled.")
-            # R34: a hung quantizer stops on the timeout, with a
+            # R34: a hung step stops on the timeout, with a
             # plain-words message naming it — the same shape as
-            # export's converter timeout (gguf._run).
+            # export's converter timeout (gguf._run). v0.36.0
+            # (N31): the message names the step that hung (the
+            # `what`), because the create step has a timeout now
+            # too and is not the quantizer.
             if deadline is not None and time.monotonic() >= deadline:
                 proc.kill()
                 proc.wait()
@@ -705,7 +708,7 @@ def _run(cmd: list[str], *, what: str, _runner=None,
                 else:
                     span = f"{timeout:g} seconds"
                 raise StellaError(
-                    f"the quantizer timed out after {span}. The "
+                    f"{what} timed out after {span}. The "
                     "requant was stopped. Try again, or check the "
                     "llama.cpp install."
                 )
@@ -936,6 +939,21 @@ def requant_model(
             f"The quantizer finished but wrote no file for {tag!r}. "
             "Try again, and check the disk is not full."
         )
+    # v0.36.0 (N32): a file that exists is not necessarily a GGUF
+    # file — a tool that exits 0 having written garbage used to be
+    # reported ready and registered into Ollama. Read the magic.
+    try:
+        with open(out_path, "rb") as handle:
+            magic = handle.read(4)
+    except OSError:
+        magic = b""
+    if magic != b"GGUF":
+        shutil.rmtree(job_dir, ignore_errors=True)
+        raise StellaError(
+            f"The quantizer finished but the file it wrote for "
+            f"{tag!r} is not a GGUF file. Try again, or check the "
+            "llama.cpp install."
+        )
     out_bytes = out_path.stat().st_size
     emit({
         "type": "quantized",
@@ -958,10 +976,12 @@ def requant_model(
             what=f"Registering the new model {new_tag!r} with Ollama",
             _runner=_runner,
             should_stop=should_stop,
-            # R34 scopes the timeout to the quantizer run; the
-            # create keeps no timeout (its own bound is a
-            # separate P3 task).
-            timeout=None,
+            # v0.36.0 (N31): the create gets the same 30-minute
+            # bound as every other step (the quantizer here, the
+            # GGUF pipeline's create) — a hung create (Ollama
+            # wedged copying a multi-GB blob) used to hang
+            # requant forever.
+            timeout=SUBPROCESS_TIMEOUT_SECONDS,
         )
     except StellaError as exc:
         raise StellaError(
@@ -990,7 +1010,9 @@ def requant_model(
             what=f"Checking the new model {new_tag!r} is in Ollama",
             _runner=_runner,
             should_stop=should_stop,
-            timeout=None,
+            # v0.36.0 (N31): bounded like the create above — a
+            # hung check reads as "not verified", never a hang.
+            timeout=SUBPROCESS_TIMEOUT_SECONDS,
         )
         verified = True
     except Exception:  # noqa: BLE001 - any failure means not verified

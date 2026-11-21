@@ -68,6 +68,24 @@ def _normalize(tag: str) -> str:
     return (tag or "").strip().lower()
 
 
+def _size_hint(text: str) -> str | None:
+    """The size in a tag or repo, as written: "3b" from ":3b",
+    "1.7b" from "LFM3-1.7B". Looks in the version part first
+    (after the last ":" of the name segment), then in the whole
+    text. Mirrors hub_lookup's helper (which imports from here,
+    so this one cannot import from there)."""
+    import re
+
+    lowered = (text or "").lower()
+    last = lowered.rsplit("/", 1)[-1]
+    version = last.rsplit(":", 1)[-1] if ":" in last else ""
+    for part in (version, lowered):
+        match = re.search(r"(\d+(?:\.\d+)?)b", part)
+        if match:
+            return match.group(1) + "b"
+    return None
+
+
 def _base_name(tag: str) -> str:
     """The tag with its version stripped: "qwen3.5:2b-q4_K_M"
     becomes "qwen3.5", "lfm3:1.7b" becomes "lfm3". The org
@@ -107,9 +125,25 @@ def suggest_hf_repos(tag: str) -> list[dict]:
     if found:
         return found
     # No exact match: try the model name without its version.
+    # v0.36.0 (N33): the fallback must not offer another size's
+    # weights as this model's repo. When the tag names a size,
+    # only an entry of the same size is offered; when the tag
+    # carries a version but no size (":latest"), a sized entry
+    # cannot be checked, so it is not offered either. A bare
+    # name with no version at all keeps the old behaviour (every
+    # size of the family, for the user to pick between).
     base = _base_name(wanted)
+    tag_size = _size_hint(wanted)
+    last = wanted.rsplit("/", 1)[-1]
+    has_version = ":" in last
     for known_tag, repo, source in KNOWN_BRIDGE:
         if known_tag == base or known_tag.startswith(base + ":"):
+            entry_size = _size_hint(known_tag) or _size_hint(repo)
+            if tag_size is not None:
+                if entry_size != tag_size:
+                    continue
+            elif has_version and entry_size is not None:
+                continue
             add(repo, source)
     return found
 

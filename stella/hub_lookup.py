@@ -31,10 +31,12 @@ and size agree with the tag - see _repo_matches_model) AND it
 can actually be trained from:
 
 - its name does not contain "gguf" or "mlx" (case-insensitive),
-- its file list has config.json AND at least one .safetensors
-  file — GGUF-only repos fail this, which matters: a live search
-  for Granite returns mostly GGUF/MLX repos, while the real
-  training repo (ibm-granite/granite-4.1-3b-base) passes.
+- its file list has config.json AND a .safetensors file that is
+  the weights (not just a tokenizer file), and no .gguf file at
+  all (v0.36.0, N37) — GGUF-only repos fail this, which matters:
+  a live search for Granite returns mostly GGUF/MLX repos, while
+  the real training repo (ibm-granite/granite-4.1-3b-base)
+  passes.
 
 Ranking among the offerable repos of one rung is deterministic:
 (1) exact repo-name match to the model's name, (2) repos owned
@@ -223,8 +225,13 @@ def _repo_matches_model(repo: str, tag: str) -> bool:
 
 
 def _offerable(detail) -> bool:
-    """True when a repo detail shows real training weights:
-    config.json plus at least one .safetensors file."""
+    """True when a repo detail shows real training weights
+    (v0.36.0, N37): config.json plus a safetensors file that is
+    the weights, not just a tokenizer. A repo whose real weights
+    are a GGUF file is never offerable, however it is named: a
+    small tokenizer.safetensors beside a model.gguf used to pass
+    on the tokenizer alone, and training cannot start from a
+    GGUF file."""
     if not isinstance(detail, dict):
         return False
     siblings = [
@@ -232,9 +239,19 @@ def _offerable(detail) -> bool:
         for entry in (detail.get("siblings") or [])
         if isinstance(entry, dict)
     ]
-    return "config.json" in siblings and any(
-        name.endswith(".safetensors") for name in siblings
-    )
+    if "config.json" not in siblings:
+        return False
+    lowered = [name.lower() for name in siblings]
+    if any(name.endswith(".gguf") for name in lowered):
+        return False
+    for name in lowered:
+        if not name.endswith(".safetensors"):
+            continue
+        base = name.rsplit("/", 1)[-1]
+        if base.startswith("tokenizer"):
+            continue
+        return True
+    return False
 
 
 def lookup_hf_repos(tag: str, timeout: float = 30.0) -> dict:
@@ -267,6 +284,7 @@ def lookup_hf_repos(tag: str, timeout: float = 30.0) -> dict:
             results = []
         offerable: list[dict] = []
         checked = 0
+        detail_failures = 0
         for item in results:
             if not isinstance(item, dict):
                 continue
@@ -284,6 +302,11 @@ def lookup_hf_repos(tag: str, timeout: float = 30.0) -> dict:
             try:
                 detail = _fetch_json(f"/api/models/{repo}", deadline)
             except _HubDown:
+                # v0.36.0 (N36): a failed detail fetch is not
+                # evidence the repo does not exist. Counted here;
+                # a rung where every fetch failed ends the lookup
+                # as offline below, never as "none".
+                detail_failures += 1
                 continue
             if _offerable(detail) and _repo_matches_model(repo, tag):
                 offerable.append(
@@ -292,6 +315,13 @@ def lookup_hf_repos(tag: str, timeout: float = 30.0) -> dict:
                         "downloads": item.get("downloads") or 0,
                     }
                 )
+        if checked and detail_failures == checked and not offerable:
+            # v0.36.0 (N36): this rung had candidates but Hugging
+            # Face failed on every one (the connection dropped
+            # after the search, or the Hub is rate-limiting the
+            # detail calls). The search did not complete, so the
+            # honest ending is "couldn't reach it", not "none".
+            return {"state": "offline", "candidates": []}
         if offerable:
             def rank_key(candidate: dict):
                 owner, _, repo_name = candidate["repo"].partition("/")

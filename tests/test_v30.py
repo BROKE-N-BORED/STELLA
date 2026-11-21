@@ -127,8 +127,8 @@ def _click_box_button(monkeypatch, prefix, seen):
 # -- Version --------------------------------------------------------
 
 
-# NOTE: the version tests moved to test_v34.py (test_version_is_0_35_0,
-# test_window_title_carries_version) — the version is 0.35.0 now.
+# NOTE: the version tests moved to test_v34.py (test_version_is_0_36_0,
+# test_window_title_carries_version) — the version is 0.36.0 now.
 
 
 # -- The bridge offer in the download flow --------------------------
@@ -152,11 +152,12 @@ def test_start_download_yes_sets_repo_and_starts(
 
 def test_start_download_multi_candidate_pick(window, monkeypatch):
     """Several candidates: the pick-one dialog's choice is stored
-    and the download starts with it. The tag qwen3.5:2b-q4_K_M
-    strips to the base qwen3.5, matching both the 2B and 4B
-    repos."""
+    and the download starts with it. The bare tag qwen3.5 names
+    no size, so both the 2B and 4B repos are candidates.
+    (v0.36.0, N33: a sized tag like qwen3.5:2b-q4_K_M now
+    matches only its own size — one candidate, no pick.)"""
     window.store.create_profile(
-        "qwen-multi", ollama_tag="qwen3.5:2b-q4_K_M", role="fast"
+        "qwen-multi", ollama_tag="qwen3.5", role="fast"
     )
     seen = {}
 
@@ -424,9 +425,11 @@ def test_chat_download_weights_multi_candidates(
     agent, store, seeded
 ):
     """Several candidates: the tool lists them all and asks which
-    one, instead of guessing."""
+    one, instead of guessing. The bare tag names no size, so
+    both sizes are listed (v0.36.0, N33: a sized tag lists
+    only its own size)."""
     store.create_profile(
-        "qwen-multi", ollama_tag="qwen3.5:2b-q4_K_M", role="fast"
+        "qwen-multi", ollama_tag="qwen3.5", role="fast"
     )
     result = agent.call_tool(
         "download_weights", {"profile": "qwen-multi"}
@@ -435,7 +438,7 @@ def test_chat_download_weights_multi_candidates(
     assert "Qwen/Qwen3.5-4B" in result
     assert "Tell me which one" in result
     assert store.get_profile("qwen-multi")["base_ref"] == (
-        "qwen3.5:2b-q4_K_M"
+        "qwen3.5"
     )
 
 

@@ -459,6 +459,26 @@ def reachable(url: str | None = None, timeout: float = TIMEOUT_SECONDS) -> bool:
         return False
 
 
+def _is_timeout_error(exc: BaseException) -> bool:
+    """True when a failed request was a timeout (v0.36.0, N30):
+    a TimeoutError anywhere in the chain (urllib wraps a socket
+    timeout as a URLError whose reason is one), or the words
+    "timed out" in the error text."""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, TimeoutError):
+            return True
+        if "timed out" in str(current).lower():
+            return True
+        reason = getattr(current, "reason", None)
+        if isinstance(reason, BaseException) and _is_timeout_error(reason):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 def generate_full(
     model: str,
     prompt: str,
@@ -521,6 +541,18 @@ def generate_full(
         # R80: no raw exception text in the user-facing message —
         # the sentence already says what to do. The raw error
         # stays on the exception chain (from exc) for debugging.
+        # v0.36.0 (N30): a timeout is named as one — Ollama was
+        # running, the model was just slow — so callers that
+        # reword a slow teacher (distill, R30) can tell the two
+        # apart. The old text said "Is Ollama running?" for a
+        # timeout too, and the rewording never fired on the real
+        # path.
+        if _is_timeout_error(exc):
+            raise StellaError(
+                "Ollama did not answer in time (it timed out). "
+                "Ollama is running, but the model was too slow "
+                "to answer. Try again, or give it a longer wait."
+            ) from exc
         raise StellaError(
             "Ollama did not answer. Is Ollama running on this PC?"
         ) from exc

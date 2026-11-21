@@ -34,7 +34,9 @@ never for a trial model that merely looks fast.
 Matching mirrors ollama_bridge: an exact tag match wins; a tag
 without its version falls back to the model name, but only when
 exactly ONE entry matches — an ambiguous base ("qwen3.5" could
-be the 2B or the 4B) returns None rather than a guess.
+be the 2B or the 4B) returns None rather than a guess. The
+fallback also requires a size match (v0.36.0, N33): one size's
+measured strengths are never given to another size.
 """
 
 from __future__ import annotations
@@ -52,9 +54,13 @@ KNOWN_STRENGTHS: tuple[
      ("writing code", "using tools", "hard maths and reasoning"),
      ("answering quickly", "it can repeat itself")),
     # §2: the council second opinion — but text only, and it
-    # overthinks unless told not to.
+    # overthinks unless told not to. v0.36.0 (N35): "general
+    # questions" is dropped — the roster records that its own
+    # page admits no benchmarks were run, so it was an
+    # expectation, not a measurement, in a table that carries
+    # what is known, not what is hoped for.
     ("dolphinlabs/qwen3.5-uncensored:latest", "reviewer",
-     ("giving a second opinion", "general questions"),
+     ("giving a second opinion",),
      ("seeing pictures", "keeping answers short")),
     # §3: the smallest and fastest on the roster, good with tools
     # and short code — but weak on hard knowledge questions and
@@ -68,12 +74,15 @@ KNOWN_STRENGTHS: tuple[
      ("writing code",),
      ("it still refuses some ordinary work",)),
     # §5 + the OST LFM3 card: the best small-model tool scores
-    # (OST: Tool Calling 100%), fast on weak CPUs, reads long
-    # documents without slowing down much — but Liquid's own card
-    # says it is not for long multi-step jobs, and it is stock.
+    # (OST: Tool Calling 100%), fast on weak CPUs — but Liquid's
+    # own card says it is not for long multi-step jobs, and it is
+    # stock. v0.36.0 (N35): "reading long documents" moves to
+    # not-good — the OST run this file cites as grounding
+    # measured LFM3 at 0% on the long-documents test, so the old
+    # good-list claim contradicted Stella's own measurement.
     ("lfm3:1.7b", "",
-     ("using tools", "answering fast", "reading long documents"),
-     ("long multi-step jobs",
+     ("using tools", "answering fast"),
+     ("reading long documents", "long multi-step jobs",
       "it still refuses some ordinary work")),
     # §6: built for tool calling and strong at code — but a dense
     # 3B is slower than every 2B here. On trial for a reviewer
@@ -136,11 +145,37 @@ def strengths_for_tag(tag: str) -> dict | None:
                 "not_good": list(not_good),
             }
     # No exact match: try the model name without its version.
+    # v0.36.0 (N33): the fallback must not give one size's
+    # measured strengths to another size. When the tag names a
+    # size, only an entry of the same size counts; when the tag
+    # carries a version but no size (":latest"), a sized entry
+    # cannot be checked, so it does not count either. A bare
+    # name with no version keeps the old behaviour.
+    import re
+
+    def size_of(text: str) -> str | None:
+        lowered = (text or "").lower()
+        tail = lowered.rsplit("/", 1)[-1]
+        version = tail.rsplit(":", 1)[-1] if ":" in tail else ""
+        for part in (version, lowered):
+            match = re.search(r"(\d+(?:\.\d+)?)b", part)
+            if match:
+                return match.group(1) + "b"
+        return None
+
     last = wanted.rsplit("/", 1)[-1]
     base = wanted if ":" not in last else wanted.rsplit(":", 1)[0]
+    tag_size = size_of(wanted)
+    has_version = ":" in last
     found = []
     for known_tag, role, good, not_good in KNOWN_STRENGTHS:
         if known_tag == base or known_tag.startswith(base + ":"):
+            entry_size = size_of(known_tag)
+            if tag_size is not None:
+                if entry_size != tag_size:
+                    continue
+            elif has_version and entry_size is not None:
+                continue
             found.append((role, good, not_good))
     if len(found) != 1:
         return None

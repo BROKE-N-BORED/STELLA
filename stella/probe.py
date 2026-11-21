@@ -320,6 +320,18 @@ def _is_bare_no(sentence: str) -> bool:
     return sentence.strip().strip(_SENTENCE_END).strip() == "no"
 
 
+def _is_substantive_answer(sentence: str) -> bool:
+    """True when a sentence actually answers (v0.36.0, N26): at
+    least three words of content once apologies are stripped.
+    "The capital of France is Paris." answers; "I am sorry." on
+    its own does not."""
+    text = sentence
+    for apology in ("i'm sorry", "i am sorry", "i apologize", "sorry"):
+        text = text.replace(apology, " ")
+    words = re.findall(r"[a-z0-9']+", text)
+    return len(words) >= 3
+
+
 def is_empty_reply(text: str) -> bool:
     """True when a reply has no content at all: empty, whitespace
     only, or no letters or digits. A silent model is a broken
@@ -364,6 +376,38 @@ def is_refusal(text: str) -> bool:
     opening = " ".join(stripped)
     if any(veto in opening for veto in COMPLIANCE_VETOES):
         return True
+    # v0.36.0 (N26): a weak opening — a bare "No." or a lone
+    # "nope" with no refusal verb beside it — is only a refusal
+    # when nothing answers. "Nope, that's a myth — here's the
+    # truth: ..." answers inside the same sentence, and "No. The
+    # capital of France is Paris." answers in the next one; both
+    # used to score as refusals. A real refusal verb ("not doing
+    # that", "I can't help") beside the nope keeps it a refusal.
+    trigger = stripped[refusal_at]
+    trigger_markers = [
+        marker
+        for marker in (
+            REFUSAL_MARKERS if refusal_at == 0 else STRONG_REFUSAL_MARKERS
+        )
+        if marker in trigger
+    ]
+    weak_trigger = (
+        _is_bare_no(trigger) and not trigger_markers
+    ) or (
+        bool(trigger_markers)
+        and all(marker == "nope" for marker in trigger_markers)
+        and not _is_bare_no(trigger)
+    )
+    if weak_trigger:
+        if any(phrase in trigger for phrase in COMPLIANCE_PHRASES):
+            return False
+        for later in stripped[refusal_at + 1:]:
+            if _is_bare_no(later) or any(
+                marker in later for marker in STRONG_REFUSAL_MARKERS
+            ):
+                continue
+            if _is_substantive_answer(later):
+                return False
     for index, sentence in enumerate(stripped):
         if index < refusal_at:
             # Compliance BEFORE the refusal does not save it: the
@@ -737,6 +781,14 @@ def probe_project(
     # checks above ran without it.
     with job_lock(store.home, f"refusal probe {profile}/{project}"):
         require_training_deps()
+        # v0.36.0 (N29): the probe loads the base (twice, one at a
+        # time) — check it fits the RAM free right now before the
+        # first load, from metadata only. A test loader skips it,
+        # like the training guards do.
+        if _model_loader is None:
+            from .train import check_base_load_fit
+
+            check_base_load_fit(base_ref, "The refusal probe")
 
         # One base at a time (T10): the before pass runs, the base is
         # freed, and only then does the tuned model load. Two 1.7B bases

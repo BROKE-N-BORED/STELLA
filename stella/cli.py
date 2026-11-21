@@ -1548,6 +1548,9 @@ def cmd_train(args) -> int:
             store, args.profile, args.project,
             dataset_path=args.dataset, base_ref=args.base,
             cli=True,
+            # v0.36.0 (N28): a capped run's dry run quotes the
+            # capped steps and disk, like the run itself.
+            max_steps=args.steps,
         )
         if _as_json(args):
             # R52: the structured form — the estimate itself. A

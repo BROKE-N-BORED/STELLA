@@ -40,8 +40,8 @@ def need_torch():
 # -- Version --------------------------------------------------------
 
 
-def test_version_is_0_35_0_everywhere(home):
-    assert STELLA_VERSION == "0.35.0"
+def test_version_is_0_36_0_everywhere(home):
+    assert STELLA_VERSION == "0.36.0"
     env = dict(os.environ)
     env["STELLA_HOME"] = str(home)
     res = subprocess.run(
@@ -49,7 +49,7 @@ def test_version_is_0_35_0_everywhere(home):
         cwd=ROOT, env=env, capture_output=True, text=True, timeout=60,
     )
     assert res.returncode == 0
-    assert "0.35.0" in res.stdout
+    assert "0.36.0" in res.stdout
 
 
 # -- N1: the ggml tensor-type table ---------------------------------

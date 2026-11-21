@@ -1,5 +1,89 @@
 # Changelog
 
+## v0.36.0 — 2026-11-21
+
+The second half of the fixes from the full-product review of
+v0.34.0: nineteen more problems where Stella could mislead
+you, bury the next step, or guess wrong about your PC, fixed
+in plain words.
+
+- Pressing Download for a model with no training files set
+  now ends the same way as every other path: after the honest
+  message, the profile window opens so you can set the model
+  source. No more hunting for it by hand.
+- The main screen no longer asks you to type numbers for
+  things Stella can decide itself. There is no step cap box
+  (Go is the full run, the Proof run button is the short
+  run), no quant picker on export (the usual quant is used),
+  and no "keep newest" numbers on the prune buttons (the
+  newest few are kept, and the confirmation says how many).
+  The distill dialog's wait-per-answer number is gone too;
+  the usual wait works silently.
+- Chat with Ollama not answering no longer contradicts
+  itself: the typing box locks with a plain direction to pick
+  a chat model in Settings, instead of treating whatever you
+  type as a model name and suggesting a cloud model you
+  cannot use without a key.
+- Chat's permanent "Step 4 of 8: Recipe." line is gone. It
+  named a step from a list the window never showed, in a word
+  it never explained.
+- The main window no longer buries the export and probe
+  buttons under tall empty sections. The sections that start
+  empty (model source settings, checkpoints, past runs, the
+  training log, sleep) now start closed, and open with one
+  click on their heading.
+- "Estimate unavailable." now says why and what to do next:
+  which part is missing and the button that fixes it. The
+  Estimate button's own message drops the repo jargon and
+  the terminal line it used to quote.
+- A refusal probe run from chat on a model that does not hold
+  one of Stella's seats is now informational only: it is
+  measured and reported, but never saved as that model's
+  gate result. Seat-holding models still get real gate runs.
+- The refusal judge no longer scores a plain answer as a
+  refusal just because it starts with "No." or "Nope," and
+  then answers the question.
+- When a sleep cycle's dreaming produces nothing usable, the
+  cycle says so plainly ("Dreaming ran, but...") instead of
+  looking like it was skipped, and every cycle's report now
+  saves how dreaming went: whether it ran, how many rows it
+  kept, and the reason when it did not.
+- The --steps limit on training is now honoured everywhere:
+  the disk check and the --dry-run estimate work out the
+  capped run, not the full one.
+- The merge RAM check now reads the RAM actually free on
+  your PC, not the total fitted. The refusal probe and the
+  sleep replay check also check the base model fits in free
+  RAM before loading it, with the same plain message.
+- When a distill teacher is slow, Stella says so: "the
+  teacher took too long to answer". A timeout no longer reads
+  as "Ollama is not running", on any path, and the final
+  failure message names the reason too.
+- Making a smaller model now times out its register step
+  like every other step, instead of hanging forever, and a
+  converted or shrunken file is checked to really be a GGUF
+  file before Stella calls it ready.
+- The Hugging Face suggestions now respect size: a 4B model
+  is never offered the 2B model's files, in the download
+  suggestions or in the strengths table.
+- The "different repo" warning now also runs before training
+  on weights already downloaded, and when you choose to keep
+  a repo, Stella remembers and does not warn about that repo
+  again.
+- The strengths table now matches Stella's own measurements:
+  LFM3 is no longer called good at reading long documents
+  (Stella's own test measured 0% there), and the reviewer
+  model no longer claims "general questions" as a strength
+  no test ever measured.
+- When Stella searches Hugging Face and the search itself
+  fails part-way, it now says it could not finish looking,
+  instead of reporting that nothing was found.
+- A Hugging Face repo is only offered as training files when
+  it really carries training weights: a lone tokenizer file,
+  or a repo that also carries a ready-made GGUF, no longer
+  counts.
+
+
 ## v0.35.0 — 2026-11-19
 
 The fixes from the full-product review of v0.34.0: eighteen

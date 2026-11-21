@@ -249,6 +249,8 @@ def _cycle_summary(report: dict) -> dict:
         "timestamp": report.get("timestamp", ""),
         "real_rows": report.get("real_rows", 0),
         "dreamed_rows": report.get("dreamed_rows", 0),
+        # v0.36.0 (N27): the dream outcome, when the report has one.
+        "dream": report.get("dream"),
         "old_loss_before": report.get("old_loss_before"),
         "old_loss_after": report.get("old_loss_after"),
         "new_loss": report.get("new_loss"),
@@ -522,9 +524,13 @@ def dream_rows(
     """Ask the local Ollama model for synthetic practice examples.
 
     Returns (rows, skipped_reason). `skipped_reason` is None when
-    dreaming ran; on ANY failure it names the reason and rows holds
-    what survived (possibly empty). Dreaming never raises — a failed
-    dream is a skipped dream, and sleep still runs on real rows.
+    dreaming ran and kept at least one row; on ANY failure it names
+    the reason and rows holds what survived (possibly empty).
+    Dreaming never raises — a failed dream is a skipped dream, and
+    sleep still runs on real rows. v0.36.0 (N27): when the model
+    answered but no row survived validation, the reason says so
+    (it opens with "Dreaming ran, but") instead of reading as a
+    clean run that happened to keep nothing.
 
     Every kept row passes the same validation as real data
     (validate_dataset_row) and dedupes against `exclude_hashes`
@@ -548,6 +554,8 @@ def dream_rows(
         return [], f"Ollama unreachable ({exc}). Dreaming skipped"
     kept: list[dict] = []
     seen = set(exclude_hashes)
+    unusable = 0
+    duplicates = 0
     for line_no, line in enumerate(raw.splitlines(), 1):
         line = line.strip()
         if not line or line.startswith("```"):
@@ -555,20 +563,53 @@ def dream_rows(
         try:
             row = json.loads(line)
         except json.JSONDecodeError:
+            unusable += 1
             continue
         try:
             _fmt, messages = validate_dataset_row(row, line_no)
         except StellaError:
+            unusable += 1
             continue
         example = _example_from_messages(messages)
         h = row_hash(example)
         if h in seen:
+            duplicates += 1
             continue
         seen.add(h)
         kept.append(example)
         if len(kept) >= count:
             break
-    return kept, None
+    if kept:
+        return kept, None
+    # v0.36.0 (N27): the model answered but nothing survived —
+    # that is not the same as a dream that ran clean, and it is
+    # not a skip either. Say which it was, so the user who asked
+    # for dreamed rows learns the output was unusable (or all
+    # repeats), never a silent zero. The note opens with
+    # "Dreaming ran, but" so the caller can tell it apart from a
+    # skipped dream.
+    if unusable and duplicates:
+        return [], (
+            "Dreaming ran, but none of the model's answers could "
+            f"be used: {unusable} were not readable training "
+            f"examples and {duplicates} repeated rows Stella "
+            "already has, so no rows were added."
+        )
+    if unusable:
+        return [], (
+            "Dreaming ran, but none of the model's answers could "
+            f"be used: {unusable} were not readable training "
+            "examples, so no rows were added."
+        )
+    if duplicates:
+        return [], (
+            "Dreaming ran, but every example it made repeated a "
+            "row Stella already has, so no rows were added."
+        )
+    return [], (
+        "Dreaming ran, but the model answered with nothing that "
+        "could be used, so no rows were added."
+    )
 
 
 # -- replay check (the forgetting guard) -----------------------------
@@ -617,6 +658,14 @@ def replay_check(
             f"cycle {cycle_dir.name} has no trained adapter yet. "
             "consolidation must finish before the replay check"
         )
+
+    # v0.36.0 (N29): the replay check loads the base — check it
+    # fits the RAM free right now before the load, from metadata
+    # only. A test loader skips it, like the training guards do.
+    if _model_loader is None:
+        from .train import check_base_load_fit
+
+        check_base_load_fit(base_ref, "The replay check")
 
     # The single load. Everything below reuses this one model.
     if _model_loader is not None:
@@ -828,6 +877,17 @@ def sleep_project(
         train_rows = _load_rows_file(cycle_dir / "train_rows.jsonl")
         val_rows = _load_rows_file(cycle_dir / "val_rows.jsonl")
         in_sample = cycle_input.get("new_val_in_sample", False)
+        # v0.36.0 (N27): the dream outcome was saved with the
+        # cycle's input, so a resumed cycle's report still says
+        # what dreaming did in the first attempt.
+        dream_outcome = cycle_input.get("dream")
+        if not isinstance(dream_outcome, dict):
+            dream_outcome = {
+                "ran": False,
+                "kept": dreamed_count,
+                "reason": None,
+                "requested": dreamed_count,
+            }
         resumed = True
     else:
         # Fresh cycle: which rows are new?
@@ -864,6 +924,16 @@ def sleep_project(
         # Dream (best effort, never fatal).
         dreamed_rows: list[dict] = []
         dream_note = None
+        # v0.36.0 (N27): the cycle's dream outcome, saved into
+        # cycle_input.json and the final report — a skipped or
+        # empty dream must stay visible after the live events are
+        # gone, in the report the user can reopen.
+        dream_outcome = {
+            "ran": False,
+            "kept": 0,
+            "reason": None,
+            "requested": 0,
+        }
         if dream:
             tag = dream_model or prof.get("ollama_tag") or ""
             want = min(len(new_rows), MAX_DREAMED_PER_CALL)
@@ -875,9 +945,39 @@ def sleep_project(
                 exclude_hashes=exclude,
                 ollama_url=_ollama_url,
             )
-            if dream_note is not None:
+            if dream_note is not None and dream_note.startswith(
+                "Dreaming ran, but"
+            ):
+                # The model answered; nothing it made was usable.
+                dream_outcome = {
+                    "ran": True,
+                    "kept": 0,
+                    "reason": dream_note,
+                    "requested": want,
+                }
+                emit(
+                    {
+                        "type": "dream",
+                        "requested": want,
+                        "kept": 0,
+                        "note": dream_note,
+                    }
+                )
+            elif dream_note is not None:
+                dream_outcome = {
+                    "ran": False,
+                    "kept": 0,
+                    "reason": dream_note,
+                    "requested": want,
+                }
                 emit({"type": "dream_skipped", "reason": dream_note})
             else:
+                dream_outcome = {
+                    "ran": True,
+                    "kept": len(dreamed_rows),
+                    "reason": None,
+                    "requested": want,
+                }
                 emit(
                     {
                         "type": "dream",
@@ -920,6 +1020,9 @@ def sleep_project(
                 "dreamed_rows": dreamed_count,
                 "new_val_in_sample": in_sample,
                 "stella_version": STELLA_VERSION,
+                # v0.36.0 (N27): the dream outcome rides with the
+                # input, so a resumed cycle reports it too.
+                "dream": dream_outcome,
             },
         )
         resumed = False
@@ -994,6 +1097,7 @@ def sleep_project(
                 "steps": summary["steps"],
                 "real_rows": real_count,
                 "dreamed_rows": dreamed_count,
+                "dream": dream_outcome,
                 "resumed": resumed,
             }
 
@@ -1030,6 +1134,10 @@ def sleep_project(
             "status": replay["status"],
             "real_rows": real_count,
             "dreamed_rows": dreamed_count,
+            # v0.36.0 (N27): what dreaming did this cycle — ran,
+            # skipped (with the reason), or ran and kept nothing
+            # usable (with the reason) — in the saved report.
+            "dream": dream_outcome,
             "steps": summary["steps"],
             "final_loss": summary["final_loss"],
             "old_loss_before": replay["old_loss_before"],

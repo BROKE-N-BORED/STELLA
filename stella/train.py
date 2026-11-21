@@ -935,6 +935,36 @@ def check_ram_fit(
         )
 
 
+def check_base_load_fit(base_ref: str, what: str) -> None:
+    """Refuse before a non-training base load that cannot fit
+    (v0.36.0, N29): the refusal probe and the sleep replay check
+    load the base with no training estimate to judge by, so they
+    used to load with no RAM check at all. The need is the base
+    weights plus headroom, from metadata only (no load), judged
+    against the RAM free right now, like the training guard.
+    `what` names the job in the refusal ("The refusal probe")."""
+    meta = load_model_metadata(base_ref)
+    need = meta["base_bytes"] + RAM_HEADROOM_BYTES
+    available = available_ram_bytes()
+    limit = effective_ram_limit_bytes(available)
+    if need <= limit:
+        return
+    if available is not None and available < RAM_LIMIT_BYTES:
+        raise StellaError(
+            f"{what} needs about {_gb(need)} of RAM to load the "
+            f"base model, and this PC has only {_gb(available)} "
+            "free right now.\n"
+            "Close other programs and try again (Ollama may be "
+            "holding models in memory)."
+        )
+    raise StellaError(
+        f"{what} needs about {_gb(need)} of RAM to load the base "
+        f"model, over the {_gb(RAM_LIMIT_BYTES)} ceiling on this "
+        "PC.\n"
+        "Use a smaller base model for this profile."
+    )
+
+
 # -- model metadata: size without loading (T28) ----------------------
 # The RAM guard used to load the base model first and ask whether it
 # fit afterwards — on 8 GB, loading a 1.7B base to ask whether it
@@ -1456,6 +1486,7 @@ def estimate_run(
     dataset_path: str | Path | None = None,
     base_ref: str | None = None,
     cli: bool = False,
+    max_steps: int | None = None,
 ) -> dict:
     """The pre-train estimate (T84/T85), from metadata only.
 
@@ -1465,6 +1496,10 @@ def estimate_run(
     band. Raises StellaError when the answer cannot be found out
     (no base ref, unreadable model metadata, bad dataset) — the
     caller reports it plainly instead of guessing.
+
+    `max_steps` (v0.36.0, N28) caps the step count the way the
+    training loop caps it, so a capped proof run's dry run quotes
+    the capped steps and disk, not the full schedule's.
 
     Returns: fits, estimate_bytes, limit_bytes, ram_available_bytes,
     ram_gb, steps,
@@ -1536,6 +1571,12 @@ def estimate_run(
         ),
     )
     total_steps = steps_per_epoch * int(settings.get("epochs", 3))
+    # v0.36.0 (N28): a step cap caps the estimate too, mirroring
+    # the loop's rule (a fresh run starts at step 0).
+    if max_steps is not None:
+        if int(max_steps) <= 0:
+            raise StellaError("--steps must be at least 1.")
+        total_steps = min(total_steps, int(max_steps))
     # Disk: the merged weights (a full copy of the base) + one
     # checkpoint per checkpoint interval plus the final one + the
     # finished adapter. A checkpoint interval of 0 means no
@@ -3324,6 +3365,22 @@ def train_project(
                 )
                 * int(settings.get("epochs", 3))
             )
+            # v0.36.0 (N28): the disk guard honours the step cap
+            # too, mirroring the loop's rule — a capped run is
+            # judged on the checkpoints it will actually write
+            # (cap counted from the resume point on a resume),
+            # never on the full schedule's.
+            if max_steps is not None:
+                start_step = 0
+                if resume and resume_checkpoints:
+                    start_step = (
+                        resume_step
+                        if resume_step is not None
+                        else resume_checkpoints[-1]["step"]
+                    )
+                total_steps = min(
+                    total_steps, start_step + int(max_steps)
+                )
             try:
                 free_disk = shutil.disk_usage(work_dir).free
             except OSError:

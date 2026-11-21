@@ -32,7 +32,7 @@ from pathlib import Path
 from .autoconfig import compute_settings, measure_pc
 from .strengths import derived_role
 
-STELLA_VERSION = "0.35.0"
+STELLA_VERSION = "0.36.0"
 
 # Slug: lowercase letters, digits, dash, underscore. Must start alnum.
 # No dots, no slashes — a slug can never climb out of its directory.
@@ -913,6 +913,10 @@ class Store:
             "config",
             "dependencies",
             "governing_seat",
+            # v0.36.0 (N34): the repo the user deliberately kept
+            # after the mismatch warning, so the warning does not
+            # repeat for a choice already made.
+            "kept_base_ref",
         }
         old_tag = data.get("ollama_tag", "")
         old_base = data.get("base_ref", "")
@@ -932,7 +936,7 @@ class Store:
                 fields[key] = value
             elif key in (
                 "display_name", "role", "ollama_tag", "base_ref",
-                "processor",
+                "processor", "kept_base_ref",
             ):
                 value = _require_text(value, key)
                 fields[key] = value

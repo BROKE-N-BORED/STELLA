@@ -1,6 +1,6 @@
 # Stella review task list — 2026-11-19 (v0.34.0)
 
-Status: 18 DONE (N1-N18, in v0.35.0), 65 OPEN. This list comes from the full-product review of Stella v0.34.0 (commit 64269ca8). The full report is in docs/review-2026-11-19.md.
+Status: 37 DONE (N1-N18 in v0.35.0, N19-N37 in v0.36.0), 46 OPEN. This list comes from the full-product review of Stella v0.34.0 (commit 64269ca8). The full report is in docs/review-2026-11-19.md.
 
 The review produced 85 findings (0 P0, 18 P1, 37 P2, 30 P3). Two pairs of findings were merged into single tasks because they share one fix (chat repo-confirm: CH-F1 + CH-F8; base-name size fallbacks: NW-F3 + NW-F13), giving 83 tasks: 18 P1, 37 P2, 28 P3. Every finding is covered by exactly one task.
 
@@ -174,12 +174,16 @@ Each task gives: the title, the priority, what is wrong and why it matters, and 
 
 ### N19. The no-repo ending from Download sends the user hunting by hand and does not open the profile window, while the other path into the same ending does
 
+**Status:** DONE in v0.36.0.
+
 - **Priority:** P2
 - **Source finding(s):** GA-F2 (audit-gui-a.md)
 - **What and why:** Pressing Download for a model with no findable repo (bonsai-2) ends in a warning telling the user to find the model on huggingface.co and set the repo in the profile window themselves — for bonsai-2 no trainable repo exists to find — and then leaves them on the main window. The 'Set the model source...' path through the same wall DOES open the profile window when the lookup fails, so the two routes behave differently and the helpful behaviour exists on only one button. Fix: make the Download path end the same way — open the profile window after the honest message.
 - **Evidence:** shots/gui-a/09-bonsai-unknown-ending.png, 10-bonsai-after-ending.png; stella/gui.py:7662 vs :7666. Audit: audit-gui-a.md GA-F2.
 
 ### N20. A Step cap number sits on the main screen — a training setting the brief says should not be there (plus pre-set numbers in export, prune, and distill)
+
+**Status:** DONE in v0.36.0.
 
 - **Priority:** P2
 - **Source finding(s):** GB-F4 (audit-gui-b.md)
@@ -188,12 +192,16 @@ Each task gives: the title, the priority, what is wrong and why it matters, and 
 
 ### N21. Chat with Ollama down contradicts itself: it says pick a model in Settings, then treats typed text as a model name and suggests a cloud model the user cannot use
 
+**Status:** DONE in v0.36.0.
+
 - **Priority:** P2
 - **Source finding(s):** GB-F5 (audit-gui-b.md)
 - **What and why:** Offline, the Chat window correctly says Ollama is not answering and to pick a chat model in Settings. But the input box stays live as a model-name box: typing anything ('hello') gets 'Stella: I did not find that model. Type the full model name, for example openai/gpt-oss-120b.' The window's two messages disagree, and the example is a cloud model the user has no key for — typed chat text can never succeed in this state. Fix: in the no-models state, disable the input with the Settings direction, or treat typed text as a cloud pick only when a key exists; never exemplify a model the user cannot pick.
 - **Evidence:** shots/gui-b/61-offline-chat.png, 62-offline-chat-sent.png; stella/gui.py:4367-4372. Audit: audit-gui-b.md GB-F5.
 
 ### N22. Chat permanently shows 'Step 4 of 8: Recipe.' — a step from a list the user never sees, in words never explained
+
+**Status:** DONE in v0.36.0.
 
 - **Priority:** P2
 - **Source finding(s):** GB-F6 (audit-gui-b.md)
@@ -202,12 +210,16 @@ Each task gives: the title, the priority, what is wrong and why it matters, and 
 
 ### N23. At 1366x768 the main window is one ~2,020 px scroll and the export/probe buttons sit far below the fold behind tall empty sections
 
+**Status:** DONE in v0.36.0.
+
 - **Priority:** P2
 - **Source finding(s):** GB-F7 (audit-gui-b.md)
 - **What and why:** The session page measures about 2,020 px tall at his screen size. The hero and 'How it is going' fill the first screen; Dataset, Run overrides, Checkpoints (which holds Export GGUF, Put it in Ollama, Run refusal probe, View probe results), Past runs, Training log and Sleep cycles stack below, several as tall empty list boxes before anything exists. The finish actions for a trained project require a long scroll hunt through empty sections — the one-window crowding the core design rule warns about, softened but not solved by collapsible headers that all start open. Fix: start the empty sections collapsed, or move the export/probe actions up beside the job card where the run finishes.
 - **Evidence:** shots/gui-b/03-main-session-selected.png, 04-main-scroll-0.png, 04-main-scroll-2.png; drive1 scroll measurements. Audit: audit-gui-b.md GB-F7.
 
 ### N24. 'Estimate unavailable.' gives no reason and no next step, and the Estimate button answers with repo jargon plus a terminal command
+
+**Status:** DONE in v0.36.0.
 
 - **Priority:** P2
 - **Source finding(s):** GB-F8 (audit-gui-b.md)
@@ -216,12 +228,16 @@ Each task gives: the title, the priority, what is wrong and why it matters, and 
 
 ### N25. Probes run from chat are saved as 'gate' runs even for models that hold no seat, so the results window later shows a gate verdict that was never a gate
 
+**Status:** DONE in v0.36.0.
+
 - **Priority:** P2
 - **Source finding(s):** EN-F3 (audit-engine.md)
 - **What and why:** The window and the CLI both compute informational mode from the governing-seat check and pass it to the probe; the chat tool never passes it, so every chat-run probe is saved stamped mode 'gate' — and the chat reply appends a gate verdict for profiles whose probe is supposed to be informational. The probe-results dialog reads the mode back from the saved file, so a chat-run probe on a utility or vision profile later displays a gate verdict it should never have had. Fix: have the chat probe tool compute informational mode exactly like the CLI does and pass it through.
 - **Evidence:** stella/chat_agent.py:1304 vs stella/gui.py:~10991 and stella/cli.py:~1843; mode recording in stella/probe.py. Audit: audit-engine.md EN-F3.
 
 ### N26. The refusal judge scores two plainly compliant answers as refusals
+
+**Status:** DONE in v0.36.0.
 
 - **Priority:** P2
 - **Source finding(s):** EN-F4 (audit-engine.md)
@@ -230,12 +246,16 @@ Each task gives: the title, the priority, what is wrong and why it matters, and 
 
 ### N27. Dreaming that produces nothing usable is reported as if it worked, and no dream outcome or skip reason is saved in the cycle report
 
+**Status:** DONE in v0.36.0.
+
 - **Priority:** P2
 - **Source finding(s):** EN-F5 (audit-engine.md)
 - **What and why:** When Ollama answers but every dreamed line is unusable (not JSON, fails validation, all duplicates), dream_rows returns 'ran, kept 0' — indistinguishable from a model that legitimately dreamed only duplicates — and the user who asked for dreamed rows is never told the output was garbage. And even when dreaming IS skipped (Ollama unreachable, no model tag), the reason exists only as a live event: the cycle's report.json has no dream field at all, so afterwards, in the report the user can reopen, a skipped or garbage dream is invisible. Fix: return a note when generation succeeded but zero rows survived validation, and record the dream outcome (ran / skipped + reason / kept count) in report.json.
 - **Evidence:** engine probe3_dream_multiturn.py output; stella/sleep.py:571, :878-888, :1016. Audit: audit-engine.md EN-F5.
 
 ### N28. The --steps cap is honoured by the training loop but ignored by the disk guard and the dry run, so a 5-step proof run can be refused for a full run's checkpoints
+
+**Status:** DONE in v0.36.0.
 
 - **Priority:** P2
 - **Source finding(s):** EN-F6 (audit-engine.md)
@@ -244,12 +264,16 @@ Each task gives: the title, the priority, what is wrong and why it matters, and 
 
 ### N29. The merge RAM guard judges only the fixed 8 GB ceiling, never the RAM actually free; the replay check and the probe load the base with no RAM check at all
 
+**Status:** DONE in v0.36.0.
+
 - **Priority:** P2
 - **Source finding(s):** EN-F7 (audit-engine.md)
 - **What and why:** Training's guard was recalibrated in the v0.24.0 work to judge against the RAM free right now, because Ollama holding models is the normal state of his PC. The merge guard was not: it has no available-RAM input at all. For a 1.7B base the merge estimate is ~7.9 GB — under the ceiling, so it proceeds — even if Ollama is holding several GB and only ~3 GB is free, ending in a mid-merge out-of-memory kill after hours of training instead of an up-front refusal. The sleep replay check and the probe likewise load the base with no fit check first. Fix: give the merge guard the same available-RAM tightening as training's, and add a metadata-based fit check before the replay/probe base loads.
 - **Evidence:** stella/gguf.py:189-213; grep: no RAM-guard symbols in stella/sleep.py or stella/probe.py. Audit: audit-engine.md EN-F7.
 
 ### N30. Distill's 'the teacher was slow, not down' wording never fires on the real path (a regression of the closed R30 fix)
+
+**Status:** DONE in v0.36.0.
 
 - **Priority:** P2
 - **Source finding(s):** PI-F4 (audit-pipelines.md)
@@ -258,12 +282,16 @@ Each task gives: the title, the priority, what is wrong and why it matters, and 
 
 ### N31. Requant's Ollama create has no timeout, unlike every other step — a hung create hangs requant forever
 
+**Status:** DONE in v0.36.0.
+
 - **Priority:** P2
 - **Source finding(s):** PI-F5 (audit-pipelines.md)
 - **What and why:** Requant passes timeout=None for its create step (the code comment acknowledges it as a leftover). The quantizer in the same file has the 30-minute bound, and the same create operation in the GGUF pipeline got one too — both its CLI and window callers pass it. A hung create (Ollama wedged while copying a multi-GB blob on a hard drive) therefore hangs requant indefinitely; the chat-agent caller passes no stop flag either, so that path has no bound and no cancel at all. Fix: give requant's create the same 30-minute bound as the GGUF pipeline's.
 - **Evidence:** stella/requant.py:949-956; contrast stella/cli.py:1793-1798 and stella/gui.py:10946-10951. Audit: audit-pipelines.md PI-F5.
 
 ### N32. Convert and quantize outputs are never checked to actually be GGUF files before being reported ready
+
+**Status:** DONE in v0.36.0.
 
 - **Priority:** P2
 - **Source finding(s):** PI-F6 (audit-pipelines.md)
@@ -272,12 +300,16 @@ Each task gives: the title, the priority, what is wrong and why it matters, and 
 
 ### N33. The bridge offers another size's weights labelled as this model's own repo, and the strengths table likewise gives one size's measured strengths to other sizes
 
+**Status:** DONE in v0.36.0.
+
 - **Priority:** P2
 - **Source finding(s):** NW-F3 + NW-F13 (audit-newcode.md)
 - **What and why:** The bridge's version-stripped fallback has no size check: where a family has one curated entry, any other size of that family is offered that entry's repo — qwen2.5-coder:7b and :32b are offered the 1.5B repo, lfm3:9b the 1.7B repo, granite:8b the 3B base — with the source text claiming it is 'this model's own repo' and the dialog defaulting to Yes, so one Enter downloads gigabytes of the wrong model's weights and training proceeds on them. The strengths table has the same shape in display form: its base-name fallback returns the 1.7B model's measured strengths for lfm3:9b, where the honest answer is 'Not measured yet' (its ambiguity guard works only where two entries exist). Fix: require a size match on both base-name fallbacks (the mismatch guard already computes a size hint); otherwise offer nothing and let the live lookup or the honest-unknown path run.
 - **Evidence:** stella/ollama_bridge.py:96-105; stella/strengths.py:139-152; newcode probe_all section C (seven wrong-size offers listed). Audit: audit-newcode.md NW-F3, NW-F13.
 
 ### N34. The mismatch guard only runs at download time — never before training on already-downloaded weights — and it re-warns forever after the user deliberately keeps a repo
+
+**Status:** DONE in v0.36.0.
 
 - **Priority:** P2
 - **Source finding(s):** NW-F4 (audit-newcode.md)
@@ -286,6 +318,8 @@ Each task gives: the title, the priority, what is wrong and why it matters, and 
 
 ### N35. The built-in strengths table says LFM3 is good at reading long documents; Stella's own OST measurement scored it 0% at exactly that
 
+**Status:** DONE in v0.36.0.
+
 - **Priority:** P2
 - **Source finding(s):** NW-F5 (audit-newcode.md)
 - **What and why:** strengths.py lists LFM3 good at 'reading long documents', grounded per its comment in the roster audit's interpolation (hybrid architecture 'degrades gracefully'). The OST run the same file cites as grounding measured LFM3 long_context at 0%. The table claims the opposite of the best evidence Stella itself holds. Spot-checks of the rest of the table against the roster doc held up; one softer case rides along: the dolphin reviewer's 'general questions' is listed good while the roster records its own page admitting no benchmarks were run — an expectation, not a measurement, in a table whose header says it carries what is known, not what is hoped for. Fix: drop 'reading long documents' from LFM3's good list (or move it to not-good per the 0% measurement) and drop or reword the dolphin's 'general questions'.
@@ -293,12 +327,16 @@ Each task gives: the title, the priority, what is wrong and why it matters, and 
 
 ### N36. The Hub lookup reports 'nothing found' when Hugging Face actually failed mid-search, instead of 'couldn't reach it, try again'
 
+**Status:** DONE in v0.36.0.
+
 - **Priority:** P2
 - **Source finding(s):** NW-F6 (audit-newcode.md)
 - **What and why:** In lookup_hf_repos, a failed detail fetch is swallowed and the rung simply ends with zero offerable repos; if every detail fetch fails (connection dropped after the search call, Hub rate-limiting the detail calls), the lookup walks the whole ladder and returns 'none' — and the window shows 'Stella doesn't know where this model's training files live' (a claim that the search completed and nothing exists) instead of the honest 'couldn't reach Hugging Face, try again'. The user is told a false fact and given no retry cue. Fix: track detail-fetch failures per rung; if a rung had candidates but every detail fetch failed, return the offline ending.
 - **Evidence:** stella/hub_lookup.py:215-221; newcode probe_all section E (all detail fetches failing -> {'state': 'none'}). Audit: audit-newcode.md NW-F6.
 
 ### N37. The Hub lookup's 'offerable' check passes a repo whose real weights are a GGUF file (a small tokenizer.safetensors is enough)
+
+**Status:** DONE in v0.36.0.
 
 - **Priority:** P2
 - **Source finding(s):** NW-F7 (audit-newcode.md)

@@ -106,15 +106,34 @@ def _plain_teacher_error(exc: Exception) -> str:
     just slow — so the generic "Is Ollama running on this PC?
     (timed out)" is reworded here, in the distill-facing message,
     instead of rewriting the shared Ollama error other callers
-    rely on."""
+    rely on. v0.36.0 (N30): the real path now keeps a "timed out"
+    marker in its plain message (ollama.generate_full), and this
+    also checks the exception chain, so a timeout is recognised
+    even when a caller wrapped it without the words."""
     text = str(exc)
-    if "timed out" in text.lower():
+    if "timed out" in text.lower() or _chain_has_timeout(exc):
         return (
             "the teacher took too long to answer (it timed out). "
             "The teacher may still have been loading, or the "
             "prompt may need a longer wait."
         )
     return text
+
+
+def _chain_has_timeout(exc: BaseException) -> bool:
+    """True when a TimeoutError sits anywhere in the exception
+    chain (v0.36.0, N30)."""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, TimeoutError):
+            return True
+        reason = getattr(current, "reason", None)
+        if isinstance(reason, TimeoutError):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def _ask_teacher(_generate, tag: str, prompt: str) -> tuple[str, bool]:
@@ -308,9 +327,14 @@ def distill_dataset(
     # rows plus failures means refuse, without pointing the
     # project at the dataset or saying done.
     if kept == 0 and failed:
+        # v0.36.0 (N30): the raise names the first failure's
+        # reason — this message is what the CLI shows, and a
+        # slow teacher must read as slow here too, not just in
+        # the per-prompt warnings.
         raise StellaError(
             "None of this run's prompts got a usable answer from "
-            f"the teacher ({len(failed)} prompt(s) failed), so no "
+            f"the teacher ({len(failed)} prompt(s) failed; the "
+            f"first said: {failed[0]['error']}), so no "
             "new dataset was made. The answers saved from earlier "
             "runs are still on disk; run it again to pick up where "
             "it stopped."

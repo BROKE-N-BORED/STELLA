@@ -313,7 +313,10 @@ def test_profile_window_shows_derived_strengths(window, qapp):
     qapp.processEvents()
     text = win.strengths_label.text()
     assert "Good at: using tools" in text
-    assert "Not good at: long multi-step jobs" in text
+    # v0.36.0 (N35): reading long documents moved to not-good —
+    # Stella's own OST measurement put LFM3 at 0% there.
+    assert "Not good at: reading long documents" in text
+    assert "long multi-step jobs" in text
     win.close()
 
 

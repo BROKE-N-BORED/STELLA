@@ -1076,26 +1076,29 @@ def test_sleep_delete_button_without_pick_warns(window, monkeypatch):
 def test_sleep_prune_button_keeps_newest(
     window, seeded, monkeypatch, qapp
 ):
-    # R66: Prune with keep 1 deletes the older cycles and keeps
-    # the newest.
+    # R66, updated v0.36.0 (N20): Prune keeps the newest few —
+    # the count is a silent default (3), no number on screen.
     from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QMessageBox
 
     _select_session(window)
     cdir1 = _seed_gui_sleep_cycle(seeded, 1, payload_bytes=1000)
-    _seed_gui_sleep_cycle(seeded, 2, payload_bytes=1000)
+    cdir2 = _seed_gui_sleep_cycle(seeded, 2, payload_bytes=1000)
     _seed_gui_sleep_cycle(seeded, 3, payload_bytes=1000)
+    _seed_gui_sleep_cycle(seeded, 4, payload_bytes=1000)
+    _seed_gui_sleep_cycle(seeded, 5, payload_bytes=1000)
     window.refresh_train_panel()
-    assert window.sleep_cycles.count() == 3
+    assert window.sleep_cycles.count() == 5
     monkeypatch.setattr(
         QMessageBox, "question", lambda *a, **k: QMessageBox.Yes
     )
-    window.sleep_keep_spin.setValue(1)
+    assert not hasattr(window, "sleep_keep_spin")
     window.sleep_prune_btn.click()
     qapp.processEvents()
     assert not cdir1.exists()
-    assert window.sleep_cycles.count() == 1
-    assert window.sleep_cycles.item(0).data(Qt.UserRole) == 3
+    assert not cdir2.exists()
+    assert window.sleep_cycles.count() == 3
+    assert window.sleep_cycles.item(2).data(Qt.UserRole) == 5
     assert "Pruned 2 sleep cycles" in window.statusBar().currentMessage()
 
 
@@ -2786,19 +2789,19 @@ def test_distill_dialog_needs_teacher_and_prompts(window, monkeypatch, seed_mode
 
 
 def test_distill_dialog_timeout_defaults_to_300(window, seed_models):
-    """S3: the wait-per-answer control sits in the distill dialog
-    (the job start), plain words, 300 seconds unless changed."""
+    """S3, updated v0.36.0 (N20): the wait per answer is the
+    usual 300 seconds, working silently — no number on the
+    dialog any more."""
     from stella.gui import DistillDialog
 
     seed_models(["lfm3:1.7b", "qwen3.5:4b"])
     dialog = DistillDialog(window)
     assert dialog.timeout() == 300
+    assert not hasattr(dialog, "timeout_spin")
     labels = [
         w.text() for w in dialog.findChildren(QLabel)
     ]
-    assert "How long to wait for each answer (seconds)" in labels
-    dialog.timeout_spin.setValue(600)
-    assert dialog.timeout() == 600
+    assert "How long to wait for each answer (seconds)" not in labels
     dialog.close()
 
 
@@ -4008,16 +4011,25 @@ def test_settings_sections_are_collapsible(window, qapp):
 
 
 def test_main_window_train_sections_collapse(window, qapp):
-    """T80: the main panel's train-detail sections collapse."""
+    """T80, updated v0.36.0 (N23): the sections that start empty
+    start collapsed (Dataset starts open — it is the next step
+    in the flow), and every header still opens and closes its
+    section."""
     window._checklist_dismiss()
     qapp.processEvents()
+    assert window.dataset_section.is_expanded()
     for section in (
-        window.dataset_section,
+        window.overrides_section,
         window.checkpoints_section,
+        window.runs_section,
         window.log_section,
         window.sleep_section,
     ):
-        assert section.is_expanded()
+        assert section.is_expanded() is False
+    window.log_section.header_btn.click()
+    qapp.processEvents()
+    assert window.log_section.is_expanded()
+    assert window.log_section.content.isVisible()
     window.log_section.header_btn.click()
     qapp.processEvents()
     assert window.log_section.is_expanded() is False
@@ -5969,11 +5981,15 @@ def test_estimate_label_updates_when_project_changes(
 
 
 def test_estimate_label_unavailable_without_base_ref(window, qapp):
-    # T84: the seeded profile has no base ref — the label says
-    # unavailable instead of guessing or fetching.
+    # T84, updated v0.36.0 (N24): the seeded profile has no base
+    # ref — the label says unavailable WITH the reason and the
+    # next step, instead of the bare words it used to show.
     _select_session(window)
     qapp.processEvents()
-    assert window.train_estimate_label.text() == "Estimate unavailable."
+    text = window.train_estimate_label.text()
+    assert text.startswith("Estimate unavailable:")
+    assert "not set yet" in text
+    assert "Set the model source" in text
 
 
 # -- T85: dry-run estimate button -------------------------------------
@@ -6006,15 +6022,20 @@ def test_estimate_button_shows_dry_run_in_log(
 
 
 def test_estimate_button_without_model_warns(window, monkeypatch, qapp):
-    # T85: with no base ref the button warns plainly instead of
-    # crashing or hanging on a fetch.
+    # T85, updated v0.36.0 (N24): with no base ref the button
+    # warns plainly instead of crashing or hanging on a fetch —
+    # and the warning is the plain direction, not the old
+    # message with its repo words and terminal line.
     _select_session(window)
     warnings = []
     monkeypatch.setattr(window, "_warn", warnings.append)
     window.train_estimate_btn.click()
     qapp.processEvents()
     assert warnings
-    assert "base_ref" in warnings[0]
+    assert "training files are not set" in warnings[0]
+    assert "Set the model source" in warnings[0]
+    assert "bridge" not in warnings[0]
+    assert "Terminal" not in warnings[0]
 
 
 # -- T95: proof-run button --------------------------------------------
@@ -7956,7 +7977,8 @@ def test_checkpoint_prune_keeps_newest_n(window, seeded, monkeypatch, qapp):
         _seed_checkpoint(seeded, step, loss=1.5, size=1000)
     _select_session(window)
     qapp.processEvents()
-    assert window.checkpoint_keep_spin.value() == 3
+    # v0.36.0 (N20): no keep-number on screen — pruning keeps
+    # the newest 3 silently, and the confirm says so.
     asked = []
     monkeypatch.setattr(
         QMessageBox, "question",
@@ -8165,12 +8187,15 @@ def test_project_window_notes_visible_without_scrolling(window, qapp):
 
 
 def test_step_cap_defaults_to_full_run(window):
-    """T161: the step cap starts at 0 — the full run."""
-    assert window.train_step_cap_spin.value() == 0
+    """T161, updated v0.36.0 (N20): there is no step cap number
+    on the main screen — Go is the full run, and the Proof run
+    button is the short-run choice."""
+    assert not hasattr(window, "train_step_cap_spin")
 
 
 def test_go_applies_step_cap(window, monkeypatch, seeded, qapp):
-    """T161: Go with a step cap starts the run capped."""
+    """T161, updated v0.36.0 (N20): Go starts the full run —
+    no cap, because there is no cap number to apply."""
     import stella.gui as gui_mod
     import stella.train as train_mod
 
@@ -8187,11 +8212,10 @@ def test_go_applies_step_cap(window, monkeypatch, seeded, qapp):
         QMessageBox, "question", lambda *a, **k: QMessageBox.Yes
     )
     _select_session(window)
-    window.train_step_cap_spin.setValue(7)
     window._go_train()
     qapp.processEvents()
     assert window._train_worker is not None
-    assert window._train_worker._max_steps == 7
+    assert window._train_worker._max_steps is None
 
 
 def test_run_dataset_override_reaches_worker(window, monkeypatch, seeded, qapp):
@@ -8270,16 +8294,10 @@ def test_run_overrides_clear_on_project_switch(window, seeded):
 
 
 def test_gguf_quant_combo_defaults_to_q4_k_m(window):
-    """T161: the GGUF quant picker offers every known quant and
-    starts on the CLI default."""
-    from stella.requant import DEFAULT_QUANT, KNOWN_QUANTS
-
-    assert window.gguf_quant_combo.currentText() == DEFAULT_QUANT
-    items = [
-        window.gguf_quant_combo.itemText(i)
-        for i in range(window.gguf_quant_combo.count())
-    ]
-    assert items == list(KNOWN_QUANTS)
+    """T161, updated v0.36.0 (N20): there is no quant picker on
+    the main screen — the export uses the usual quant silently
+    (the picked-quant export test below pins which one)."""
+    assert not hasattr(window, "gguf_quant_combo")
 
 
 def test_gguf_checkpoint_picker_lists_checkpoints(window, seeded):
@@ -8372,10 +8390,13 @@ def test_gguf_export_uses_picked_sleep_cycle(
 def test_gguf_export_uses_picked_quant_and_checkpoint(
     window, seeded, monkeypatch, tmp_path, qapp
 ):
-    """T161: Export GGUF passes the picked quant and checkpoint to
-    the engine — the CLI's --quant / --from-checkpoint."""
+    """T161, updated v0.36.0 (N20): Export GGUF passes the
+    silent default quant and the picked checkpoint to the
+    engine — the CLI keeps its --quant / --from-checkpoint."""
     import stella.gguf as gguf_mod
     from PySide6.QtWidgets import QFileDialog
+
+    from stella.requant import DEFAULT_QUANT
 
     # R4: a governing profile with no probe is refused before the
     # job starts — this test is about the picked quant, so the
@@ -8384,7 +8405,6 @@ def test_gguf_export_uses_picked_quant_and_checkpoint(
     _make_checkpoint(seeded, "lfm3-tool", "tool-calls", 2)
     _select_session(window)
     window.refresh_train_panel()
-    window.gguf_quant_combo.setCurrentText("Q8_0")
     window.gguf_checkpoint_combo.setCurrentIndex(1)
     captured = {}
 
@@ -8402,7 +8422,7 @@ def test_gguf_export_uses_picked_quant_and_checkpoint(
     )
     window.export_gguf_gui()
     _wait_for_job(window, qapp)
-    assert captured["quant"] == "Q8_0"
+    assert captured["quant"] == DEFAULT_QUANT
     assert captured["from_checkpoint"] == 2
 
 
@@ -8987,19 +9007,17 @@ def test_typed_cloud_model_kept_when_ollama_down(window, seed_models, qapp):
 
 
 def test_chat_window_shows_template_step(window, seed_models, qapp):
-    """R49: the chat window shows the template step from real
-    store state — step 1 with no session, step 4 once the seeded
-    session (dataset set, not started) is picked."""
+    """R49, updated v0.36.0 (N22): the chat window has no
+    permanent step line any more — the "Step 4 of 8: Recipe."
+    chrome is gone (the agent still tracks the step itself)."""
     from stella.gui import ChatWindow
 
     seed_models(["lfm3:1.7b"])
     chat = ChatWindow(window)
     chat.show()
     qapp.processEvents()
-    assert chat.step_label.text() == "Step 1 of 8: Goal."
-    _select_session(window)
-    chat._refresh_step_label()
-    assert chat.step_label.text() == "Step 4 of 8: Recipe."
+    assert not hasattr(chat, "step_label")
+    assert "Step 4 of 8" not in chat.messages.toPlainText()
     chat.close()
 
 

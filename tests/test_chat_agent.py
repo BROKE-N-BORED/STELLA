@@ -487,7 +487,7 @@ def test_start_training_paused_report(agent, store, seeded, monkeypatch):
 
 
 def test_run_probe_tool(agent, store, seeded, monkeypatch):
-    def fake_probe(store, profile, project):
+    def fake_probe(store, profile, project, **kwargs):
         # R65: a realistic probe result carries the empty counts
         # — the gate refuses a result that leaves them out.
         return {

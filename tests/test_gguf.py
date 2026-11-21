@@ -741,15 +741,21 @@ def test_merge_adapter_refuses_before_loading(monkeypatch, tmp_path):
     assert not (tmp_path / "out").exists()
 
 
-def test_merge_adapter_guard_uses_base_bytes_hook(tmp_path):
+def test_merge_adapter_guard_uses_base_bytes_hook(tmp_path, monkeypatch):
     # _base_bytes skips the metadata read entirely (the test seam
-    # for the guard itself).
+    # for the guard itself). v0.36.0 (N29): merge_adapter judges
+    # by the RAM free right now (pinned at 2 GB here), and the
+    # refusal names it instead of the fixed ceiling.
+    import stella.train as train_mod
     from stella.gguf import merge_adapter
 
+    monkeypatch.setattr(
+        train_mod, "available_ram_bytes", lambda: 2 * 1024**3
+    )
     adapter = tmp_path / "adapter"
     adapter.mkdir()
     (adapter / "adapter_config.json").write_text("{}\n")
-    with pytest.raises(StellaError, match="over the 8.00 GB ceiling"):
+    with pytest.raises(StellaError, match="free right now"):
         merge_adapter(
             "does/not-matter", adapter, tmp_path / "out",
             _base_bytes=20_000_000_000,

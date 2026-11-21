@@ -195,12 +195,39 @@ def estimate_merge_bytes(base_bytes: int) -> int:
 
 
 def check_merge_fit(
-    base_bytes: int, limit_bytes: int = RAM_LIMIT_BYTES
+    base_bytes: int,
+    limit_bytes: int = RAM_LIMIT_BYTES,
+    *,
+    available_bytes: int | None = None,
 ) -> None:
     """Refuse the merge when base + merged copy + headroom does
-    not fit the ceiling. The estimate is named in the message."""
+    not fit. The estimate is named in the message.
+
+    v0.36.0 (N29): like the training guard, the merge is judged
+    against the RAM free right now when the caller measured it —
+    Ollama holding models is the normal state of this PC, and a
+    merge judged only against the fixed ceiling could start with
+    3 GB free and be killed mid-merge, after hours of training."""
+    from .train import effective_ram_limit_bytes
+
+    limit = (
+        effective_ram_limit_bytes(available_bytes)
+        if available_bytes is not None
+        else limit_bytes
+    )
+    limit = min(limit, limit_bytes)
     estimate = estimate_merge_bytes(base_bytes)
-    if estimate > limit_bytes:
+    if estimate > limit:
+        if available_bytes is not None and available_bytes < limit_bytes:
+            raise StellaError(
+                f"Merging needs about {_gb(estimate)} of RAM (the "
+                f"base model at {_gb(base_bytes)}, plus the merged "
+                f"copy, plus headroom), and this PC has only "
+                f"{_gb(available_bytes)} free right now.\n"
+                "Close other programs and try again (Ollama may "
+                "be holding models in memory), or use a smaller "
+                "base model."
+            )
         raise StellaError(
             f"Merging needs about {_gb(estimate)} of RAM (the base "
             f"model at {_gb(base_bytes)}, plus the merged copy, plus "
@@ -212,7 +239,10 @@ def check_merge_fit(
 
 
 def merge_warnings(
-    base_bytes: int, limit_bytes: int = RAM_LIMIT_BYTES
+    base_bytes: int,
+    limit_bytes: int = RAM_LIMIT_BYTES,
+    *,
+    available_bytes: int | None = None,
 ) -> list[str]:
     """Warnings for an export that fits the merge guard but is
     tight (T31). The converter loads the merged model again as a
@@ -220,22 +250,32 @@ def merge_warnings(
     resident — when merge + converter together pass the ceiling,
     the export proceeds but the user is told to close other apps
     first. Empty when the merge itself does not fit: the guard
-    refuses then, and no warning is needed on top."""
-    if estimate_merge_bytes(base_bytes) > limit_bytes:
+    refuses then, and no warning is needed on top. v0.36.0 (N29):
+    the ceiling here is the same available-RAM-tightened limit
+    the guard judges by."""
+    from .train import effective_ram_limit_bytes
+
+    limit = (
+        effective_ram_limit_bytes(available_bytes)
+        if available_bytes is not None
+        else limit_bytes
+    )
+    limit = min(limit, limit_bytes)
+    if estimate_merge_bytes(base_bytes) > limit:
         return []
     total = (
         estimate_merge_bytes(base_bytes)
         + base_bytes
         + RAM_HEADROOM_BYTES
     )
-    if total <= limit_bytes:
+    if total <= limit:
         return []
     return [
         f"Close other apps before exporting: the merge needs about "
         f"{_gb(estimate_merge_bytes(base_bytes))} of RAM, and the "
         f"converter then loads the model again as a separate "
         f"process (about {_gb(base_bytes + RAM_HEADROOM_BYTES)}). "
-        f"Together that is over the {_gb(limit_bytes)} on this PC, "
+        f"Together that is over the {_gb(limit)} on this PC, "
         "so the export is tight on RAM."
     ]
 
@@ -275,7 +315,13 @@ def merge_adapter(
             from .train import load_model_metadata
 
             _base_bytes = load_model_metadata(base_ref)["base_bytes"]
-        check_merge_fit(_base_bytes)
+        # v0.36.0 (N29): judged against the RAM free right now,
+        # like the training guard — not just the fixed ceiling.
+        from .train import available_ram_bytes
+
+        check_merge_fit(
+            _base_bytes, available_bytes=available_ram_bytes()
+        )
     require_training_deps()
     if on_event is not None:
         on_event({
@@ -478,6 +524,30 @@ def _run(
         )
 
 
+def _require_gguf_magic(path: Path, step: str) -> None:
+    """Refuse a converter/quantizer output that is not a GGUF
+    file (v0.36.0, N32). A tool can exit 0 having written garbage
+    (or the wrong file); existence alone used to report it ready,
+    and the failure then surfaced later, somewhere else, pointing
+    at the wrong step. The first four bytes of a real GGUF file
+    are the letters GGUF — the same check Stella already makes on
+    the GGUF files it reads as inputs."""
+    try:
+        with open(path, "rb") as handle:
+            magic = handle.read(4)
+    except OSError as exc:
+        raise StellaError(
+            f"the {step} finished but its file could not be read "
+            f"back: {path}. Try again."
+        ) from exc
+    if magic != b"GGUF":
+        raise StellaError(
+            f"the {step} finished but the file it wrote is not a "
+            f"GGUF file: {path}. The tool may have written the "
+            "wrong file. Try again, or check the llama.cpp install."
+        )
+
+
 def convert_to_gguf(
     hf_dir: str | Path,
     out_path: str | Path,
@@ -551,6 +621,8 @@ def convert_to_gguf(
             raise StellaError(
                 f"converter finished but wrote no file: {tmp_f16}"
             )
+        if _runner is None:
+            _require_gguf_magic(tmp_f16, "GGUF converter")
         if cancelled():
             raise StellaError("Cancelled.")
         emit({
@@ -569,6 +641,8 @@ def convert_to_gguf(
             raise StellaError(
                 f"quantizer finished but wrote no file: {out_path}"
             )
+        if _runner is None:
+            _require_gguf_magic(out_path, "quantizer")
     except BaseException as exc:
         # A failed quantize used to leave the F16 intermediate
         # behind — ~3.4 GB on a real model (T26). Remove it and say

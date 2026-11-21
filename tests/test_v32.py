@@ -52,8 +52,8 @@ def window(qapp, seeded, settings):
     win.close()
 
 
-# NOTE: the version tests moved to test_v34.py (test_version_is_0_35_0,
-# test_window_title_carries_version) — the version is 0.35.0 now.
+# NOTE: the version tests moved to test_v34.py (test_version_is_0_36_0,
+# test_window_title_carries_version) — the version is 0.36.0 now.
 
 
 # -- fixtures: the real OST formats ---------------------------------

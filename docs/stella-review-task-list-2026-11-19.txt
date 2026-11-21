@@ -1,5 +1,5 @@
 STELLA REVIEW TASK LIST - 2026-11-19 (v0.34.0)
-Status: 18 done, 65 open. N1 to N18 were finished in v0.35.0; the rest are still open.
+Status: 37 done, 46 open. N1 to N18 were finished in v0.35.0; N19 to N37 were finished in v0.36.0; the rest are still open.
 From the full-product review of Stella v0.34.0: 85 findings (0 P0, 18 P1, 37 P2, 30 P3) merged into 83 tasks (18 P1, 37 P2, 28 P3). Full details: docs/stella-review-task-list-2026-11-19.md and docs/review-2026-11-19.md
 
 P1:
@@ -23,25 +23,25 @@ N17. A sleep cycle interrupted during its first checkpoint save can never sleep 
 N18. How to Use Troubleshooting sends the user to a button that is not there, and back to the manual Hugging Face hunt (with the exact wrong-repo example) — DONE in v0.35.0
 
 P2:
-N19. The no-repo ending from Download sends the user hunting by hand and does not open the profile window, while the other path into the same ending does
-N20. A Step cap number sits on the main screen — a training setting the brief says should not be there (plus pre-set numbers in export, prune, and distill)
-N21. Chat with Ollama down contradicts itself: it says pick a model in Settings, then treats typed text as a model name and suggests a cloud model the user cannot use
-N22. Chat permanently shows 'Step 4 of 8: Recipe.' — a step from a list the user never sees, in words never explained
-N23. At 1366x768 the main window is one ~2,020 px scroll and the export/probe buttons sit far below the fold behind tall empty sections
-N24. 'Estimate unavailable.' gives no reason and no next step, and the Estimate button answers with repo jargon plus a terminal command
-N25. Probes run from chat are saved as 'gate' runs even for models that hold no seat, so the results window later shows a gate verdict that was never a gate
-N26. The refusal judge scores two plainly compliant answers as refusals
-N27. Dreaming that produces nothing usable is reported as if it worked, and no dream outcome or skip reason is saved in the cycle report
-N28. The --steps cap is honoured by the training loop but ignored by the disk guard and the dry run, so a 5-step proof run can be refused for a full run's checkpoints
-N29. The merge RAM guard judges only the fixed 8 GB ceiling, never the RAM actually free; the replay check and the probe load the base with no RAM check at all
-N30. Distill's 'the teacher was slow, not down' wording never fires on the real path (a regression of the closed R30 fix)
-N31. Requant's Ollama create has no timeout, unlike every other step — a hung create hangs requant forever
-N32. Convert and quantize outputs are never checked to actually be GGUF files before being reported ready
-N33. The bridge offers another size's weights labelled as this model's own repo, and the strengths table likewise gives one size's measured strengths to other sizes
-N34. The mismatch guard only runs at download time — never before training on already-downloaded weights — and it re-warns forever after the user deliberately keeps a repo
-N35. The built-in strengths table says LFM3 is good at reading long documents; Stella's own OST measurement scored it 0% at exactly that
-N36. The Hub lookup reports 'nothing found' when Hugging Face actually failed mid-search, instead of 'couldn't reach it, try again'
-N37. The Hub lookup's 'offerable' check passes a repo whose real weights are a GGUF file (a small tokenizer.safetensors is enough)
+N19. The no-repo ending from Download sends the user hunting by hand and does not open the profile window, while the other path into the same ending does — DONE in v0.36.0
+N20. A Step cap number sits on the main screen — a training setting the brief says should not be there (plus pre-set numbers in export, prune, and distill) — DONE in v0.36.0
+N21. Chat with Ollama down contradicts itself: it says pick a model in Settings, then treats typed text as a model name and suggests a cloud model the user cannot use — DONE in v0.36.0
+N22. Chat permanently shows 'Step 4 of 8: Recipe.' — a step from a list the user never sees, in words never explained — DONE in v0.36.0
+N23. At 1366x768 the main window is one ~2,020 px scroll and the export/probe buttons sit far below the fold behind tall empty sections — DONE in v0.36.0
+N24. 'Estimate unavailable.' gives no reason and no next step, and the Estimate button answers with repo jargon plus a terminal command — DONE in v0.36.0
+N25. Probes run from chat are saved as 'gate' runs even for models that hold no seat, so the results window later shows a gate verdict that was never a gate — DONE in v0.36.0
+N26. The refusal judge scores two plainly compliant answers as refusals — DONE in v0.36.0
+N27. Dreaming that produces nothing usable is reported as if it worked, and no dream outcome or skip reason is saved in the cycle report — DONE in v0.36.0
+N28. The --steps cap is honoured by the training loop but ignored by the disk guard and the dry run, so a 5-step proof run can be refused for a full run's checkpoints — DONE in v0.36.0
+N29. The merge RAM guard judges only the fixed 8 GB ceiling, never the RAM actually free; the replay check and the probe load the base with no RAM check at all — DONE in v0.36.0
+N30. Distill's 'the teacher was slow, not down' wording never fires on the real path (a regression of the closed R30 fix) — DONE in v0.36.0
+N31. Requant's Ollama create has no timeout, unlike every other step — a hung create hangs requant forever — DONE in v0.36.0
+N32. Convert and quantize outputs are never checked to actually be GGUF files before being reported ready — DONE in v0.36.0
+N33. The bridge offers another size's weights labelled as this model's own repo, and the strengths table likewise gives one size's measured strengths to other sizes — DONE in v0.36.0
+N34. The mismatch guard only runs at download time — never before training on already-downloaded weights — and it re-warns forever after the user deliberately keeps a repo — DONE in v0.36.0
+N35. The built-in strengths table says LFM3 is good at reading long documents; Stella's own OST measurement scored it 0% at exactly that — DONE in v0.36.0
+N36. The Hub lookup reports 'nothing found' when Hugging Face actually failed mid-search, instead of 'couldn't reach it, try again' — DONE in v0.36.0
+N37. The Hub lookup's 'offerable' check passes a repo whose real weights are a GGUF file (a small tokenizer.safetensors is enough) — DONE in v0.36.0
 N38. Provision calls weights 'ready' when a weights file is a dangling symlink to a download that never finished
 N39. A local weights folder set as the base is treated as a Hugging Face repo id and reported missing, with a dead-end 'repo does not exist' message
 N40. Cloning a profile silently drops its report cards and its profile notes, and nothing anywhere says so

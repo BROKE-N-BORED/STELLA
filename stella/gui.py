@@ -108,7 +108,7 @@ from PySide6.QtWidgets import (
 from . import export as export_mod
 from . import provision
 from .autoconfig import measure_pc, ram_usage_gb
-from .chat_agent import ChatAgent, template_step_text
+from .chat_agent import ChatAgent
 from .debug_log import DebugLogger, check_ollama
 from .howto import topic_text, topic_titles
 from .hub_lookup import OFFLINE_MESSAGE, UNKNOWN_MESSAGE, lookup_hf_repos
@@ -167,6 +167,11 @@ from .train import TrainController
 # minutes on this PC. Passed through as max_steps (T56 made the
 # cap real); reaching it is completion, not a pause.
 PROOF_RUN_STEPS = 5
+
+# How many of the newest checkpoints / sleep cycles Prune keeps
+# (v0.36.0, N20): a silent default, no number on screen — the
+# Prune confirm still says how many it keeps and what it frees.
+PRUNE_KEEP_NEWEST = 3
 
 
 def _help_label(text):
@@ -4054,12 +4059,12 @@ class ChatWindow(QDialog):
         activity.addWidget(self.activity_text, 1)
         layout.addLayout(activity)
 
-        # R49: where the chat is in the training template, from
-        # real store state — so the user can see the step without
-        # trusting the model to say it.
-        self.step_label = QLabel("")
-        self.step_label.setWordWrap(True)
-        layout.addWidget(self.step_label)
+        # v0.36.0 (N22): there is no permanent step line in this
+        # window any more. It read "Step 4 of 8: Recipe." — a step
+        # from a list the window never showed, in a word it never
+        # explained, and a first-time user could not act on it.
+        # The agent still tracks the step and says where it is in
+        # its replies; the window shows nothing it cannot explain.
 
         self.messages = QTextBrowser()
         self.messages.setReadOnly(True)
@@ -4097,9 +4102,11 @@ class ChatWindow(QDialog):
 
         input_row = QHBoxLayout()
         self.input = QLineEdit()
-        self.input.setPlaceholderText(
-            "Say what you want, for example: train LFM3 to write short replies"
+        self._input_placeholder = (
+            "Say what you want, for example: train LFM3 to "
+            "write short replies"
         )
+        self.input.setPlaceholderText(self._input_placeholder)
         self.input.returnPressed.connect(self._on_send)
         input_row.addWidget(self.input, 1)
         self.send_btn = QPushButton("Send")
@@ -4131,19 +4138,6 @@ class ChatWindow(QDialog):
         )
         if not self._main.chat_model:
             self._ask_for_model()
-        self._refresh_step_label()
-
-    def _refresh_step_label(self):
-        """The template step line (R49), from the main window's
-        session — the same store state the agent derives it from,
-        so the label and the agent can never disagree."""
-        self.step_label.setText(
-            template_step_text(
-                self._main.store,
-                self._main._current_profile,
-                self._main._current_project,
-            )
-        )
 
     # -- messages ---------------------------------------------------
     def _append(self, who: str, text: str):
@@ -4196,6 +4190,33 @@ class ChatWindow(QDialog):
             choices.append(("custom", custom["model"]))
         return choices
 
+    def _refresh_input_lock(self):
+        """Lock the input when there is no chat model to talk to
+        (v0.36.0, N21): no model picked, none installed, and no
+        cloud key saved — in that state typed text can never be
+        a model pick, so the box says where the pick happens
+        (Settings) instead of taking text it would only misread
+        as a model name. Unlocked as soon as a model is picked
+        or one becomes pickable."""
+        locked = (
+            not self._main.chat_model
+            and not self._chat_model_choices()
+        )
+        self.input.setEnabled(not locked)
+        if not (self._worker is not None and self._worker.isRunning()):
+            self.send_btn.setEnabled(not locked)
+        self.input.setPlaceholderText(
+            "Pick a chat model in Settings first"
+            if locked
+            else self._input_placeholder
+        )
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # A model picked in Settings while this window was
+        # closed unlocks the input again (v0.36.0, N21).
+        self._refresh_input_lock()
+
     def _ask_for_model(self):
         models, _sizes, loaded, _up, _at = MODEL_CACHE.snapshot()
         if not loaded:
@@ -4224,6 +4245,11 @@ class ChatWindow(QDialog):
                 "Settings. You can also add a Groq or Gemini key in "
                 "Settings under AI providers and chat with one of those.",
             )
+            # v0.36.0 (N21): with nothing pickable, the input
+            # locks with the Settings direction — typed text here
+            # could never be a model pick, and the window used to
+            # contradict itself by treating it as one.
+            self._refresh_input_lock()
             return
         self._awaiting_model = True
         self._waiting_for_models = False
@@ -4247,15 +4273,24 @@ class ChatWindow(QDialog):
                 )
             self._append("Stella", text)
         self._show_model_buttons(choices)
+        self._refresh_input_lock()
 
     def _on_models_refreshed(self):
         """A background model-list refresh landed (T43): if the chat
         was still looking for models, show them now (or say Ollama
         is not answering). A refresh landing after the buttons are
         already up changes nothing — and a refresh landing while
-        the no-models message is up does not repeat it (R45)."""
+        the no-models message is up does not repeat it (R45).
+        v0.36.0 (N21): a refresh that makes a model pickable
+        after all (Ollama started) shows the pick and unlocks the
+        input the no-models state locked."""
         if self._waiting_for_models:
             self._ask_for_model()
+            return
+        if not self._main.chat_model and self._chat_model_choices():
+            self._ask_for_model()
+        else:
+            self._refresh_input_lock()
 
     def _show_model_buttons(self, choices):
         """One button per model the chat can use (T76, R102):
@@ -4299,6 +4334,7 @@ class ChatWindow(QDialog):
             f"Got it, I will chat with {name}. What do you want "
             "to train?",
         )
+        self._refresh_input_lock()
 
     def _match_model(self, text: str) -> tuple[str, str] | None:
         """The user's reply, matched against the models the chat can
@@ -4356,19 +4392,38 @@ class ChatWindow(QDialog):
             if not self._awaiting_model:
                 self._ask_for_model()
                 return
+            # v0.36.0 (N21): when nothing is pickable (Ollama down
+            # and no cloud key saved), typed text is not a model
+            # name and can never become one — say the Settings
+            # direction again instead of contradicting it.
+            if not self._chat_model_choices():
+                self._append(
+                    "Stella",
+                    "There is no chat model to pick yet. Start "
+                    "Ollama, then pick a chat model in Settings. "
+                    "You can also add a Groq or Gemini key in "
+                    "Settings under AI providers and chat with "
+                    "one of those.",
+                )
+                self._refresh_input_lock()
+                return
             match = self._match_model(text)
             if match is None:
                 # R45: with Ollama down there are no buttons above,
-                # so the hint must not point at them.
+                # so the hint must not point at them. v0.36.0
+                # (N21): the hint never names a model the user
+                # cannot pick — the old text exemplified a cloud
+                # model that needs a key this user does not have.
                 if self.model_buttons:
                     note = (
                         "I did not find that model. Pick one of the "
-                        "buttons above, or type one of the names."
+                        "buttons above, or type one of those names."
                     )
                 else:
                     note = (
-                        "I did not find that model. Type the full "
-                        "model name, for example openai/gpt-oss-120b."
+                        "I did not find that model. Type the name "
+                        "of one of the models you can pick, or pick "
+                        "a chat model in Settings."
                     )
                 self._append("Stella", note)
                 return
@@ -4449,8 +4504,6 @@ class ChatWindow(QDialog):
         else:
             self._main.refresh_tree()
             self._main.refresh_session()
-        # R49: the step may have moved — the label follows it.
-        self._refresh_step_label()
 
     def _on_cancel(self):
         if self._worker is not None and self._worker.isRunning():
@@ -4514,25 +4567,12 @@ class DistillDialog(QDialog):
                 "you want the small model to learn."
             )
         )
-        # S3: how long to wait for each answer. A wait decision,
-        # not a training setting, so it sits here at the job
-        # start. A slow teacher on this PC can take minutes per
-        # answer; if the wait runs out, that prompt fails and the
-        # run stops.
-        layout.addWidget(
-            QLabel("How long to wait for each answer (seconds)")
-        )
-        self.timeout_spin = QSpinBox()
-        self.timeout_spin.setRange(1, 3600)
-        self.timeout_spin.setValue(300)
-        self.timeout_spin.setSingleStep(60)
-        layout.addWidget(self.timeout_spin)
-        layout.addWidget(
-            _help_label(
-                "If the wait runs out, that prompt fails and the "
-                "run stops. Raise it when the teacher is slow."
-            )
-        )
+        # v0.36.0 (N20): no wait number on this dialog any more.
+        # How long to wait for each answer is a pre-set number
+        # like the others the review named; the usual wait (the
+        # distill default, 300 seconds) works silently. A prompt
+        # whose wait runs out is skipped and reported, and the
+        # run says so.
         buttons = QHBoxLayout()
         self.start_btn = QPushButton("Start")
         self.start_btn.setToolTip(
@@ -4549,7 +4589,6 @@ class DistillDialog(QDialog):
         layout.addLayout(buttons)
         _chain_tab_order([
             self.teacher_combo, self.prompts_btn,
-            self.timeout_spin,
             self.start_btn, self.cancel_btn,
         ])
 
@@ -4600,8 +4639,12 @@ class DistillDialog(QDialog):
         return self._prompts_path
 
     def timeout(self) -> int:
-        """Seconds to wait for each answer (S3)."""
-        return self.timeout_spin.value()
+        """Seconds to wait for each answer: the usual wait,
+        working silently (v0.36.0, N20 — the number is no longer
+        on the dialog)."""
+        from .distill import DEFAULT_TIMEOUT_SECONDS
+
+        return int(DEFAULT_TIMEOUT_SECONDS)
 
     def _refresh_start(self):
         self.start_btn.setEnabled(
@@ -5675,33 +5718,23 @@ class MainWindow(QMainWindow):
         self.train_estimate_label = QLabel("")
         self.train_estimate_label.setWordWrap(True)
         card_layout.addWidget(self.train_estimate_label)
-        # The step cap (T161): Go stops the run after this many
-        # steps — a proof run with a number the user picks, instead
-        # of the fixed 5-step Proof run button. 0 means the full
-        # run. It applies to a fresh start only: Resume continues
-        # to the run's own total.
-        cap_row = QHBoxLayout()
-        cap_row.addWidget(QLabel("Step cap"))
-        self.train_step_cap_spin = QSpinBox()
-        self.train_step_cap_spin.setRange(0, 100000)
-        self.train_step_cap_spin.setValue(0)
-        self.train_step_cap_spin.setToolTip(
-            "Stop after this many steps. 0 means the full run."
-        )
-        cap_row.addWidget(self.train_step_cap_spin)
-        cap_row.addWidget(
-            _help_label("0 means the full run. A cap makes Go a short run.")
-        )
-        cap_row.addStretch(1)
-        card_layout.addLayout(cap_row)
+        # v0.36.0 (N20): there is no Step cap number on this
+        # screen any more. How long a run goes is a training
+        # setting, and training settings are picked for this PC
+        # in the backend. The short-run choice that stays is the
+        # Proof run button above: a short run, not a number.
         layout.addWidget(card)
 
         # -- train details, below, in collapsible sections ---------
         # (T80, entry 012): Dataset, Checkpoints, Training log, and
         # Sleep cycles each collapse to one header, so the scroll
-        # shortens to what the user is actually looking at. All
-        # start open; the widgets keep their attributes, so the
-        # rest of the window does not care that they moved.
+        # shortens to what the user is actually looking at. The
+        # widgets keep their attributes, so the rest of the window
+        # does not care that they moved. v0.36.0 (N23): the
+        # sections that start empty now start collapsed too —
+        # at 1366x768 the page measured about 2,020 px tall with
+        # every section open, and the export and probe buttons sat
+        # far below the fold behind tall empty list boxes.
         dataset_section = CollapsibleSection("Dataset")
         dataset_btns = QHBoxLayout()
         # R97: the button also takes a dropped .jsonl file — the
@@ -5776,6 +5809,11 @@ class MainWindow(QMainWindow):
         overrides_section.content_layout.addLayout(override_form)
         layout.addWidget(overrides_section)
         self.overrides_section = overrides_section
+        # v0.36.0 (N23): sections that start empty start
+        # collapsed, so the main window is not one long scroll
+        # of empty boxes at 1366x768. One click on the header
+        # opens any of them.
+        overrides_section.set_expanded(False)
 
         checkpoints_section = CollapsibleSection("Checkpoints")
         self.train_checkpoints = QListWidget()
@@ -5817,39 +5855,26 @@ class MainWindow(QMainWindow):
         self.checkpoint_delete_btn.clicked.connect(self._delete_checkpoint)
         ckpt_btns.addWidget(self.checkpoint_resume_btn)
         ckpt_btns.addWidget(self.checkpoint_delete_btn)
-        ckpt_btns.addWidget(QLabel("Keep newest"))
-        self.checkpoint_keep_spin = QSpinBox()
-        self.checkpoint_keep_spin.setRange(1, 99)
-        self.checkpoint_keep_spin.setValue(3)
-        self.checkpoint_keep_spin.setToolTip(
-            "How many of the newest checkpoints pruning keeps. "
-            "The rest are deleted for good."
-        )
-        ckpt_btns.addWidget(self.checkpoint_keep_spin)
+        # v0.36.0 (N20): no "Keep newest" number on screen —
+        # pruning keeps the newest few (PRUNE_KEEP_NEWEST) and
+        # the confirm says how many and what it frees.
         self.checkpoint_prune_btn = QPushButton("Prune")
         self.checkpoint_prune_btn.setToolTip(
-            "Delete old checkpoints, keeping the newest ones "
-            "you picked. Deleted for good."
+            "Delete old checkpoints, keeping the newest few. "
+            "Deleted for good."
         )
         self.checkpoint_prune_btn.clicked.connect(self._prune_checkpoints)
         ckpt_btns.addWidget(self.checkpoint_prune_btn)
         ckpt_btns.addStretch(1)
         checkpoints_section.content_layout.addLayout(ckpt_btns)
-        # The GGUF options (T161): the quant, and which checkpoint
-        # to export from — the CLI's --quant / --from-checkpoint.
-        # The checkpoint picker rides the T150 list above: the
-        # trained adapter is the default, a picked checkpoint
-        # exports that checkpoint's adapter instead.
+        # Which checkpoint to export from (T161's picker, the
+        # CLI's --from-checkpoint). The checkpoint picker rides
+        # the T150 list above: the trained adapter is the default,
+        # a picked checkpoint exports that checkpoint's adapter
+        # instead. v0.36.0 (N20): there is no Quant picker any
+        # more — the export always uses the usual balance of size
+        # and quality (DEFAULT_QUANT), working silently.
         gguf_row = QHBoxLayout()
-        gguf_row.addWidget(QLabel("Quant"))
-        self.gguf_quant_combo = QComboBox()
-        self.gguf_quant_combo.addItems(list(KNOWN_QUANTS))
-        self.gguf_quant_combo.setCurrentText(DEFAULT_QUANT)
-        self.gguf_quant_combo.setToolTip(
-            "How small the GGUF file is. Q4_K_M is the usual "
-            "balance of size and quality."
-        )
-        gguf_row.addWidget(self.gguf_quant_combo)
         gguf_row.addWidget(QLabel("From"))
         self.gguf_checkpoint_combo = QComboBox()
         self.gguf_checkpoint_combo.addItem("Trained adapter")
@@ -5888,6 +5913,7 @@ class MainWindow(QMainWindow):
         )
         layout.addWidget(checkpoints_section)
         self.checkpoints_section = checkpoints_section
+        checkpoints_section.set_expanded(False)  # v0.36.0 (N23)
 
         # Past runs (T151): one row per finished (or paused) run —
         # date, steps, final loss. Picking one shows its loss curve
@@ -5904,6 +5930,7 @@ class MainWindow(QMainWindow):
         runs_section.content_layout.addWidget(self.run_history_hint)
         layout.addWidget(runs_section)
         self.runs_section = runs_section
+        runs_section.set_expanded(False)  # v0.36.0 (N23)
 
         log_section = CollapsibleSection("Training log")
         self.train_log = QPlainTextEdit()
@@ -5912,6 +5939,7 @@ class MainWindow(QMainWindow):
         log_section.content_layout.addWidget(self.train_log)
         layout.addWidget(log_section)
         self.log_section = log_section
+        log_section.set_expanded(False)  # v0.36.0 (N23)
 
         # Sleep keeps its dream switch and its cycles list here; the
         # Sleep button itself is gone — Go starts it, like every job.
@@ -5950,19 +5978,12 @@ class MainWindow(QMainWindow):
         )
         self.sleep_delete_btn.clicked.connect(self._delete_sleep_cycle)
         sleep_btns.addWidget(self.sleep_delete_btn)
-        sleep_btns.addWidget(QLabel("Keep newest"))
-        self.sleep_keep_spin = QSpinBox()
-        self.sleep_keep_spin.setRange(1, 99)
-        self.sleep_keep_spin.setValue(3)
-        self.sleep_keep_spin.setToolTip(
-            "How many of the newest sleep cycles pruning keeps. "
-            "The rest are deleted for good."
-        )
-        sleep_btns.addWidget(self.sleep_keep_spin)
+        # v0.36.0 (N20): no "Keep newest" number here either —
+        # same silent default as the checkpoint prune.
         self.sleep_prune_btn = QPushButton("Prune")
         self.sleep_prune_btn.setToolTip(
-            "Delete old sleep cycles, keeping the newest ones "
-            "you picked. Deleted for good."
+            "Delete old sleep cycles, keeping the newest few. "
+            "Deleted for good."
         )
         self.sleep_prune_btn.clicked.connect(self._prune_sleep_cycles)
         sleep_btns.addWidget(self.sleep_prune_btn)
@@ -5970,6 +5991,7 @@ class MainWindow(QMainWindow):
         sleep_section.content_layout.addLayout(sleep_btns)
         layout.addWidget(sleep_section)
         self.sleep_section = sleep_section
+        sleep_section.set_expanded(False)  # v0.36.0 (N23)
         layout.addStretch(1)
 
         self.bento_widget = page
@@ -5997,14 +6019,14 @@ class MainWindow(QMainWindow):
             self.checkpoints_section.header_btn,
             self.train_checkpoints,
             self.checkpoint_resume_btn, self.checkpoint_delete_btn,
-            self.checkpoint_keep_spin, self.checkpoint_prune_btn,
+            self.checkpoint_prune_btn,
             self.train_export_gguf_btn,
             self.train_probe_btn, self.train_view_probe_btn,
             self.runs_section.header_btn, self.run_history_list,
             self.log_section.header_btn, self.train_log,
             self.sleep_section.header_btn,
             self.sleep_dream_check, self.sleep_cycles,
-            self.sleep_delete_btn, self.sleep_keep_spin,
+            self.sleep_delete_btn,
             self.sleep_prune_btn,
         ])
 
@@ -6830,7 +6852,12 @@ class MainWindow(QMainWindow):
                 self._current_profile, self._current_project
             )
         except StellaError:
-            self.train_estimate_label.setText("Estimate unavailable.")
+            # v0.36.0 (N24): the line says why, and what to do.
+            self.train_estimate_label.setText(
+                "Estimate unavailable: Stella could not read this "
+                "project. Pick the project again, then the "
+                "estimate will show."
+            )
             return
         base_ref = (prof.get("base_ref") or "").strip()
         key = self._estimate_key(
@@ -6839,7 +6866,13 @@ class MainWindow(QMainWindow):
         if key == self._estimate_cache_key:
             self.train_estimate_label.setText(self._estimate_cache_text)
             return
-        text = "Estimate unavailable."
+        # v0.36.0 (N24): every unavailable line carries its reason
+        # and the next step — never the bare words on their own.
+        text = (
+            "Estimate unavailable: this profile's training files "
+            "are not set yet. Press Set the model source... above "
+            "to set them, then the estimate will show."
+        )
         if base_ref:
             local = Path(base_ref).expanduser().is_dir()
             ready = False
@@ -6864,9 +6897,22 @@ class MainWindow(QMainWindow):
                     )
                 except StellaError:
                     # The dataset health line already names a bad
-                    # dataset; an unreadable model just leaves the
-                    # estimate blank.
-                    text = "Estimate unavailable."
+                    # dataset; here the line still says what to
+                    # check instead of stopping at "unavailable".
+                    if not (proj.get("dataset_ref") or "").strip():
+                        text = (
+                            "Estimate unavailable: this project "
+                            "has no examples yet. Pick a dataset "
+                            "file or use the sample dataset, then "
+                            "the estimate will show."
+                        )
+                    else:
+                        text = (
+                            "Estimate unavailable: Stella could "
+                            "not work this run out. Check the "
+                            "dataset file is readable, then pick "
+                            "the project again."
+                        )
                 else:
                     text = format_estimate_short(estimate)
             elif is_hf_repo_id(base_ref):
@@ -6874,10 +6920,11 @@ class MainWindow(QMainWindow):
                 # yet: the estimate appears once they are (the
                 # read then hits the local cache). A base ref that
                 # is not a repo id at all (an Ollama tag, from the
-                # T54 sync) stays plain unavailable — downloading
-                # would not make it estimable.
+                # T54 sync) keeps the not-set line above —
+                # downloading would not make it estimable.
                 text = (
-                    "Estimate available after the model downloads."
+                    "Estimate available after the model downloads. "
+                    "Press Download model above to get it."
                 )
         self._estimate_cache_key = key
         self._estimate_cache_text = text
@@ -7105,9 +7152,10 @@ class MainWindow(QMainWindow):
                 self.dataset_prompt_row.setVisible(True)
                 self._say("This job needs examples to learn from.")
                 return
-        # T161: the step cap — 0 means the full run.
-        cap = self.train_step_cap_spin.value()
-        self.start_training(max_steps=cap if cap > 0 else None)
+        # v0.36.0 (N20): Go is the full run — there is no step
+        # cap number on the screen. The Proof run button is the
+        # short-run choice.
+        self.start_training()
 
     def _go_sleep(self):
         """Sleep, after the same dataset check as Train."""
@@ -7705,6 +7753,12 @@ class MainWindow(QMainWindow):
             return repo
         if repo.lower() in [c["repo"].lower() for c in candidates]:
             return repo
+        # v0.36.0 (N34): a repo the user already chose to keep,
+        # after seeing this warning, does not warn again — the
+        # keep is remembered on the profile, per repo.
+        kept = (profile.get("kept_base_ref") or "").strip()
+        if kept and kept.lower() == repo.lower():
+            return repo
         # The offer: prefer the candidate carrying the tag's size
         # hint ("qwen3.5:4b-q4_K_M" is a 4B model, so the 4B repo,
         # not the first candidate, which is the 2B one). No hint
@@ -7744,6 +7798,13 @@ class MainWindow(QMainWindow):
                 return None
             return candidate
         if clicked == keep_btn:
+            # v0.36.0 (N34): remember the keep, so this warning
+            # does not reopen on every later download or training
+            # start for a repo the user deliberately kept.
+            try:
+                self.store.update_profile(slug, kept_base_ref=repo)
+            except StellaError:
+                pass
             return repo
         return None
 
@@ -7773,12 +7834,22 @@ class MainWindow(QMainWindow):
             # v0.33.0: an unknown tag runs the live lookup in its
             # worker instead; when it lands a repo, the download
             # restarts from the top with the repo set.
-            if self._offer_bridge_repo(
+            # v0.36.0 (N19): when no repo comes back, this path now
+            # ends the same way the "Set the model source..." path
+            # ends — the profile window opens after the honest
+            # message, instead of leaving the user on the main
+            # window to hunt for it by hand.
+            offered = self._offer_bridge_repo(
                 slug,
                 after_done=lambda s, repo: (
-                    self.start_download(s) if repo else None
+                    self.start_download(s)
+                    if repo
+                    else self.open_profile_window(s)
                 ),
-            ) is None:
+            )
+            if offered is None:
+                if not self._hub_lookup_in_flight():
+                    self.open_profile_window(slug)
                 return
             try:
                 status = provision.weights_status(self.store, slug)
@@ -7883,7 +7954,27 @@ class MainWindow(QMainWindow):
             self._warn(str(exc))
             return False
         if status["state"] == "ready":
-            return True
+            # v0.36.0 (N34): ready weights used to skip the
+            # mismatch guard entirely, so training and sleep ran
+            # on a foreign repo's weights with no warning ever.
+            # The same check the download path runs runs here too
+            # (a keep the user already chose is remembered, so
+            # this warns once, not every start).
+            repo = self._check_base_repo_match(profile, status["repo"])
+            if repo is None:
+                return False
+            if repo == status["repo"]:
+                return True
+            # The user switched repos: judge the new repo's
+            # weights, and fall through to the download question
+            # when they are not on disk yet.
+            try:
+                status = provision.weights_status(self.store, profile)
+            except StellaError as exc:
+                self._warn(str(exc))
+                return False
+            if status["state"] == "ready":
+                return True
         if status["state"] == "no-repo":
             # v0.30.0: offer the bridge repo, then fall through to
             # the "Download the model first?" question below — the
@@ -9847,14 +9938,15 @@ class MainWindow(QMainWindow):
     def _prune_checkpoints(self):
         """Delete all but the newest N checkpoints (T150).
 
-        N comes from the spinbox (default 3). The confirm shows
-        the total size before and after plus the space freed,
-        and defaults to No — the deletion is permanent.
+        N is the silent default (PRUNE_KEEP_NEWEST, v0.36.0
+        N20). The confirm shows the total size before and after
+        plus the space freed, and defaults to No — the deletion
+        is permanent.
         Modal audit: this confirm opens only from the Prune
         button. No existing test clicks it; the new tests stub
         QMessageBox.question.
         """
-        keep = self.checkpoint_keep_spin.value()
+        keep = PRUNE_KEEP_NEWEST
         from .train import list_checkpoints, prune_checkpoints
 
         checkpoints = list_checkpoints(
@@ -9971,9 +10063,9 @@ class MainWindow(QMainWindow):
             return
         from .gguf import estimate_export, format_export_estimate
 
-        # T161: the estimate follows the picked quant, not the
-        # default — the size is the picked quant's size.
-        quant = self.gguf_quant_combo.currentText().strip() or DEFAULT_QUANT
+        # v0.36.0 (N20): the estimate uses the same silent
+        # default quant the export itself uses.
+        quant = DEFAULT_QUANT
         try:
             estimate = estimate_export(
                 self.store, self._current_profile, self._current_project,
@@ -10358,7 +10450,34 @@ class MainWindow(QMainWindow):
         try:
             estimate = estimate_run(self.store, profile, project)
         except StellaError as exc:
-            self._warn(str(exc))
+            # v0.36.0 (N24): a base that is an Ollama tag or a GGUF
+            # file fails with the bridge message — repo words plus
+            # a terminal command. The modal instead says the plain
+            # fact and names the button that fixes it, right here
+            # on the main screen.
+            message = str(exc)
+            base_ref = ""
+            try:
+                base_ref = (
+                    self.store.get_profile(profile).get("base_ref")
+                    or ""
+                ).strip()
+            except StellaError:
+                base_ref = ""
+            kind = ""
+            if base_ref:
+                from .ollama_bridge import classify_base_ref
+
+                kind, _detail = classify_base_ref(base_ref)
+            if kind in ("ollama", "gguf") or "stella bridge" in message:
+                self._warn(
+                    "Stella cannot estimate this run yet: this "
+                    "profile's training files are not set. Press "
+                    "Set the model source... on the main screen to "
+                    "set them, then press Estimate again."
+                )
+            else:
+                self._warn(message)
             return
         report = format_estimate(estimate)
         self._train_log_line("Dry run (no model loaded):")
@@ -10632,14 +10751,15 @@ class MainWindow(QMainWindow):
     def _prune_sleep_cycles(self):
         """Delete all but the newest N sleep cycles (R66).
 
-        N comes from the spinbox (default 3). The confirm shows
-        the total size before and after plus the space freed,
-        and defaults to No — the deletion is permanent.
+        N is the silent default (PRUNE_KEEP_NEWEST, v0.36.0
+        N20). The confirm shows the total size before and after
+        plus the space freed, and defaults to No — the deletion
+        is permanent.
         Modal audit: this confirm opens only from the Prune
         button. No existing test clicks it; the new tests stub
         QMessageBox.question.
         """
-        keep = self.sleep_keep_spin.value()
+        keep = PRUNE_KEEP_NEWEST
         from .sleep import list_sleep_cycles, prune_sleep_cycles
 
         cycles = list_sleep_cycles(
@@ -10753,11 +10873,12 @@ class MainWindow(QMainWindow):
         # one) and in the log line that starts the job. A metadata
         # read that fails just leaves it out; the export itself
         # still runs.
-        # T161: the quant and the checkpoint come from the pickers
-        # beside the button — the CLI's --quant / --from-checkpoint.
+        # The checkpoint comes from the picker beside the button
+        # — the CLI's --from-checkpoint. The quant is the silent
+        # default (v0.36.0, N20; the CLI keeps its --quant).
         # R3: a sleep entry carries ("sleep", cycle) and becomes
         # the CLI's --from-sleep instead.
-        quant = self.gguf_quant_combo.currentText().strip() or DEFAULT_QUANT
+        quant = DEFAULT_QUANT
         picked = self.gguf_checkpoint_combo.currentData()
         from_checkpoint = None
         from_sleep = None

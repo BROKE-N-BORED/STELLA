@@ -38,7 +38,12 @@ from .hub_lookup import OFFLINE_MESSAGE, UNKNOWN_MESSAGE, lookup_hf_repos
 from .model import StellaError, Store, slug_from_model
 from .ollama import OllamaError, chat_stream, list_models
 from .ollama_bridge import suggest_hf_repos
-from .probe import load_probe_results, probe_gate, probe_project
+from .probe import (
+    is_governing_profile,
+    load_probe_results,
+    probe_gate,
+    probe_project,
+)
 from .providers import ProviderError, make_chat_fn, make_chat_stream_fn
 from .provision import (
     format_size,
@@ -1369,10 +1374,21 @@ class ChatAgent:
         if isinstance(session, str):
             return session
         profile, project = session
-        result = probe_project(self.store, profile, project)
+        # v0.36.0 (N25): the mode is computed exactly like the
+        # window and the CLI compute it — a profile bound for no
+        # governing seat probes informationally, and its saved
+        # result must say so, or the results window later shows a
+        # gate verdict that was never a gate.
+        try:
+            prof = self.store.get_profile(profile)
+        except StellaError:
+            prof = {}
+        informational = not is_governing_profile(prof)
+        result = probe_project(
+            self.store, profile, project, informational=informational
+        )
         before = result["before"]
         after = result["after"]
-        _passed, verdict = probe_gate(result)
         summary = (
             f"Refusal probe for {project!r}: {before['refusals']}/"
             f"{before['total']} refusals before tuning, "
@@ -1385,6 +1401,14 @@ class ChatAgent:
                 f" {silent} prompt"
                 f"{'s' if silent != 1 else ''} got no answer."
             )
+        if informational:
+            # T90's wording, shared with the window and the CLI:
+            # counts and change, no verdict.
+            return (
+                f"{summary} Change: {result['delta']:+.0%}. "
+                "Informational only: no gate verdict."
+            )
+        _passed, verdict = probe_gate(result)
         return f"{summary} {verdict}"
 
     def _tool_export_gguf(self, args: dict) -> str:
