@@ -304,7 +304,19 @@ def test_main_rejects_non_repo_id(capsys):
 def test_main_requires_hub(monkeypatch, capsys):
     monkeypatch.setattr(provision, "hub_available", lambda: False)
     assert provision.main(["download", "a/b"]) == 1
-    assert "install-training.sh" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    # v0.35.0: the same plain-words message as the window and the
+    # chat download paths - click directions and the size note,
+    # no Train panel, no terminal line, no package names.
+    assert out.startswith("ERROR ")
+    assert "Training is not set up on this PC yet" in out
+    assert "Install training" in out
+    assert "main screen" in out
+    assert "Install Stella Training" in out
+    assert "about 2 GB" in out
+    for banned in ("Train panel", "Terminal", "install-training",
+                   "Hugging Face packages"):
+        assert banned not in out, banned
 
 
 def test_main_delegates_to_run_download(monkeypatch):

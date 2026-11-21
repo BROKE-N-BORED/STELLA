@@ -254,11 +254,11 @@ def main(argv: list[str] | None = None) -> int:
               "(it should look like org/name).", flush=True)
         return 1
     if not hub_available():
-        print("ERROR The Hugging Face packages are not installed. "
-              "Install training first: press Install training in "
-              "the Train panel, or double-click Install Stella "
-              "Training in the Stella folder. "
-              "(Terminal: bash install-training.sh)", flush=True)
+        print("ERROR Training is not set up on this PC yet, so the "
+              "download tool is not installed yet. Press Install "
+              "training on the main screen, or double-click "
+              "Install Stella Training in the Stella folder. "
+              "It downloads about 2 GB.", flush=True)
         return 1
     return run_download(repo_id)
 

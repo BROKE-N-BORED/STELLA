@@ -26,7 +26,9 @@ The query ladder (deterministic, derived from the tag by
 The first rung that yields an offerable repo wins; later rungs
 are not searched.
 
-A repo is offerable ONLY if it can actually be trained from:
+A repo is offerable ONLY if it is really this model (its name
+and size agree with the tag - see _repo_matches_model) AND it
+can actually be trained from:
 
 - its name does not contain "gguf" or "mlx" (case-insensitive),
 - its file list has config.json AND at least one .safetensors
@@ -156,6 +158,70 @@ def _fetch_json(path: str, deadline: float):
         raise _HubDown(str(exc)) from exc
 
 
+def _name_tokens(text: str) -> list[str]:
+    """Name tokens for matching: 'qwen3.5-uncensored' becomes
+    ['qwen', '3.5', 'uncensored'], 'granite-4.1-3b-base' becomes
+    ['granite', '4.1', '3b', 'base']. A trailing size ('3b',
+    '1.7b') stays one token."""
+    return re.findall(
+        r"[a-z]+|\d+(?:\.\d+)?b|\d+(?:\.\d+)?",
+        (text or "").lower(),
+    )
+
+
+def _repo_matches_model(repo: str, tag: str) -> bool:
+    """True when a Hub repo really is the model the tag names
+    (v0.35.0, N2). The Hub's fuzzy search returns near misses -
+    other families' builds and other sizes that merely share a
+    search word - and offering one of those as 'this model'
+    would download a stranger's weights. So a repo is only
+    offerable when its name agrees with the tag:
+
+    - the family token (qwen, granite, bonsai) is in the name;
+    - every version number in the tag's name (3.5, 4.1) is in
+      the repo name;
+    - the sizes agree: a size in both must be the same size,
+      and a repo that names a size the tag never mentions
+      cannot be checked, so it is not offered;
+    - a variant word in the tag's name (uncensored,
+      abliterated) is in the repo name too, unless the repo is
+      plainly the base model (its name says 'base'), which is
+      what a tuned tag is trained from.
+    """
+    base = _base_name(tag)
+    name = base.rsplit("/", 1)[-1]
+    repo_name = repo.rsplit("/", 1)[-1].lower()
+    tag_tokens = _name_tokens(name)
+    repo_tokens = _name_tokens(repo_name)
+    if not tag_tokens or not repo_tokens:
+        return False
+    tag_size = _size_hint(tag)
+    repo_size = _size_hint(repo_name)
+    if tag_size is not None and repo_size is not None:
+        if tag_size != repo_size:
+            return False
+    elif repo_size is not None:
+        return False
+    family = next(
+        (tok for tok in tag_tokens if tok.isalpha()), ""
+    )
+    if not family or family not in repo_tokens:
+        return False
+    size_token = tag_size or ""
+    for tok in tag_tokens:
+        if tok[0].isdigit() and tok != size_token:
+            if tok not in repo_tokens:
+                return False
+    variants = [
+        tok for tok in tag_tokens
+        if tok.isalpha() and tok != family
+    ]
+    if variants and "base" not in repo_tokens:
+        if not any(tok in repo_tokens for tok in variants):
+            return False
+    return True
+
+
 def _offerable(detail) -> bool:
     """True when a repo detail shows real training weights:
     config.json plus at least one .safetensors file."""
@@ -219,7 +285,7 @@ def lookup_hf_repos(tag: str, timeout: float = 30.0) -> dict:
                 detail = _fetch_json(f"/api/models/{repo}", deadline)
             except _HubDown:
                 continue
-            if _offerable(detail):
+            if _offerable(detail) and _repo_matches_model(repo, tag):
                 offerable.append(
                     {
                         "repo": repo,

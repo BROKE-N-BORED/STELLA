@@ -570,6 +570,20 @@ def load_probe_results(store: Store, profile: str, project: str) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+def _parse_result_stamp(value) -> float | None:
+    """A saved probe result's timestamp as a Unix time, or None
+    when it does not parse (v0.35.0, N5)."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip())
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
 def require_passed_probe(store: Store, profile: str, project: str) -> str | None:
     """The refusal-probe gate, enforced at export (R4).
 
@@ -597,21 +611,69 @@ def require_passed_probe(store: Store, profile: str, project: str) -> str | None
     prof = store.get_profile(profile)
     if not is_governing_profile(prof):
         return None
+    # v0.35.0 (N13): the refusal is plain words and names the ONE
+    # next step that works from where the user actually is. A
+    # profile with no trained adapter cannot be probed yet, so
+    # its next step is training; one with an adapter goes
+    # straight to the probe.
+    project_dir = store.project_dir(profile, project)
+    has_adapter = (
+        project_dir / "adapter" / "adapter_config.json"
+    ).is_file()
     result = load_probe_results(store, profile, project)
     if result is None:
+        if not has_adapter:
+            raise StellaError(
+                "This model has a safety check to pass before it "
+                "can be exported. The check is the refusal probe, "
+                "and it needs a trained model first. Train the "
+                "model, then run the refusal probe, then export."
+            )
         raise StellaError(
-            f"profile {profile!r} is bound for a governing seat, "
-            "so it cannot be exported until its refusal probe "
-            "passes. Run the refusal probe first (Run refusal "
-            "probe in the Train panel, or stella probe "
-            f"{profile} {project})."
+            "This model has a safety check to pass before it can "
+            "be exported. Run the refusal probe first, then "
+            "export again."
         )
+    # v0.35.0 (N5): a saved pass only counts for the adapter and
+    # base it measured. A result recorded against a different
+    # base than the profile's current one, or one taken before
+    # the adapter that exists now was trained, is stale and does
+    # not open the gate. (Training also deletes the saved result
+    # when a new adapter lands; these checks cover a base change
+    # and any result file that survived.)
+    recorded_base = (result.get("base_ref") or "").strip()
+    current_base = (prof.get("base_ref") or "").strip()
+    if recorded_base and current_base and recorded_base != current_base:
+        raise StellaError(
+            "This model has a safety check to pass before it can "
+            "be exported. The saved refusal probe was run on a "
+            "different base model than this profile uses now, so "
+            "it does not count. Run the refusal probe again, then "
+            "export."
+        )
+    stamp = _parse_result_stamp(result.get("timestamp"))
+    if stamp is not None and has_adapter:
+        try:
+            adapter_mtime = (
+                project_dir / "adapter" / "adapter_config.json"
+            ).stat().st_mtime
+        except OSError:
+            adapter_mtime = None
+        if adapter_mtime is not None and adapter_mtime > stamp + 1.0:
+            raise StellaError(
+                "This model has a safety check to pass before it "
+                "can be exported. The saved refusal probe was run "
+                "before the current trained model was made, so it "
+                "does not count. Run the refusal probe again, "
+                "then export."
+            )
     passed, verdict = probe_gate(result)
     if not passed:
         raise StellaError(
-            f"profile {profile!r} is bound for a governing seat, "
-            f"and its refusal probe did not pass: {verdict}. "
-            "Fix the tune, then run the probe again before exporting."
+            "This model has a safety check to pass before it can "
+            f"be exported, and its refusal probe did not pass: "
+            f"{verdict}. Fix the tune, then run the refusal probe "
+            "again before exporting."
         )
     return verdict
 

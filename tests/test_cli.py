@@ -293,7 +293,9 @@ def test_cli_train_missing_deps_in_process(home, monkeypatch, capsys):
     )
     code = cli_mod.main(["train", "p1", "proj"])
     assert code == 1
-    assert "install-training.sh" in capsys.readouterr().err
+    assert "Training is not set up on this PC yet" in (
+        capsys.readouterr().err
+    )
 
 
 def test_cli_sleep_help(home):
@@ -395,7 +397,7 @@ def test_cli_sleep_delete_removes_cycle(home):
     run_cli(home, "create-project", "p1", "proj")
     cdir = _seed_cli_sleep_cycle(home, 1, payload_bytes=2048)
     _seed_cli_sleep_cycle(home, 2, payload_bytes=2048)
-    res = run_cli(home, "sleep-delete", "p1", "proj", "1")
+    res = run_cli(home, "sleep-delete", "p1", "proj", "1", "--yes")
     assert res.returncode == 0
     assert "Deleted sleep cycle 1" in res.stdout
     assert "freed" in res.stdout
@@ -422,7 +424,7 @@ def test_cli_sleep_prune_keeps_newest(home):
     cdir1 = _seed_cli_sleep_cycle(home, 1, payload_bytes=1000)
     _seed_cli_sleep_cycle(home, 2, payload_bytes=1000)
     _seed_cli_sleep_cycle(home, 3, payload_bytes=1000)
-    res = run_cli(home, "sleep-prune", "p1", "proj", "--keep", "1")
+    res = run_cli(home, "sleep-prune", "p1", "proj", "--keep", "1", "--yes")
     assert res.returncode == 0
     assert "Pruned 2 sleep cycles" in res.stdout
     assert "freed" in res.stdout
@@ -469,7 +471,9 @@ def test_cli_sleep_missing_deps_in_process(home, monkeypatch, capsys):
             "--dataset", "sample-tool-calls.jsonl")
     code = cli_mod.main(["sleep", "p1", "proj"])
     assert code == 1
-    assert "install-training.sh" in capsys.readouterr().err
+    assert "Training is not set up on this PC yet" in (
+        capsys.readouterr().err
+    )
 
 
 def test_cli_chat_shows_narration_and_progress(

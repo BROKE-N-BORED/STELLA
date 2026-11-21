@@ -67,15 +67,24 @@ _QUANT_BPW = {
 }
 
 # GGUF tensor type ids (the type of each weight block in the file).
+# These are the real ggml type ids from ggml.h (cross-checked
+# against upstream ggml.h for v0.35.0): id 9 is Q8_1, and every
+# K-quant and IQ type follows from there. Ids 4 and 5 were Q4_2
+# and Q4_3, whose support ggml removed, so they stay unmapped.
+# Ids 31 to 33 are the Q4_0_4_4, Q4_0_4_8 and Q4_0_8_8 layout
+# variants: same Q4_0 packing family, so they honestly share the
+# Q4_0 name and bits per weight here.
 _TENSOR_TYPE_QUANT = {
     0: ("F32", 32.0), 1: ("F16", 16.0), 2: ("Q4_0", 4.5),
     3: ("Q4_1", 4.5), 6: ("Q5_0", 5.5), 7: ("Q5_1", 5.5),
-    8: ("Q8_0", 8.5), 9: ("Q2_K", 3.35), 10: ("Q3_K", 3.9),
-    11: ("Q4_K", 4.85), 12: ("Q5_K", 5.5), 13: ("Q6_K", 6.6),
-    14: ("Q8_K", 8.5), 15: ("IQ2_XXS", 2.06), 16: ("IQ2_XS", 2.31),
-    17: ("IQ3_XXS", 3.06), 18: ("IQ1_S", 1.56), 19: ("IQ4_NL", 4.5),
-    20: ("IQ3_S", 3.44), 21: ("IQ2_S", 2.5), 22: ("IQ4_XS", 4.25),
+    8: ("Q8_0", 8.5), 9: ("Q8_1", 8.5), 10: ("Q2_K", 3.35),
+    11: ("Q3_K", 3.9), 12: ("Q4_K", 4.85), 13: ("Q5_K", 5.5),
+    14: ("Q6_K", 6.6), 15: ("Q8_K", 8.5), 16: ("IQ2_XXS", 2.06),
+    17: ("IQ2_XS", 2.31), 18: ("IQ3_XXS", 3.06), 19: ("IQ1_S", 1.56),
+    20: ("IQ4_NL", 4.5), 21: ("IQ3_S", 3.44), 22: ("IQ2_S", 2.5),
+    23: ("IQ4_XS", 4.25),
     24: ("I8", 8.0), 25: ("I16", 16.0), 26: ("I32", 32.0),
+    27: ("I64", 64.0), 28: ("F64", 64.0),
     29: ("IQ1_M", 1.75), 30: ("BF16", 16.0),
     31: ("Q4_0", 4.5), 32: ("Q4_0", 4.5), 33: ("Q4_0", 4.5),
     34: ("TQ1_0", 1.69), 35: ("TQ2_0", 2.06),
@@ -969,6 +978,31 @@ def requant_model(
         # dir goes.
         shutil.rmtree(job_dir, ignore_errors=True)
         raise
+    # v0.35.0 (N6): a create that exits 0 is not proof the model
+    # is installed. Check the new tag really answers in Ollama
+    # BEFORE the work files go: they are the only copy of the
+    # smaller file, so a create Ollama quietly dropped must not
+    # cost the user the file as well as the model.
+    verified = False
+    try:
+        _run(
+            ["ollama", "show", new_tag],
+            what=f"Checking the new model {new_tag!r} is in Ollama",
+            _runner=_runner,
+            should_stop=should_stop,
+            timeout=None,
+        )
+        verified = True
+    except Exception:  # noqa: BLE001 - any failure means not verified
+        verified = False
+    if not verified:
+        raise StellaError(
+            f"Ollama said it made {new_tag!r}, but that model is "
+            "not in Ollama now, so the smaller model was not "
+            f"installed. The smaller file is still at {out_path}, "
+            "so nothing is lost. Start Ollama and try again, and "
+            "the file will be used to make the model."
+        )
     emit({"type": "created", "new_tag": new_tag})
 
     # Ollama copied the file into its own store, so the work files

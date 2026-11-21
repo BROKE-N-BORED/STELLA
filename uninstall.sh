@@ -190,10 +190,59 @@ if [ "$YES" -eq 0 ] && [ -d "$HOME/.cache/pip" ]; then
   fi
 fi
 
+# Training wheel cache (v0.35.0): install-training.sh downloads
+# the training wheels into ~/.cache/stella/wheels (about 2 GB),
+# and that cache is Stella's own - not pip's, not the user's
+# data. Same treatment as the pip cache above: an OFFER, never
+# a silent delete, default No, only worth asking about over a
+# size threshold. --yes asks nothing, so the cache is kept.
+# STELLA_UNINSTALL_WHEEL_CACHE_MIN_KB overrides the threshold
+# (tests use it); the default is 100 MB.
+WHEEL_CACHE_STATE="none"
+WHEEL_CACHE_SIZE=""
+if [ -d "$HOME/.cache/stella/wheels" ]; then
+  WHEEL_CACHE_MIN_KB="${STELLA_UNINSTALL_WHEEL_CACHE_MIN_KB:-102400}"
+  case "$WHEEL_CACHE_MIN_KB" in
+    ''|*[!0-9]*) WHEEL_CACHE_MIN_KB="102400" ;;
+  esac
+  WHEEL_CACHE_KB="$(du -sk "$HOME/.cache/stella/wheels" 2>/dev/null | cut -f1)"
+  case "$WHEEL_CACHE_KB" in
+    ''|*[!0-9]*) WHEEL_CACHE_KB="0" ;;
+  esac
+  if [ "$WHEEL_CACHE_KB" -ge 1048576 ]; then
+    WHEEL_CACHE_SIZE="about $((WHEEL_CACHE_KB / 1048576)) GB"
+  else
+    WHEEL_CACHE_SIZE="about $((WHEEL_CACHE_KB / 1024)) MB"
+  fi
+  WHEEL_CACHE_STATE="kept"
+  if [ "$YES" -eq 0 ] && [ "$WHEEL_CACHE_KB" -ge "$WHEEL_CACHE_MIN_KB" ]; then
+    printf "Stella's training downloads left %s in its wheel cache. Remove it? [y/N] " "$WHEEL_CACHE_SIZE"
+    read -r wheel_answer || wheel_answer=""
+    case "$wheel_answer" in
+      y|Y|yes|YES)
+        rm -rf "$HOME/.cache/stella/wheels"
+        echo "Removed the wheel cache."
+        WHEEL_CACHE_STATE="removed"
+        ;;
+    esac
+  fi
+fi
+
 if [ "$REMOVE_DATA" -eq 1 ]; then
   rm -rf "$HOME/.stella"
   echo "Removed Stella and your Stella data in $HOME/.stella."
 else
   echo "Removed Stella. Your data is still in $HOME/.stella."
 fi
-echo "Delete the folder $DIR to finish removing it."
+# The closing lines name the wheel cache either way, so they
+# never claim removal is finished while 2 GB of it remains.
+if [ "$WHEEL_CACHE_STATE" = "removed" ]; then
+  echo "The training wheel cache in $HOME/.cache/stella/wheels was removed too."
+  echo "Delete the folder $DIR to finish removing it."
+elif [ "$WHEEL_CACHE_STATE" = "kept" ]; then
+  echo "The training wheel cache in $HOME/.cache/stella/wheels ($WHEEL_CACHE_SIZE) is still on this PC. Delete that folder too if you want it gone."
+  echo "Delete the folder $DIR to finish removing Stella itself."
+else
+  echo "There was no training wheel cache to remove."
+  echo "Delete the folder $DIR to finish removing it."
+fi

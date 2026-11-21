@@ -181,8 +181,11 @@ def _model_block(block) -> dict | None:
 
 def _pick_model(blocks: list[dict], tag_hint: str | None) -> dict | None:
     """The one model block to use: the entry whose model matches
-    the profile's tag when one does, else the only entry, else
-    None — a multi-model file with no match is not guessed."""
+    the profile's tag. When a tag hint is given, a block for a
+    different model is never used, however many blocks the file
+    holds (v0.35.0, N3): a card for another model lists as a
+    stored, unread card. With no hint, the only entry is used;
+    a multi-model file with no hint is not guessed."""
     if not blocks:
         return None
     wanted = (tag_hint or "").strip().lower()
@@ -190,6 +193,7 @@ def _pick_model(blocks: list[dict], tag_hint: str | None) -> dict | None:
         for block in blocks:
             if block["model"].strip().lower() == wanted:
                 return block
+        return None
     if len(blocks) == 1:
         return blocks[0]
     return None
@@ -238,6 +242,14 @@ def parse_ost_card(path, tag_hint: str | None = None) -> dict | None:
         if "template_score" in data and "template" in data:
             got = _template_entry(data)
             if got is not None:
+                # v0.35.0 (N3): the model match applies to this
+                # shape too - the shape OST actually writes. A
+                # file for a different model is not this model's
+                # card, however it was attached.
+                wanted = (tag_hint or "").strip().lower()
+                file_model = str(data.get("model") or "").strip().lower()
+                if wanted and file_model != wanted:
+                    return None
                 return {
                     "model": str(data.get("model") or ""),
                     "overall": None,
@@ -267,9 +279,16 @@ def parse_ost_card(path, tag_hint: str | None = None) -> dict | None:
         # A list of per-template result files.
         merged: dict[str, tuple[float, int, datetime | None]] = {}
         model = ""
+        wanted = (tag_hint or "").strip().lower()
         for item in data:
             if not isinstance(item, dict):
                 continue
+            # v0.35.0 (N3): rows for a different model never
+            # merge into this model's card.
+            if wanted:
+                item_model = str(item.get("model") or "").strip().lower()
+                if item_model and item_model != wanted:
+                    continue
             got = _template_entry(item)
             template_id = item.get("template")
             if got is None or not isinstance(template_id, str):
@@ -529,27 +548,55 @@ def _strengths_from_parsed(parsed: dict) -> tuple[list[str], list[str]]:
 
 
 def strengths_from_cards(store, profile: str) -> dict | None:
-    """What the profile's newest OST report card measured, or
+    """What the profile's attached OST report cards measured, or
     None when no attached card is an OST card for this model.
     Returns {'good': [...], 'not_good': [...], 'source': ...,
     'overall': ...} — the lists may both be empty when every
     score sat in the middle (measured, but nothing stands out).
     Card evidence beats the built-in strengths table; the window
     falls back to the table when this returns None. Never raises
-    on a bad card."""
+    on a bad card.
+
+    v0.35.0 (N4): OST writes one file per test, so a whole run
+    is several cards. The evidence merges across ALL of them,
+    per test, with the newest result for each test winning -
+    taking only the single newest card whole showed one test's
+    verdict as the model's whole strengths."""
     cards = list_report_cards(store, profile)
-    for card in cards:
-        if card["kind"] != "ost" or card["parsed"] is None:
-            continue
-        good, not_good = _strengths_from_parsed(card["parsed"])
-        return {
-            "good": good,
-            "not_good": not_good,
-            "source": (
-                "From its OST report card"
-                + (f", {card['date']}" if card["date"] else "")
-                + "."
-            ),
-            "overall": card["parsed"].get("overall"),
-        }
-    return None
+    ost_cards = [
+        card for card in cards
+        if card["kind"] == "ost" and card["parsed"] is not None
+    ]
+    if not ost_cards:
+        return None
+    merged: dict[str, tuple[float, int, datetime | None]] = {}
+    for card in ost_cards:
+        for template_id, entry in card["parsed"]["templates"].items():
+            old = merged.get(template_id)
+            if old is None:
+                merged[template_id] = entry
+                continue
+            new_stamp, old_stamp = entry[2], old[2]
+            if new_stamp is not None and (
+                old_stamp is None or new_stamp > old_stamp
+            ):
+                merged[template_id] = entry
+    newest = ost_cards[0]
+    overall = None
+    for card in ost_cards:
+        if card["parsed"].get("overall") is not None:
+            overall = card["parsed"]["overall"]
+            break
+    good, not_good = _strengths_from_parsed(
+        {"templates": merged}
+    )
+    return {
+        "good": good,
+        "not_good": not_good,
+        "source": (
+            "From its OST report card"
+            + (f", {newest['date']}" if newest["date"] else "")
+            + "."
+        ),
+        "overall": overall,
+    }

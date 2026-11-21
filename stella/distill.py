@@ -301,6 +301,20 @@ def distill_dataset(
             ),
         })
 
+    # v0.35.0 (N7): the success gate looks at THIS run, not at
+    # the whole file. Rows left over from an older run (for
+    # prompts that are not even in this run's file) must not turn
+    # a run where every prompt failed into a success: no new kept
+    # rows plus failures means refuse, without pointing the
+    # project at the dataset or saying done.
+    if kept == 0 and failed:
+        raise StellaError(
+            "None of this run's prompts got a usable answer from "
+            f"the teacher ({len(failed)} prompt(s) failed), so no "
+            "new dataset was made. The answers saved from earlier "
+            "runs are still on disk; run it again to pick up where "
+            "it stopped."
+        )
     # The whole file must be a valid training dataset. This also
     # catches a file the user hand-edited into a bad state. When
     # failures left too few rows, the refusal names the resume

@@ -19,10 +19,9 @@ Design rules for this machine (Ryzen 3 3250U, 8 GB RAM, no GPU):
 - torch / transformers / peft are OPTIONAL imports. This module must
   import cleanly on a base Stella install (PySide6 only); every
   function that needs the training stack raises a StellaError with
-  TRAINING_INSTALL_HINT, which names the click path first
-  (Install training in the Train panel, or double-clicking
-  Install Stella Training) and keeps the terminal command as the
-  fallback.
+  TRAINING_INSTALL_HINT, which says in plain words that training
+  is not set up yet and names the one fix: the Install training
+  button on the main screen.
 
 LFM3 note: LiquidAI/LFM3-1.7B ships remote modeling code (its
 config.json maps AutoModel to modeling_lfm3.py), so loading uses
@@ -53,11 +52,8 @@ LFM3_HF_REPO = "LiquidAI/LFM3-1.7B"
 
 TRAINING_DEPS = ("torch", "transformers", "peft", "accelerate")
 TRAINING_INSTALL_HINT = (
-    "Training needs the training packages (torch, transformers, peft, "
-    "accelerate). Install them by pressing Install training in the "
-    "Train panel, or by double-clicking Install Stella Training in "
-    "the Stella folder. It downloads about 2 GB. "
-    "In a terminal: bash install-training.sh"
+    "Training is not set up on this PC yet. Press Install training "
+    "on the main screen to set it up. It downloads about 2 GB."
 )
 
 # 8 GB is the hard ceiling on Joshua's PC; 1 GB stays reserved for the
@@ -400,10 +396,7 @@ def run_training_install(
 def require_training_deps() -> None:
     missing = training_deps_missing()
     if missing:
-        raise StellaError(
-            f"Training packages missing: {', '.join(missing)}.\n"
-            + TRAINING_INSTALL_HINT
-        )
+        raise StellaError(TRAINING_INSTALL_HINT)
 
 
 # -- dataset --------------------------------------------------------
@@ -2911,6 +2904,16 @@ def run_training_loop(
             json.dumps(summary_data, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
+        # v0.35.0 (N5): a new adapter makes any saved refusal
+        # probe result stale - it measured the old adapter. Drop
+        # it, so the export gate can only pass on a probe of the
+        # adapter that exists now.
+        probe_file = project_dir / "probe_results.json"
+        try:
+            if probe_file.is_file():
+                probe_file.unlink()
+        except OSError:
+            pass
         emit({"type": "done", "steps": step, "adapter": str(adapter_dir)})
     else:
         emit({"type": "paused", "step": step, "path": str(ckpt)})

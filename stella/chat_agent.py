@@ -92,23 +92,51 @@ def _is_just_do_it(cleaned: str) -> bool:
     return any(trigger in cleaned for trigger in JUST_DO_IT_TRIGGERS)
 
 
+# v0.35.0 (N10): a message carrying a negation is never an
+# approval, however it starts. "Yes but not yet" and "go ahead
+# and do something else" both used to run the whole plan,
+# because approval was a prefix match checked before refusal.
+_NEGATION_WORDS = frozenset({
+    "not", "no", "cancel", "wait", "else", "instead", "later",
+    "never", "don't", "dont", "stop",
+})
+
+
+def _has_negation(cleaned: str) -> bool:
+    words = {
+        word.strip(".,!?'\"")
+        for word in cleaned.replace(",", " ").split()
+    }
+    return bool(words & _NEGATION_WORDS)
+
+
 def _is_approval(cleaned: str) -> bool:
-    """The message approves the pending plan (T76)."""
-    return (
-        cleaned in PLAN_APPROVALS
-        or cleaned.startswith("go ahead")
-        or cleaned.startswith("yes ")
-    )
+    """The message approves the pending plan (T76).
+
+    v0.35.0 (N10): an exact approval phrase, or a short message
+    starting with one - and any negation word in the message
+    cancels it. Negation wins over the prefix, so "yes but not
+    yet" and "go ahead and do something else" never approve."""
+    if _has_negation(cleaned):
+        return False
+    if cleaned in PLAN_APPROVALS:
+        return True
+    return cleaned.startswith("go ahead ") or cleaned.startswith("yes ")
 
 
 def _is_refusal(cleaned: str) -> bool:
-    """The message refuses the pending plan (T76)."""
+    """The message refuses the pending plan (T76). A message
+    with a negation in it ("yes but not yet", "do something
+    else instead") refuses too: it is not an approval, and
+    dropping the plan is what the user asked for."""
     return (
         cleaned in PLAN_REFUSALS
         or cleaned.startswith("no ")
         or cleaned.startswith("cancel")
         or cleaned.startswith("don't")
         or cleaned.startswith("do not")
+        or cleaned.startswith("yes but")
+        or _has_negation(cleaned)
     )
 
 # The template: the steps every training run needs, whatever the
@@ -523,6 +551,13 @@ class ChatAgent:
         # The plan-first flow (T76): the pending plan, if one was
         # shown and neither approved nor refused yet.
         self._pending_plan: list[str] | None = None
+        # v0.35.0 (N9): the repo offer currently on the table, as
+        # (profile, [repo, ...]), set only when an offer message
+        # was actually returned to the user. A confirm is honoured
+        # only against this state - a confirm flag inside the
+        # model's own tool call, with no offer ever shown, sets
+        # nothing.
+        self._pending_repo_offer: tuple[str, list[str]] | None = None
         # Streaming state (T76): the plain words streamed by the
         # most recent model call, so the window knows what is
         # already on screen and does not show it twice.
@@ -805,7 +840,20 @@ class ChatAgent:
         self.last_usage = {}
         cleaned = user_text.strip().lower()
         if self._pending_plan is not None:
-            if _is_approval(cleaned):
+            if _is_refusal(cleaned):
+                self._pending_plan = None
+                self._history.append(
+                    {"role": "user", "content": user_text}
+                )
+                reply = (
+                    "Okay, I will not do that. Tell me what you "
+                    "want instead."
+                )
+                self._history.append(
+                    {"role": "assistant", "content": reply}
+                )
+                return reply
+            elif _is_approval(cleaned):
                 # Approved: run the agreed plan, step by step.
                 plan = self._pending_plan
                 self._pending_plan = None
@@ -819,19 +867,6 @@ class ChatAgent:
                         + "; ".join(plan)
                     ),
                 })
-            elif _is_refusal(cleaned):
-                self._pending_plan = None
-                self._history.append(
-                    {"role": "user", "content": user_text}
-                )
-                reply = (
-                    "Okay, I will not do that. Tell me what you "
-                    "want instead."
-                )
-                self._history.append(
-                    {"role": "assistant", "content": reply}
-                )
-                return reply
             else:
                 # Any other message drops the plan and is handled
                 # normally: the plan was for the old request.
@@ -862,6 +897,11 @@ class ChatAgent:
         # R49: the step before the loop, so a step change during
         # the reply can be narrated.
         step_before = self.current_template_step()
+        # v0.35.0 (N8): the tools that failed during THIS reply.
+        # A final reply that claims success over a failed step is
+        # a lie the user acts on, so any failure is named in
+        # plain words at the end of the reply.
+        failed_tools: list[str] = []
         cap_reply = (
             "I have done a lot of steps in a row, so I am stopping here "
             "rather than running away with your PC. Tell me what to do "
@@ -913,6 +953,14 @@ class ChatAgent:
                         "I did not get an answer out of that. Tell me what "
                         "you want to do, and I will do it."
                     )
+                    if failed_tools:
+                        names = ", ".join(dict.fromkeys(failed_tools))
+                        note = (
+                            f"What did not work: {names} did not "
+                            "work, so that part is not done."
+                        )
+                        if note not in reply:
+                            reply = reply.rstrip() + "\n\n" + note
                     self._history.append({"role": "assistant", "content": reply})
                     return reply
                 if plain and not self._last_call_streamed:
@@ -934,6 +982,14 @@ class ChatAgent:
                     calls += 1
                     self._narrate(TOOL_NARRATION.get(name, f"Working on {name}..."))
                     result = self.call_tool(name, args or {})
+                    if result.startswith("That did not work"):
+                        label = (
+                            TOOL_NARRATION.get(name, name)
+                            .replace("...", "")
+                            .split(".")[0]
+                            .strip()
+                        )
+                        failed_tools.append(label or name)
                     self._history.append({"role": "tool", "content": result})
                     if self._cancelled:
                         self._history.append(
@@ -1141,18 +1197,32 @@ class ChatAgent:
             candidates = result["candidates"]
             found = True
         names = [c["repo"] for c in candidates]
-        if args.get("confirm") and (args.get("repo") or "").strip():
-            repo = args["repo"].strip()
-            if repo not in names:
+        if args.get("confirm"):
+            repo = (args.get("repo") or "").strip()
+            if repo and repo not in names:
                 return (
                     f"{repo!r} is not one of the repos I suggested "
                     f"for this model ({', '.join(names)}). Pick one "
                     "of those, or set a different repo in the "
                     "profile window."
                 )
-            self.store.update_profile(profile, base_ref=repo)
-            return None
+            # v0.35.0 (N9): confirm only counts after an offer
+            # was actually returned for this profile. Without a
+            # pending offer, fall through and make the offer now
+            # instead of storing anything.
+            pending = self._pending_repo_offer
+            if pending is not None and pending[0] == profile:
+                if not repo and len(pending[1]) == 1:
+                    # A bare confirm with exactly one candidate
+                    # confirms that candidate - asking again
+                    # would loop forever.
+                    repo = pending[1][0]
+                if repo and repo in pending[1] and repo in names:
+                    self._pending_repo_offer = None
+                    self.store.update_profile(profile, base_ref=repo)
+                    return None
         if len(candidates) == 1:
+            self._pending_repo_offer = (profile, list(names))
             candidate = candidates[0]
             if found:
                 return (
@@ -1164,6 +1234,7 @@ class ChatAgent:
                 "This model lives on Hugging Face as "
                 f"{candidate['repo']} ({candidate['source']}). {after}"
             )
+        self._pending_repo_offer = (profile, list(names))
         if found:
             lines = ["Stella found these on Hugging Face for this model:"]
         else:
@@ -1182,12 +1253,9 @@ class ChatAgent:
         profile, project = session
         missing = training_deps_missing()
         if missing:
-            return (
-                "Training packages missing: " + ", ".join(missing) + ". "
-                "Press Install training in the Train panel, or "
-                "double-click Install Stella Training in the Stella "
-                "folder. (Terminal: bash install-training.sh)"
-            )
+            from .train import TRAINING_INSTALL_HINT
+
+            return TRAINING_INSTALL_HINT
         status = weights_status(self.store, profile)
         if status["state"] == "no-repo":
             # v0.30.0: offer the bridge repo in text form. A
@@ -1456,11 +1524,11 @@ class ChatAgent:
             )
         if not hub_available():
             return (
-                "The download tool is not installed. Install "
-                "training first: press Install training in the "
-                "Train panel, or double-click Install Stella "
-                "Training in the Stella folder. "
-                "(Terminal: bash install-training.sh)"
+                "Training is not set up on this PC yet, so the "
+                "download tool is not installed yet. Press Install "
+                "training on the main screen, or double-click "
+                "Install Stella Training in the Stella folder. "
+                "It downloads about 2 GB."
             )
         repo = status["repo"]
         last_pct = {"value": -1}

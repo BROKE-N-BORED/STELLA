@@ -953,8 +953,18 @@ def sleep_project(
         if event.get("type") in ("started", "step", "checkpoint", "val", "warning"):
             emit(event)
 
-    has_checkpoints = (cycle_dir / "checkpoints").is_dir() and any(
-        (cycle_dir / "checkpoints").iterdir()
+    # v0.35.0 (N17): the real checkpoint list decides, not the
+    # folder contents. A crashed save leaves a step-N.tmp folder
+    # behind; the list ignores those, so a cycle whose only
+    # checkpoint folder is a leftover tmp restarts its training
+    # instead of resuming from nothing and refusing forever.
+    from .train import list_checkpoints
+
+    has_checkpoints = bool(
+        list_checkpoints(
+            store, profile, project,
+            ckpt_dir=cycle_dir / "checkpoints",
+        )
     )
     # One job at a time (T29): sleep loads models twice (the
     # consolidation train, then the replay check), so the whole

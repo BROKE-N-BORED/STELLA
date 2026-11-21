@@ -127,8 +127,8 @@ def _click_box_button(monkeypatch, prefix, seen):
 # -- Version --------------------------------------------------------
 
 
-# NOTE: the version tests moved to test_v34.py (test_version_is_0_34_0,
-# test_window_title_carries_version) — the version is 0.34.0 now.
+# NOTE: the version tests moved to test_v34.py (test_version_is_0_35_0,
+# test_window_title_carries_version) — the version is 0.35.0 now.
 
 
 # -- The bridge offer in the download flow --------------------------
@@ -482,6 +482,13 @@ def test_chat_start_training_confirm_sets_then_needs_download(
     """Confirming the repo in start_training stores it; training
     still needs the weights downloaded first, and says so."""
     monkeypatch.setattr(chat_mod, "training_deps_missing", lambda: [])
+    # v0.35.0 (N9): the offer comes first; only then does a
+    # confirm count.
+    offer = agent.call_tool(
+        "start_training",
+        {"profile": "lfm3-tool", "project": "tool-calls"},
+    )
+    assert "LiquidAI/LFM3-1.7B" in offer
     result = agent.call_tool(
         "start_training",
         {

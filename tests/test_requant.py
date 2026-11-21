@@ -128,9 +128,11 @@ def fake_ollama_bin(tmp_path, *, show_from=None, record=None):
 class FakeRunner:
     """Pretends to be llama-quantize + `ollama create`."""
 
-    def __init__(self, fail_create=False):
+    def __init__(self, fail_create=False, fail_verify=False):
         self.commands = []
         self.fail_create = fail_create
+        self.fail_verify = fail_verify
+        self.created = []
 
     def __call__(self, cmd):
         self.commands.append(list(cmd))
@@ -142,6 +144,12 @@ class FakeRunner:
         elif cmd[0] == "ollama" and cmd[1] == "create":
             if self.fail_create:
                 raise StellaError("Ollama refused the create (fake)")
+            self.created.append(cmd[2])
+        elif cmd[0] == "ollama" and cmd[1] == "show":
+            # v0.35.0 (N6): requant verifies the new tag with
+            # `ollama show` before deleting the work file.
+            if self.fail_verify or cmd[2] not in self.created:
+                raise StellaError("model not found (fake)")
         else:
             raise AssertionError(f"unexpected command: {cmd}")
 
@@ -277,7 +285,7 @@ def test_read_gguf_source_quant(tmp_path):
     header = tmp_path / "h.gguf"
     header.write_bytes(_gguf_header(8))
     assert _read_gguf_source_quant(header) == ("Q8_0", 8.5)
-    header.write_bytes(_gguf_header(11))
+    header.write_bytes(_gguf_header(12))
     assert _read_gguf_source_quant(header) == ("Q4_K", 4.85)
     header.write_bytes(b"GGUF" + b"\x00" * 100)
     assert _read_gguf_source_quant(header) == (None, None)
@@ -291,7 +299,7 @@ def test_read_gguf_source_quant_big_metadata(tmp_path):
     # model read as "unknown". The reader streams now, so the
     # quant past 1 MB of tokenizer tokens still reads.
     header = tmp_path / "big.gguf"
-    data = _gguf_with_big_metadata([11, 11, 8])
+    data = _gguf_with_big_metadata([12, 12, 8])
     assert len(data) > 1024 * 1024
     header.write_bytes(data)
     assert _read_gguf_source_quant(header) == ("Q4_K", 4.85)
@@ -301,7 +309,7 @@ def test_read_gguf_source_quant_truncated_big_metadata(tmp_path):
     # A file cut off inside the big metadata array is unreadable,
     # not a crash: the never-raises contract holds.
     header = tmp_path / "cut.gguf"
-    data = _gguf_with_big_metadata([11, 11, 8])
+    data = _gguf_with_big_metadata([12, 12, 8])
     header.write_bytes(data[:600 * 1024])
     assert _read_gguf_source_quant(header) == (None, None)
 
@@ -449,10 +457,12 @@ def test_requant_happy_path(env_setup, tmp_path):
     assert report["quant"] == "Q4_K_M"
     assert report["output_bytes"] > 0
     assert report["ollama_run"] == "ollama run qwen3.5:4b-q4-k-m"
-    # Two commands: quantize, then ollama create.
-    assert len(runner.commands) == 2
+    # Three commands: quantize, ollama create, then the N6
+    # verification (`ollama show`) before the work files go.
+    assert len(runner.commands) == 3
     assert runner.commands[0][-1] == "Q4_K_M"
     assert runner.commands[1][:3] == ["ollama", "create", "qwen3.5:4b-q4-k-m"]
+    assert runner.commands[2][:2] == ["ollama", "show"]
     # The original blob is untouched, byte for byte.
     after = hashlib.sha256(env_setup["blob"].read_bytes()).hexdigest()
     assert after == before
@@ -931,7 +941,7 @@ def test_read_gguf_source_quant_follows_bytes_not_count(tmp_path):
     header = tmp_path / "tied.gguf"
     # 3 tiny F32 norms (128 elements each) vs 2 big Q5_K weights.
     header.write_bytes(_gguf_with_tensors(
-        [(0, 128), (0, 128), (0, 128), (12, 100_000), (12, 100_000)]
+        [(0, 128), (0, 128), (0, 128), (13, 100_000), (13, 100_000)]
     ))
     assert _read_gguf_source_quant(header) == ("Q5_K", 5.5)
 
@@ -940,7 +950,7 @@ def test_read_gguf_source_quant_lfm3_shape(tmp_path):
     """R29: the real lfm3 shape — 136 Q5_K tensors vs 133 F32, the
     F32s tiny norms — reads Q5_K by bytes, as it must."""
     header = tmp_path / "lfm3.gguf"
-    specs = [(12, 1_000_000)] * 136 + [(0, 128)] * 133
+    specs = [(13, 1_000_000)] * 136 + [(0, 128)] * 133
     header.write_bytes(_gguf_with_tensors(specs))
     assert _read_gguf_source_quant(header) == ("Q5_K", 5.5)
 
@@ -950,7 +960,7 @@ def test_read_gguf_source_quant_bytes_win_both_ways(tmp_path):
     tensors hold the most bytes, the call is F32."""
     header = tmp_path / "f32.gguf"
     header.write_bytes(_gguf_with_tensors(
-        [(12, 128), (12, 128), (0, 100_000)]
+        [(13, 128), (13, 128), (0, 100_000)]
     ))
     assert _read_gguf_source_quant(header) == ("F32", 32.0)
 

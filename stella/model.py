@@ -32,7 +32,7 @@ from pathlib import Path
 from .autoconfig import compute_settings, measure_pc
 from .strengths import derived_role
 
-STELLA_VERSION = "0.34.0"
+STELLA_VERSION = "0.35.0"
 
 # Slug: lowercase letters, digits, dash, underscore. Must start alnum.
 # No dots, no slashes — a slug can never climb out of its directory.

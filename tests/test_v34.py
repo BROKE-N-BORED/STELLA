@@ -42,12 +42,12 @@ def _run_cli(home, *args):
 # -- Version --------------------------------------------------------
 
 
-def test_version_is_0_34_0(home):
-    """The version is 0.34.0 everywhere the CLI reports it."""
-    assert STELLA_VERSION == "0.34.0"
+def test_version_is_0_35_0(home):
+    """The version is 0.35.0 everywhere the CLI reports it."""
+    assert STELLA_VERSION == "0.35.0"
     res = _run_cli(home, "--version")
     assert res.returncode == 0
-    assert "0.34.0" in res.stdout
+    assert "0.35.0" in res.stdout
 
 
 @pytest.fixture()
@@ -73,8 +73,8 @@ def window(qapp, seeded, settings):
 
 
 def test_window_title_carries_version(window):
-    """The window title carries STELLA 0.34.0."""
-    assert "0.34.0" in window.windowTitle()
+    """The window title carries STELLA 0.35.0."""
+    assert "0.35.0" in window.windowTitle()
 
 
 # -- name_taken: the replace check -----------------------------------

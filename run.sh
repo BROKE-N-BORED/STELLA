@@ -43,14 +43,16 @@ fail_visible() { # $1 = plain message naming the fix
 if [ -x "$DIR/.venv/bin/python" ]; then
   PY="$DIR/.venv/bin/python"
 else
-  fail_visible "Stella is not installed yet. Run: bash install.sh (from the Stella folder)"
+  fail_visible "Stella is not installed yet. Double-click Install Stella in the extracted Stella folder (this folder: $DIR) to install it.
+If you use a terminal, the command is: bash install.sh"
 fi
 
 # PySide6 check, before exec (T62): a venv without PySide6 — the
 # state after any pip failure mid-install — used to die with a raw
 # ModuleNotFoundError traceback, invisible from the menu.
 if ! "$PY" -c "import PySide6; from PySide6 import QtWidgets" 2>/dev/null; then
-  fail_visible "Stella is not fully installed: PySide6 is missing. Run: bash install.sh (from the Stella folder)"
+  fail_visible "Stella is not fully installed. Double-click Install Stella in the extracted Stella folder (this folder: $DIR) to install it again. (PySide6 is missing, and installing again puts it back.)
+If you use a terminal, the command is: bash install.sh"
 fi
 
 exec "$PY" -m stella "$@"

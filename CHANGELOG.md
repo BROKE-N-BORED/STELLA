@@ -1,5 +1,60 @@
 # Changelog
 
+## v0.35.0 — 2026-11-19
+
+The fixes from the full-product review of v0.34.0: eighteen
+problems where Stella could mislead you, hand you a dead end,
+or lose work, fixed in plain words.
+
+- The "make it smaller" tool now reads a model's real format
+  correctly. It used to misread most models (a Q4_K model
+  showed as Q5_K), so the size estimate and the quality
+  warning were wrong too.
+- When Stella searches Hugging Face for a model's training
+  files, it only offers files that really are that model:
+  the name and the size must agree. Unrelated models are no
+  longer offered as yours.
+- A test report card for a different model is no longer read
+  as this model's strengths. It is stored, and listed as a
+  card for another model. And when you attach a model's whole
+  set of test cards, the strengths now come from all of them,
+  not just the newest one.
+- The safety check before export can no longer pass on an old
+  result: retraining, or changing the base model, means the
+  refusal probe must run again. The refusal message now says
+  so in plain words and names the one next step that works.
+- Making a smaller model now checks the new model really is
+  in Ollama before tidying up. If it is not, the smaller file
+  is kept and the message says where it is.
+- Teaching a model from a bigger one no longer reports
+  success when every question in the run failed.
+- In chat, a step that fails is named at the end of the
+  reply: an "all done" claim no longer covers a failed step.
+  Chat also only sets a model's Hugging Face repo after it
+  has actually offered it and you said yes, and "yes but not
+  yet" no longer runs a plan you were still deciding on.
+- The main screen and the project window no longer tell you
+  to change training settings from the terminal. The
+  settings are picked for this PC automatically.
+- "Training is not set up on this PC yet" replaces the old
+  message that named Python packages and a terminal command.
+  One direction: the Install training button on the main
+  screen.
+- If Stella cannot start, its message names the double-click
+  fix first: double-click Install Stella in the extracted
+  folder.
+- Uninstalling now offers to remove Stella's own training
+  wheel cache (about 2 GB), and its closing lines say whether
+  the cache is still on your PC.
+- The sleep-delete and sleep-prune commands ask before
+  deleting, like every other delete, with a --yes flag for
+  scripts. A sleep cycle interrupted during its first save
+  can sleep again instead of refusing forever.
+- The How to Use troubleshooting page now names the real
+  button (Download the training files) and describes the
+  automatic Hugging Face search as the normal path.
+
+
 ## v0.34.0 — 2026-11-19
 
 The last typed command in Stella is gone. After a GGUF export,

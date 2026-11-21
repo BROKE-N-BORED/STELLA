@@ -2122,10 +2122,36 @@ def cmd_sleep_status(args) -> int:
 
 
 def cmd_sleep_delete(args) -> int:
-    """Delete one sleep cycle for good (R66)."""
-    from .sleep import delete_sleep_cycle
+    """Delete one sleep cycle for good (R66).
+
+    v0.35.0 (N16): like delete-checkpoint, this asks first
+    (default No) unless --yes was given - a typo must not delete
+    a cycle's adapter the instant Enter is pressed."""
+    from .sleep import delete_sleep_cycle, list_sleep_cycles
 
     store = _store()
+    # Like delete-checkpoint: a cycle that does not exist is a
+    # plain error, named before any question is asked.
+    known = any(
+        c.get("cycle") == args.cycle
+        for c in list_sleep_cycles(store, args.profile, args.project)
+    )
+    cycle_dir = (
+        store.project_dir(args.profile, args.project)
+        / "sleep" / f"cycle-{args.cycle}"
+    )
+    if not known and not cycle_dir.is_dir():
+        # Raises the plain "no sleep cycle" error.
+        delete_sleep_cycle(store, args.profile, args.project, args.cycle)
+    if not getattr(args, "yes", False):
+        if not _confirm_destructive(
+            f"Delete sleep cycle {args.cycle} of project "
+            f"{args.project!r} forever? This cannot be undone."
+        ):
+            print(
+                f"Kept sleep cycle {args.cycle}.", file=sys.stderr
+            )
+            return 1
     result = delete_sleep_cycle(
         store, args.profile, args.project, args.cycle
     )
@@ -2137,10 +2163,25 @@ def cmd_sleep_delete(args) -> int:
 
 
 def cmd_sleep_prune(args) -> int:
-    """Delete all but the newest N sleep cycles (R66)."""
-    from .sleep import prune_sleep_cycles
+    """Delete all but the newest N sleep cycles (R66).
+
+    v0.35.0 (N16): asks first (default No) unless --yes was
+    given, like delete-checkpoint. When nothing would be
+    pruned there is nothing to confirm."""
+    from .sleep import list_sleep_cycles, prune_sleep_cycles
 
     store = _store()
+    cycles = list_sleep_cycles(store, args.profile, args.project)
+    doomed = cycles[:-args.keep] if len(cycles) > args.keep else []
+    if doomed and not getattr(args, "yes", False):
+        if not _confirm_destructive(
+            f"Delete {len(doomed)} old sleep cycle"
+            f"{'s' if len(doomed) != 1 else ''} of project "
+            f"{args.project!r} forever, keeping the newest "
+            f"{args.keep}? This cannot be undone."
+        ):
+            print("Kept every sleep cycle.", file=sys.stderr)
+            return 1
     result = prune_sleep_cycles(
         store, args.profile, args.project, keep=args.keep
     )
@@ -3330,6 +3371,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("profile", help="profile name, e.g. lfm3-tool")
     p.add_argument("project", help="project name, e.g. tool-calls")
     p.add_argument("cycle", type=int, help="cycle number, e.g. 1")
+    p.add_argument(
+        "--yes", action="store_true",
+        help="delete without asking first (for scripts).",
+    )
     p.set_defaults(func=cmd_sleep_delete)
 
     p = _cmd("sleep-prune", "delete all but the newest sleep cycles",
@@ -3341,6 +3386,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--keep", type=int, default=3,
         help="how many of the newest cycles to keep (default 3); "
         "the rest are deleted for good",
+    )
+    p.add_argument(
+        "--yes", action="store_true",
+        help="delete without asking first (for scripts).",
     )
     p.set_defaults(func=cmd_sleep_prune)
 

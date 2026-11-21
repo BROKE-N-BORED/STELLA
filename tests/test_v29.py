@@ -875,7 +875,7 @@ def test_cli_debug_report(home):
     reports = sorted((home / "logs").glob("debug-report-stella-*.txt"))
     assert len(reports) == 1
     text = reports[0].read_text(encoding="utf-8")
-    assert "DEBUG REPORT: stella 0.34.0" in text
+    assert "DEBUG REPORT: stella 0.35.0" in text
     assert str(home) in text  # the home setting, as the GUI sets it
     res = _run_cli_subprocess(home, "debug-report", "--json")
     assert res.returncode == 0
@@ -899,44 +899,43 @@ def test_new_commands_listed_in_parser():
 
 
 def test_project_window_discloses_terminal_settings(window, qapp):
-    """R113: the project detail panel names the exact terminal
-    command for changing training settings — disclosure only, no
-    settings controls come back."""
+    """v0.35.0 (N11; was R113): the project detail panel says
+    the settings are picked automatically - no terminal line
+    anywhere, and no settings controls come back."""
     from tests.test_gui import _select_session
 
     _select_session(window)
     win = window.open_project_window("lfm3-tool", "tool-calls")
     qapp.processEvents()
     note = win._settings_note.text()
-    assert "Training settings are changed from the terminal" in note
-    assert (
-        "stella update-project lfm3-tool tool-calls --seed 7" in note
-    )
+    assert "picked for this PC automatically" in note
+    assert "terminal" not in note
+    assert "update-project" not in note
     for attr in ("rank_spin", "lr_edit", "epochs_spin"):
         assert not hasattr(win, attr), attr
     win.close()
 
 
 def test_session_summary_discloses_terminal_settings(window, qapp):
-    """R113: the session summary names the same command."""
+    """v0.35.0 (N11; was R113): the session summary says the
+    settings are picked automatically - no terminal line."""
     from tests.test_gui import _select_session
 
     _select_session(window)
     qapp.processEvents()
     summary = window.session_summary.text()
-    assert "Training settings are changed from the terminal" in summary
-    assert (
-        "stella update-project lfm3-tool tool-calls --seed 7"
-        in summary
-    )
+    assert "picked for this PC automatically" in summary
+    assert "terminal" not in summary
+    assert "update-project" not in summary
 
 
 def test_howto_training_mirrors_settings_disclosure():
-    """R113: the How to Use Training topic mirrors the line."""
+    """v0.35.0 (N11; was R113): the How to Use Training topic
+    says the settings are picked automatically too."""
     from stella.howto import topic_text
 
     body = topic_text("Training")
-    assert "Training settings are changed from the terminal" in body
-    # The topic wraps the command across lines; flatten to check it.
     flat = " ".join(body.split())
-    assert "stella update-project <profile> <project> --seed 7" in flat
+    assert "picks them for this PC automatically" in flat
+    assert "terminal" not in flat
+    assert "update-project" not in flat

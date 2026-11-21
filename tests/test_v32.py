@@ -52,8 +52,8 @@ def window(qapp, seeded, settings):
     win.close()
 
 
-# NOTE: the version tests moved to test_v34.py (test_version_is_0_34_0,
-# test_window_title_carries_version) — the version is 0.34.0 now.
+# NOTE: the version tests moved to test_v34.py (test_version_is_0_35_0,
+# test_window_title_carries_version) — the version is 0.35.0 now.
 
 
 # -- fixtures: the real OST formats ---------------------------------
@@ -203,13 +203,13 @@ def test_parse_multi_model_summary_no_match_is_none(tmp_path):
 
 
 def test_parse_single_model_file_used_as_is(tmp_path):
-    """A file holding ONE model is used as-is, even when its
-    model differs from the tag hint: attaching it to this
-    profile was the user's choice."""
+    """A file holding ONE model parses when no tag hint is
+    given. (v0.35.0, N3: with a hint for a different model it
+    no longer parses - see test_v35.py.)"""
     from stella.report_cards import parse_ost_card
 
     path = _write_card(tmp_path, "one.json", _lfm3_summary_block())
-    parsed = parse_ost_card(path, tag_hint="granite:3b")
+    parsed = parse_ost_card(path)
     assert parsed is not None
     assert parsed["model"] == "lfm3:1.7b"
 

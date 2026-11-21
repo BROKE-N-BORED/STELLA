@@ -208,10 +208,8 @@ folder. It is small (tens of megabytes). The base model is
 untouched. To use the tuned model in Ollama, export it as GGUF
 (see GGUF export to Ollama).
 
-Training settings are changed from the terminal: stella
-update-project <profile> <project> --seed 7. The window never
-shows the settings themselves: the backend picks them for this
-PC, and the terminal is the only way to change them.""",
+The window never shows the settings themselves: Stella picks
+them for this PC automatically.""",
     ),
     (
         "Checkpoints",
@@ -454,14 +452,16 @@ else.""",
 list. Ollama may not be running. Start Ollama, then reopen the
 profile window. The list refreshes each time the window opens.
 
-Training packages missing. Press Install training in the Train
-panel, or double-click Install Stella Training in the Stella
+Training packages missing. Press Install training on the main
+screen, or double-click Install Stella Training in the Stella
 folder. It downloads about 2 GB.
 
-Weights missing. Open the profile and press Download model. If
-Stella does not know the model's Hugging Face repo yet, it says
-so: find the model on huggingface.co and set the Hugging Face
-repo in the profile window, for example LiquidAI/LFM3-1.7B.
+Weights missing. Open the profile and press Download the
+training files. If Stella does not know the model's Hugging
+Face repo yet, it searches Hugging Face itself and offers what
+it finds: you just say yes or no. Only if that search finds
+nothing, set the Hugging Face repo yourself in the profile
+window.
 
 Not enough disk. Model weights are gigabytes. Free space, then
 download again. The download picks up where it left off.

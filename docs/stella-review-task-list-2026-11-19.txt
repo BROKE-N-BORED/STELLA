@@ -1,26 +1,26 @@
 STELLA REVIEW TASK LIST - 2026-11-19 (v0.34.0)
-Status: all 83 tasks are OPEN. None have been started.
+Status: 18 done, 65 open. N1 to N18 were finished in v0.35.0; the rest are still open.
 From the full-product review of Stella v0.34.0: 85 findings (0 P0, 18 P1, 37 P2, 30 P3) merged into 83 tasks (18 P1, 37 P2, 28 P3). Full details: docs/stella-review-task-list-2026-11-19.md and docs/review-2026-11-19.md
 
 P1:
-N1. Requant reads almost every real model's quant wrong (its type table is shifted by one), so the shown quant, the size estimate, and the double-quant warning are all wrong
-N2. The live Hugging Face lookup offers models that are not the model you picked
-N3. A report card for a different model is applied as this model's strengths
-N4. Attaching a model's whole OST run shows strengths from one test only, not the whole run
-N5. A passed refusal probe keeps passing after the model is retrained or its base is changed
-N6. Requant deletes its only copy of the smaller file after an Ollama create it never checked
-N7. Distill reports success when every prompt in the run failed, as long as an old dataset file has 2 rows
-N8. Chat can announce 'all done' for a plan whose steps failed
-N9. Chat can set a model's repo with no user yes at all — and a bare 'confirm' loops forever
-N10. Chat runs the whole plan when the user says 'yes, but not yet' or 'go ahead and do something else'
-N11. The main screen permanently tells the user to change training settings from the terminal
-N12. The 'training packages missing' message names Python packages, a terminal command, and a panel that does not exist
-N13. The export probe-gate refusal is unexplained jargon plus a terminal command, and following it loops
-N14. When Stella cannot start, its failure popup tells the user to run a terminal command and never names the double-click fix
-N15. Uninstall leaves the ~2 GB training wheel cache behind and says removal is finished
-N16. The CLI's sleep-delete and sleep-prune delete sleep cycles for good with no 'are you sure?' and no --yes flag
-N17. A sleep cycle interrupted during its first checkpoint save can never sleep again, and the error names the wrong problem
-N18. How to Use Troubleshooting sends the user to a button that is not there, and back to the manual Hugging Face hunt (with the exact wrong-repo example)
+N1. Requant reads almost every real model's quant wrong (its type table is shifted by one), so the shown quant, the size estimate, and the double-quant warning are all wrong — DONE in v0.35.0
+N2. The live Hugging Face lookup offers models that are not the model you picked — DONE in v0.35.0
+N3. A report card for a different model is applied as this model's strengths — DONE in v0.35.0
+N4. Attaching a model's whole OST run shows strengths from one test only, not the whole run — DONE in v0.35.0
+N5. A passed refusal probe keeps passing after the model is retrained or its base is changed — DONE in v0.35.0
+N6. Requant deletes its only copy of the smaller file after an Ollama create it never checked — DONE in v0.35.0
+N7. Distill reports success when every prompt in the run failed, as long as an old dataset file has 2 rows — DONE in v0.35.0
+N8. Chat can announce 'all done' for a plan whose steps failed — DONE in v0.35.0
+N9. Chat can set a model's repo with no user yes at all — and a bare 'confirm' loops forever — DONE in v0.35.0
+N10. Chat runs the whole plan when the user says 'yes, but not yet' or 'go ahead and do something else' — DONE in v0.35.0
+N11. The main screen permanently tells the user to change training settings from the terminal — DONE in v0.35.0
+N12. The 'training packages missing' message names Python packages, a terminal command, and a panel that does not exist — DONE in v0.35.0
+N13. The export probe-gate refusal is unexplained jargon plus a terminal command, and following it loops — DONE in v0.35.0
+N14. When Stella cannot start, its failure popup tells the user to run a terminal command and never names the double-click fix — DONE in v0.35.0
+N15. Uninstall leaves the ~2 GB training wheel cache behind and says removal is finished — DONE in v0.35.0
+N16. The CLI's sleep-delete and sleep-prune delete sleep cycles for good with no 'are you sure?' and no --yes flag — DONE in v0.35.0
+N17. A sleep cycle interrupted during its first checkpoint save can never sleep again, and the error names the wrong problem — DONE in v0.35.0
+N18. How to Use Troubleshooting sends the user to a button that is not there, and back to the manual Hugging Face hunt (with the exact wrong-repo example) — DONE in v0.35.0
 
 P2:
 N19. The no-repo ending from Download sends the user hunting by hand and does not open the profile window, while the other path into the same ending does

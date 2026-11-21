@@ -307,9 +307,13 @@ terminal inside the folder:
 
 That removes the menu launcher, the desktop icon, the `stella`
 command, the menu icons, and the Python environment. Your data in
-`~/.stella` is kept unless you say to remove it — the uninstaller
-asks, and the default answer is No. Delete the folder afterwards
-to finish removing it.
+`~/.stella` is kept unless you say to remove it: the uninstaller
+asks, and the default answer is No. The uninstaller also offers
+to remove two download caches: the pip cache and Stella's own
+training wheel cache in `~/.cache/stella/wheels` (about 2 GB if
+you installed training). Both offers default to No, and the
+closing lines say whether the wheel cache is still on your PC.
+Delete the folder afterwards to finish removing Stella itself.
 
 ## Install the training packages (only if you want to train)
 

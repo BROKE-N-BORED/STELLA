@@ -3027,9 +3027,7 @@ class ProjectWindow(QDialog):
     def _load_inner(self):
         # R113: the disclosure follows renames (retarget reloads).
         self._settings_note.setText(
-            "Training settings are changed from the terminal: "
-            f"stella update-project {self._profile} {self._project} "
-            "--seed 7"
+            "Training settings are picked for this PC automatically."
         )
         try:
             p = self._main.store.get_project(self._profile, self._project)
@@ -6688,9 +6686,8 @@ class MainWindow(QMainWindow):
                 f"Model: {model}\n"
                 f"Dataset: {dataset}\n"
                 f"Status: {proj.get('status', 'draft')}.\n"
-                "Training settings are changed from the terminal: "
-                f"stella update-project {self._current_profile} "
-                f"{self._current_project} --seed 7"
+                "Training settings are picked for this PC "
+                "automatically."
             )
             self.project_label.setText(
                 f"Project: {proj.get('display_name') or self._current_project}"
@@ -7812,11 +7809,11 @@ class MainWindow(QMainWindow):
                 return
         if not provision.hub_available():
             self._warn(
-                "The download tool is not installed. Install "
-                "training first: press Install training in the "
-                "Train panel, or double-click Install Stella "
-                "Training in the Stella folder. "
-                "(Terminal: bash install-training.sh)"
+                "Training is not set up on this PC yet, so the "
+                "download tool is not installed yet. Press Install "
+                "training on the main screen, or double-click "
+                "Install Stella Training in the Stella folder. "
+                "It downloads about 2 GB."
             )
             return
         repo = status["repo"]
@@ -10258,10 +10255,7 @@ class MainWindow(QMainWindow):
             # The hint shows as a dialog now (T49): a log line is
             # only visible when the user scrolls to the Train log.
             # The log line stays too — the hint is worth keeping.
-            hint = (
-                "Training packages missing: " + ", ".join(missing) + ". "
-                + TRAINING_INSTALL_HINT
-            )
+            hint = TRAINING_INSTALL_HINT
             self._train_log_line(hint)
             self._warn(hint)
             self._say("Training packages missing.")
@@ -10525,10 +10519,7 @@ class MainWindow(QMainWindow):
             # The hint shows as a dialog now (T49): a log line is
             # only visible when the user scrolls to the Train log.
             # The log line stays too — the hint is worth keeping.
-            hint = (
-                "Training packages missing: " + ", ".join(missing) + ". "
-                + TRAINING_INSTALL_HINT
-            )
+            hint = TRAINING_INSTALL_HINT
             self._train_log_line(hint)
             self._warn(hint)
             self._say("Training packages missing.")

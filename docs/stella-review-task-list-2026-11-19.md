@@ -1,6 +1,6 @@
 # Stella review task list — 2026-11-19 (v0.34.0)
 
-Status: ALL 83 TASKS OPEN — none started. This list comes from the full-product review of Stella v0.34.0 (commit 64269ca8). The full report is in docs/review-2026-11-19.md.
+Status: 18 DONE (N1-N18, in v0.35.0), 65 OPEN. This list comes from the full-product review of Stella v0.34.0 (commit 64269ca8). The full report is in docs/review-2026-11-19.md.
 
 The review produced 85 findings (0 P0, 18 P1, 37 P2, 30 P3). Two pairs of findings were merged into single tasks because they share one fix (chat repo-confirm: CH-F1 + CH-F8; base-name size fallbacks: NW-F3 + NW-F13), giving 83 tasks: 18 P1, 37 P2, 28 P3. Every finding is covered by exactly one task.
 
@@ -10,12 +10,16 @@ Each task gives: the title, the priority, what is wrong and why it matters, and 
 
 ### N1. Requant reads almost every real model's quant wrong (its type table is shifted by one), so the shown quant, the size estimate, and the double-quant warning are all wrong
 
+**Status:** DONE in v0.35.0.
+
 - **Priority:** P1
 - **Source finding(s):** PI-F1 (audit-pipelines.md)
 - **What and why:** stella/requant.py's GGUF tensor-type table omits Q8_1 (real ggml id 9), so every id from 9 up is mapped one type too high: a real Q4_K model (Stella's own default output) reads as Q5_K, Q5_K as Q6_K, Q8_K as a 2-bit type. The source quant shown to the user is wrong, the disk estimate is computed from the wrong bits-per-weight, and for Q8_K models the byte-vote can be won by F32 tensors so the source reads as F32 and the double-quant warning is silently suppressed. The existing tests encode the same wrong table, so the suite passes while real files misread. Fix: correct the table to the real ggml enum and fix the test fixtures to use real ids.
 - **Evidence:** stella/requant.py:70-80; pipeline probe 4 (crafted headers with real ggml ids: 12 -> 'Q5_K', 15 -> 'IQ2_XXS', Q8_K-dominant file -> 'F32'); upstream ggml.h enum cross-checked. Audit: audit-pipelines.md PI-F1.
 
 ### N2. The live Hugging Face lookup offers models that are not the model you picked
+
+**Status:** DONE in v0.35.0.
 
 - **Priority:** P1
 - **Source finding(s):** GA-F1 (audit-gui-a.md)
@@ -24,12 +28,16 @@ Each task gives: the title, the priority, what is wrong and why it matters, and 
 
 ### N3. A report card for a different model is applied as this model's strengths
 
+**Status:** DONE in v0.35.0.
+
 - **Priority:** P1
 - **Source finding(s):** NW-F1 (audit-newcode.md)
 - **What and why:** report_cards.parse_ost_card only checks the model match on multi-model files. The shape OST actually writes — one file per test — returns early without ever comparing the file's model field to the profile, and the list-of-files shape is likewise accepted unchecked. Proven on real files: all 164 parseable OST result files also 'parse' under a deliberately wrong model hint, and end to end, a bonsai-2 card attached to an LFM3 profile is listed as an OST card and its score shows as LFM3's strength — the opposite of the v0.32.0 promise 'flagged, never applied'. Fix: enforce the model match for the single-file and list shapes too (mismatch lists as a stored, unread card).
 - **Evidence:** stella/report_cards.py:197-208, 232-243, 262-282; newcode probe_all section A (175 real files) and probe2 section H end-to-end. Audit: audit-newcode.md NW-F1.
 
 ### N4. Attaching a model's whole OST run shows strengths from one test only, not the whole run
+
+**Status:** DONE in v0.35.0.
 
 - **Priority:** P1
 - **Source finding(s):** NW-F2 (audit-newcode.md)
@@ -38,12 +46,16 @@ Each task gives: the title, the priority, what is wrong and why it matters, and 
 
 ### N5. A passed refusal probe keeps passing after the model is retrained or its base is changed
 
+**Status:** DONE in v0.35.0.
+
 - **Priority:** P1
 - **Source finding(s):** EN-F1 (audit-engine.md)
 - **What and why:** The governing-seat gate (closed item R4) checks that a passed probe_results.json exists, but never checks the result belongs to the adapter being exported now: require_passed_probe reads the saved numbers only, and training replaces the adapter without invalidating the file. Probe a tune, pass, force-retrain it into a never-probed adapter — or even change the profile's base model — and Export GGUF still passes on the stale pass. The gate is enforced in every export path; what it enforces can be stale. Fix: invalidate probe_results.json when a run finishes training a new adapter, and/or refuse a result whose recorded base differs from the profile's current one or that predates the adapter.
 - **Evidence:** stella/probe.py:573 (require_passed_probe); stella/train.py:2889-2892; engine probe2_stale_gate.py output (gate passed again after retrain + base change). Audit: audit-engine.md EN-F1.
 
 ### N6. Requant deletes its only copy of the smaller file after an Ollama create it never checked
+
+**Status:** DONE in v0.35.0.
 
 - **Priority:** P1
 - **Source finding(s):** PI-F3 (audit-pipelines.md)
@@ -52,12 +64,16 @@ Each task gives: the title, the priority, what is wrong and why it matters, and 
 
 ### N7. Distill reports success when every prompt in the run failed, as long as an old dataset file has 2 rows
 
+**Status:** DONE in v0.35.0.
+
 - **Priority:** P1
 - **Source finding(s):** PI-F2 (audit-pipelines.md)
 - **What and why:** Distill's final gate loads the whole distilled.jsonl — including stale rows for prompts not in the current file — and if that total is 2 or more, the run returns a normal report, emits 'done', and re-points the project at the dataset, even when this run asked 0 prompts successfully. The user is told a dataset is ready that contains none of what they just asked for. Fix: base the gate on rows for the current run's prompts; when this run produced no new kept rows and had failures, refuse (or at least do not update the dataset pointer or emit done).
 - **Evidence:** stella/distill.py:309-321; pipeline probe J (teacher failed all 3 prompts, 2 stale rows -> success report, dataset_ref updated). Audit: audit-pipelines.md PI-F2.
 
 ### N8. Chat can announce 'all done' for a plan whose steps failed
+
+**Status:** DONE in v0.35.0.
 
 - **Priority:** P1
 - **Source finding(s):** CH-F3 (audit-chat.md)
@@ -66,12 +82,16 @@ Each task gives: the title, the priority, what is wrong and why it matters, and 
 
 ### N9. Chat can set a model's repo with no user yes at all — and a bare 'confirm' loops forever
 
+**Status:** DONE in v0.35.0.
+
 - **Priority:** P1
 - **Source finding(s):** CH-F1 + CH-F8 (audit-chat.md)
 - **What and why:** The chat bridge/hub confirm gate is just a 'confirm: true' flag plus a candidate repo name in the model's own tool call; no state records that an offer was ever shown to the user. Probed: on the first-ever call for a fresh profile, a tool call carrying confirm+repo set base_ref and proceeded to download — the v0.30/v0.33 promise 'never silently sets a repo' holds only if the model behaves. The mirror flaw: with exactly one candidate, a confirming call that omits the repo name (a faithful relay of the user's 'yes') gets the identical offer again, looping until the 12-call cap. Fix: keep a pending-offer flag on the agent session and only honour confirm after an offer was actually returned; let confirm alone confirm a single candidate.
 - **Evidence:** stella/chat_agent.py:1145-1154 (coordinator re-read); chat probes P7 and P8. Audit: audit-chat.md CH-F1, CH-F8.
 
 ### N10. Chat runs the whole plan when the user says 'yes, but not yet' or 'go ahead and do something else'
+
+**Status:** DONE in v0.35.0.
 
 - **Priority:** P1
 - **Source finding(s):** CH-F2 (audit-chat.md)
@@ -80,12 +100,16 @@ Each task gives: the title, the priority, what is wrong and why it matters, and 
 
 ### N11. The main screen permanently tells the user to change training settings from the terminal
 
+**Status:** DONE in v0.35.0.
+
 - **Priority:** P1
 - **Source finding(s):** GB-F1 (audit-gui-b.md)
 - **What and why:** With any project selected, the session summary at the top of the main window permanently reads 'Training settings are changed from the terminal: stella update-project ... --seed 7', and the Project window's Details repeats it. The standing rule (2026-11-18, after the last review closed) is no terminal for the user, ever; this line predates the rule and now conflicts with it — it tells a click-only user the only way to change settings is a place they cannot go. The design brief's answer is that the backend sets settings silently and nothing is shown. Fix: drop the terminal line from both surfaces; if a hint is needed, say the settings are picked for this PC automatically.
 - **Evidence:** shots/gui-b/03-main-session-selected.png, 40-export-success-card.png; stella/gui.py:6691 and :3030. Audit: audit-gui-b.md GB-F1.
 
 ### N12. The 'training packages missing' message names Python packages, a terminal command, and a panel that does not exist
+
+**Status:** DONE in v0.35.0.
 
 - **Priority:** P1
 - **Source finding(s):** GB-F2 (audit-gui-b.md)
@@ -94,12 +118,16 @@ Each task gives: the title, the priority, what is wrong and why it matters, and 
 
 ### N13. The export probe-gate refusal is unexplained jargon plus a terminal command, and following it loops
 
+**Status:** DONE in v0.35.0.
+
 - **Priority:** P1
 - **Source finding(s):** GB-F3 (audit-gui-b.md)
 - **What and why:** For a governing-seat profile, Export GGUF refuses with 'profile ... is bound for a governing seat, so it cannot be exported until its refusal probe passes. Run the refusal probe first (Run refusal probe in the Train panel, or stella probe ...)'. 'Governing seat' is never explained anywhere this user has been; the alternative offered is a terminal command; and following the GUI direction loops — the probe itself refuses ('has no trained adapter yet') — so an untrained governing profile can neither export nor probe, and neither message names the actual first step (train first). The gate itself holds; the finding is the message and the loop. Fix: plain words ('This model has a safety check to pass before it can be exported'), the one next step that works from this state, no CLI alternative.
 - **Evidence:** stella/gui.py:10736-10747; stella/probe.py (require_passed_probe wording); gui-b drive2 log. Audit: audit-gui-b.md GB-F3.
 
 ### N14. When Stella cannot start, its failure popup tells the user to run a terminal command and never names the double-click fix
+
+**Status:** DONE in v0.35.0.
 
 - **Priority:** P1
 - **Source finding(s):** IN-F2 (audit-installer.md)
@@ -108,12 +136,16 @@ Each task gives: the title, the priority, what is wrong and why it matters, and 
 
 ### N15. Uninstall leaves the ~2 GB training wheel cache behind and says removal is finished
 
+**Status:** DONE in v0.35.0.
+
 - **Priority:** P1
 - **Source finding(s):** IN-F1 (audit-installer.md)
 - **What and why:** install-training.sh downloads the training wheels into ~/.cache/stella/wheels (about 2 GB). uninstall.sh never mentions that directory: it offers to remove the pip cache (the older R116 fix) but not Stella's own wheel cache, and its closing lines say deleting the folder 'finishes removing it' — a completeness claim that is false for anyone who ever installed training. The README's Remove section makes the same omission. Proven in scratch: a seeded wheel file survived a full uninstall, unmentioned. Fix: give the wheel cache the same treatment as the pip cache (offer, default No, over a size threshold) and name it in the closing summary either way; update the README to match.
 - **Evidence:** uninstall.sh (only the pip-cache block at :158-190); install-training.sh:88; installer scratch uninstall run. Audit: audit-installer.md IN-F1.
 
 ### N16. The CLI's sleep-delete and sleep-prune delete sleep cycles for good with no 'are you sure?' and no --yes flag
+
+**Status:** DONE in v0.35.0.
 
 - **Priority:** P1
 - **Source finding(s):** CL-F1 (audit-cli.md)
@@ -122,12 +154,16 @@ Each task gives: the title, the priority, what is wrong and why it matters, and 
 
 ### N17. A sleep cycle interrupted during its first checkpoint save can never sleep again, and the error names the wrong problem
 
+**Status:** DONE in v0.35.0.
+
 - **Priority:** P1
 - **Source finding(s):** EN-F2 (audit-engine.md)
 - **What and why:** Sleep decides a resumed cycle has checkpoints by counting ANY entry in the cycle's checkpoints folder — including a crashed save's step-N.tmp folder. It then resumes training, whose own checkpoint list (which correctly ignores those folders) is empty, so the run dies with 'nothing to resume. This project has no checkpoints yet' — wrong twice (there IS a checkpoint folder; it is a sleep cycle, not 'this project'), and permanent: every later sleep run hits the same wall, and nothing tells the user the cycle folder is the problem or that deleting it is the way out. Fix: base the has-checkpoints decision on the real checkpoint list, so a tmp/orphan-only folder restarts the cycle's consolidation instead of refusing.
 - **Evidence:** stella/sleep.py:956 (coordinator re-read); engine probe4_sleep_tmp.py output. Audit: audit-engine.md EN-F2.
 
 ### N18. How to Use Troubleshooting sends the user to a button that is not there, and back to the manual Hugging Face hunt (with the exact wrong-repo example)
+
+**Status:** DONE in v0.35.0.
 
 - **Priority:** P1
 - **Source finding(s):** DC-F1 (audit-docs.md)

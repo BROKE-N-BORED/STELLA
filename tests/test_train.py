@@ -411,22 +411,23 @@ def test_require_training_deps_names_installer(monkeypatch):
     monkeypatch.setattr(
         train_mod, "training_deps_missing", lambda: ["torch", "peft"]
     )
-    with pytest.raises(StellaError, match="install-training.sh"):
+    with pytest.raises(StellaError, match="not set up on this PC yet"):
         require_training_deps()
 
 
 def test_training_install_hint_names_click_path():
-    """R13: the missing-training hint names the click path first —
-    the button, then the desktop icon — with the terminal command
-    kept as the alternative."""
+    """v0.35.0 (N12; was R13): the missing-training message is
+    plain words with ONE direction - the Install training
+    button on the main screen. No package names, no terminal
+    line, no panel that does not exist."""
     from stella.train import TRAINING_INSTALL_HINT
 
-    assert "Install training in the Train panel" in TRAINING_INSTALL_HINT
-    assert "Install Stella Training" in TRAINING_INSTALL_HINT
-    assert "install-training.sh" in TRAINING_INSTALL_HINT
-    assert TRAINING_INSTALL_HINT.index("Install training") < (
-        TRAINING_INSTALL_HINT.index("bash install-training.sh")
-    )
+    assert "Training is not set up on this PC yet" in TRAINING_INSTALL_HINT
+    assert "Install training" in TRAINING_INSTALL_HINT
+    assert "main screen" in TRAINING_INSTALL_HINT
+    for banned in ("torch", "transformers", "peft", "accelerate",
+                   "terminal", "install-training.sh", "Train panel"):
+        assert banned not in TRAINING_INSTALL_HINT
 
 
 # -- R13: click-only training install -------------------------------
@@ -658,7 +659,7 @@ def test_train_deps_gate_fires_only_when_ready(tmp_path, monkeypatch):
         train_mod, "training_deps_missing", lambda: ["torch"]
     )
     store = _tiny_project(Store(tmp_path / "home"), tmp_path)
-    with pytest.raises(StellaError, match="install-training"):
+    with pytest.raises(StellaError, match="not set up on this PC yet"):
         train_project(store, "tiny", "proof")
 
 

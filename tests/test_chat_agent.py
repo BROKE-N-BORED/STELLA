@@ -412,7 +412,11 @@ def test_start_training_missing_deps(agent, store, seeded, monkeypatch):
     result = agent.call_tool(
         "start_training", {"profile": "lfm3-tool", "project": "tool-calls"}
     )
-    assert "install-training.sh" in result
+    # v0.35.0 (N12): plain words, one direction, no package
+    # names and no terminal line.
+    assert "Training is not set up on this PC yet" in result
+    assert "install-training.sh" not in result
+    assert "torch" not in result
 
 
 def test_start_training_missing_weights(agent, store, seeded, monkeypatch):
@@ -575,6 +579,33 @@ def test_download_weights_already_ready(agent, store, seeded, monkeypatch):
         "download_weights", {"profile": "lfm3-tool"}
     )
     assert "already downloaded" in result
+
+
+def test_download_weights_no_hub_is_plain(agent, store, seeded, monkeypatch):
+    monkeypatch.setattr(
+        chat_mod,
+        "weights_status",
+        lambda store, profile: {
+            "repo": "LiquidAI/LFM3-1.7B",
+            "state": "missing",
+            "size_bytes": 0,
+            "path": None,
+        },
+    )
+    monkeypatch.setattr(chat_mod, "hub_available", lambda: False)
+    result = agent.call_tool(
+        "download_weights", {"profile": "lfm3-tool"}
+    )
+    # v0.35.0: the same plain-words message as the window - both
+    # click directions and the size note, no Train panel, no
+    # terminal line, no package names.
+    assert "Training is not set up on this PC yet" in result
+    assert "Install training" in result
+    assert "main screen" in result
+    assert "Install Stella Training" in result
+    assert "about 2 GB" in result
+    for banned in ("Train panel", "Terminal", "install-training"):
+        assert banned not in result, banned
 
 
 def test_download_weights_runs(monkeypatch, agent, store, seeded):

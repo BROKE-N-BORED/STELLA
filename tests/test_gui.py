@@ -869,11 +869,14 @@ def test_start_training_without_deps_logs_hint(window, monkeypatch):
     warnings = []
     monkeypatch.setattr(window, "_warn", warnings.append)
     window.start_training()
-    assert "install-training.sh" in window.train_log.toPlainText()
+    assert "Training is not set up on this PC yet" in (
+        window.train_log.toPlainText()
+    )
     # T49: the hint also shows as a dialog, not just in the log.
     assert warnings
-    assert "install-training.sh" in warnings[0]
-    assert "torch" in warnings[0]
+    assert "Training is not set up on this PC yet" in warnings[0]
+    # v0.35.0 (N12): no package names in the message.
+    assert "torch" not in warnings[0]
     assert window._train_worker is None
 
 
@@ -1106,11 +1109,14 @@ def test_start_sleep_without_deps_logs_hint(window, monkeypatch):
     warnings = []
     monkeypatch.setattr(window, "_warn", warnings.append)
     window.start_sleep()
-    assert "install-training.sh" in window.train_log.toPlainText()
+    assert "Training is not set up on this PC yet" in (
+        window.train_log.toPlainText()
+    )
     # T49: the hint also shows as a dialog, not just in the log.
     assert warnings
-    assert "install-training.sh" in warnings[0]
-    assert "torch" in warnings[0]
+    assert "Training is not set up on this PC yet" in warnings[0]
+    # v0.35.0 (N12): no package names in the message.
+    assert "torch" not in warnings[0]
     assert window._sleep_worker is None
 
 
@@ -1152,9 +1158,16 @@ def test_start_download_no_hub_warns(window, monkeypatch, tmp_path):
     window.set_session("lfm3-hf", "tool-calls")
     window.start_download()
     assert warnings
-    assert "install-training.sh" in warnings[0]
+    assert "Training is not set up on this PC yet" in warnings[0]
     # R13: the hint names the click path first — no terminal needed.
     assert "Install training" in warnings[0]
+    # v0.35.0: both click directions and the size note, in plain
+    # words - no Train panel, no terminal line, no package names.
+    assert "main screen" in warnings[0]
+    assert "Install Stella Training" in warnings[0]
+    assert "about 2 GB" in warnings[0]
+    for banned in ("Train panel", "Terminal", "install-training"):
+        assert banned not in warnings[0], banned
 
 
 def test_start_training_offers_download_when_weights_missing(
@@ -2689,8 +2702,10 @@ def test_go_with_no_project_asks_for_name_inline(
     # The sample is set, so Go pressed on: training starts, and
     # the sandbox has no training packages, so it logs the hint
     # and warns (T49) instead of starting.
-    assert "install-training.sh" in window.train_log.toPlainText()
-    assert warned and "install-training.sh" in warned[0]
+    assert "Training is not set up on this PC yet" in (
+        window.train_log.toPlainText()
+    )
+    assert warned and "Training is not set up on this PC yet" in warned[0]
 
 
 def test_go_requant_runs(window, monkeypatch, qapp):
@@ -3018,8 +3033,10 @@ def test_checklist_run_tiny_creates_project_and_starts(
     data = store.get_project("lfm3-tool", "first-steps")
     assert data["dataset_ref"] == "sample-tool-calls.jsonl"
     assert win._current_project == "first-steps"
-    assert "install-training.sh" in win.train_log.toPlainText()
-    assert warned and "install-training.sh" in warned[0]
+    assert "Training is not set up on this PC yet" in (
+        win.train_log.toPlainText()
+    )
+    assert warned and "Training is not set up on this PC yet" in warned[0]
     win.close()
 
 
@@ -5757,7 +5774,10 @@ def _probe_result(mode="gate", rising=True):
         "before": before, "after": after,
         "delta": 0.5 if rising else 0.0,
         "timestamp": "2026-11-14T00:00:00+00:00",
-        "base_ref": "test/tiny-model",
+        # v0.35.0 (N5): the saved result must name the base it
+        # measured - the seeded profile's base is its tag,
+        # lfm3:1.7b, which is what a real probe run records.
+        "base_ref": "lfm3:1.7b",
         "adapter": "/tmp/fake/adapter",
         "max_new_tokens": 64,
         "prompts_version": 2,
